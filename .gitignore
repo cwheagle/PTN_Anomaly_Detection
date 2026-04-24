@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
+# Data & Models (보통 크기가 커서 제외하지만, 필요시 추가 가능)
+data/*.csv
+models/*.pth
+models/*.joblib
+models/*.json
+
+# Logs
+logs/
+*.log
+
+# IDEs
+.vscode/
+.idea/
