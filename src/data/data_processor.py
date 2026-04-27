@@ -9,9 +9,10 @@ class DataProcessor:
     def __init__(self):
         self.scaler = MinMaxScaler()
         self.window_size = MODEL_CONFIG['window_size']
+        # 실제 DB 지표에 맞춘 피처 리스트
         self.feature_cols = [
-            'tx_bps', 'rx_bps', 'tx_pps', 'rx_pps', 
-            'tx_error', 'rx_error', 'tx_power', 'rx_power'
+            'tx_packet', 'rx_packet', 'error_packet', 
+            'tx_avg_power', 'rx_avg_power'
         ]
 
     def save_scaler(self, path=None):
@@ -41,18 +42,28 @@ class DataProcessor:
                 df[col] = 0
 
         # 2. 시간 데이터 변환 및 정렬
-        df['collect_time'] = pd.to_datetime(df['collect_time'])
-        df = df.sort_values(['equipment_id', 'port_id', 'collect_time'])
+        df['occur_date'] = pd.to_datetime(df['occur_date'])
+        df = df.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
 
         # 3. 비정상적인 값 처리 (Clipping)
-        for col in self.feature_cols:
-            if col in df.columns:
-                df[col] = df[col].clip(lower=0)
+        packet_cols = ['tx_packet', 'rx_packet', 'error_packet']
+        for col in packet_cols:
+            df[col] = df[col].clip(lower=0)
+            
+        power_cols = ['tx_avg_power', 'rx_avg_power']
+        for col in power_cols:
+            # None/NaN 처리 전 임시 Clipping
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            df[col] = df[col].clip(lower=-100, upper=20)
 
-        # 4. 결측치 처리 (선형 보간 후 남은 결측치는 0으로 채움)
-        df[self.feature_cols] = df.groupby(['equipment_id', 'port_id'])[self.feature_cols].transform(
-            lambda x: x.interpolate().fillna(0)
-        )
+        # 4. 결측치 처리 (그룹별 선형 보간)
+        # ip_addr, cid, lid를 그룹화 키로 사용
+        group_cols = ['ip_addr', 'cid', 'lid']
+        for _, group in df.groupby(group_cols):
+            df.loc[group.index, self.feature_cols] = group[self.feature_cols].interpolate()
+        
+        df[packet_cols] = df[packet_cols].fillna(0)
+        df[power_cols] = df[power_cols].fillna(-40)
 
         return df
 
@@ -91,13 +102,13 @@ class DataProcessor:
         
         grouped_results = {}
         
-        # 장비별, 포트별로 그룹화
-        for (equip_id, port_id), group in df_scaled.groupby(['equipment_id', 'port_id']):
+        # ip_addr, cid, lid별로 그룹화
+        for (ip_addr, cid, lid), group in df_scaled.groupby(['ip_addr', 'cid', 'lid']):
             if len(group) < self.window_size:
                 continue
             
             # 시간 간격 체크: 이전 행과의 시간 차이가 30분 이상이면 데이터가 끊긴 것으로 간주
-            time_diffs = group['collect_time'].diff().dt.total_seconds() / 60
+            time_diffs = group['occur_date'].diff().dt.total_seconds() / 60
             group_data = group[self.feature_cols].values
             
             sequences = []
@@ -109,6 +120,6 @@ class DataProcessor:
                 sequences.append(group_data[i : i + self.window_size])
             
             if sequences:
-                grouped_results[(equip_id, port_id)] = np.array(sequences)
+                grouped_results[(ip_addr, cid, lid)] = np.array(sequences)
             
         return grouped_results, df_clean

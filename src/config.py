@@ -3,15 +3,15 @@ import os
 # Database Configuration
 DB_CONFIG = {
     "host": "localhost",
-    "user": "your_username",
-    "password": "your_password",
-    "database": "ptn_ems_db",
+    "user": "root",
+    "password": "root",
+    "database": "cowptn",
     "port": 3306
 }
 
 # Model Configuration
 MODEL_CONFIG = {
-    "input_dim": 8,       # BPS(tx/rx), PPS(tx/rx), Error(tx/rx), Power(tx/rx) 등
+    "input_dim": 5,       # tx_packet, rx_packet, error_packet, tx_power, rx_power
     "hidden_dim": 32,
     "latent_dim": 16,
     "num_layers": 2,
@@ -20,6 +20,12 @@ MODEL_CONFIG = {
     "learning_rate": 0.001,
     "epochs": 100,
     "threshold_percentile": 99  # 이상 탐지 임계치 (상위 1% 오차)
+}
+
+# Signal Types (Mpu_str.h 기준)
+SIGNAL_TYPES = {
+    "ETH": 6,
+    "OPTIC": 44
 }
 
 # Path Configuration

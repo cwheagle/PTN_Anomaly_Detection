@@ -12,7 +12,7 @@ def test_manual_run_cycle():
 
     # 1. 학습
     trainer = Trainer()
-    trainer.config['epochs'] = 100  # 제대로 학습
+    trainer.config['epochs'] = 10  # 빠른 테스트를 위해 축소
     trainer.train("data/train_data.csv")
     
     # 2. 추론
@@ -29,7 +29,7 @@ def test_manual_run_cycle():
         
         if not anomalies.empty:
             print("\n[Detected Anomalies (Top 10)]")
-            cols = ['collect_time', 'equipment_id', 'port_id', 'anomaly_score', 'anomaly_reason']
+            cols = ['occur_date', 'ip_addr', 'cid', 'lid', 'anomaly_score', 'anomaly_reason']
             print(anomalies[cols].sort_values('anomaly_score', ascending=False).head(10))
     
     print("\n" + "="*50)

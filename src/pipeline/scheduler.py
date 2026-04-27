@@ -13,12 +13,17 @@ class PTNAnomalyScheduler:
 
     def run_inference_job(self):
         """15분마다 실행될 핵심 추론 작업입니다."""
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"\n[{now}] Starting anomaly detection job...")
+        from datetime import datetime, timedelta
+        
+        now_dt = datetime.now()
+        now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+        print(f"\n[{now_str}] Starting anomaly detection job...")
         
         try:
             # 1. 데이터 가져오기 (충분한 시퀀스 확보를 위해 최근 3시간 데이터를 가져옴)
-            df = self.db_connector.fetch_performance_data(minutes=180) 
+            start_time = (now_dt - timedelta(minutes=180)).strftime('%Y-%m-%d %H:%M:%S')
+            end_time = now_str
+            df = self.db_connector.fetch_real_data(start_time, end_time) 
             
             if df is None or df.empty:
                 print("No data fetched from DB. Skipping this cycle.")
@@ -36,15 +41,13 @@ class PTNAnomalyScheduler:
                 
                 if not anomalies.empty:
                     print("--- ANOMALY DETECTED ---")
-                    print(anomalies[['collect_time', 'equipment_id', 'port_id', 'anomaly_score']].head())
+                    cols = ['occur_date', 'ip_addr', 'cid', 'lid', 'anomaly_score']
+                    print(anomalies[cols].head())
             else:
                 print("Not enough data to perform inference (check window size).")
                 
         except Exception as e:
             print(f"Error during scheduled job: {e}")
-        finally:
-            # 작업 끝날 때마다 연결 해제 (스케줄러는 계속 돌기 때문)
-            self.db_connector.disconnect()
 
     def start(self):
         """스케줄러를 시작합니다."""

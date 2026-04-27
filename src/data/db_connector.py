@@ -8,9 +8,9 @@ class DBConnector:
     def __init__(self):
         self.config = DB_CONFIG
         self.pool = None
-        self._initialize_pool()
+        self.initialize_pool()
 
-    def _initialize_pool(self):
+    def initialize_pool(self):
         """MySQL Connection Pool을 초기화합니다."""
         try:
             self.pool = pooling.MySQLConnectionPool(
@@ -22,7 +22,6 @@ class DBConnector:
                 database=self.config['database'],
                 port=self.config['port']
             )
-            print("Connection pool initialized.")
         except Error as e:
             print(f"Failed to initialize connection pool: {e}")
 
@@ -38,70 +37,106 @@ class DBConnector:
                 time.sleep(1)
         return None
 
-    def fetch_performance_data(self, minutes=180):
-        """최근 n분 동안의 성능 데이터를 조회합니다."""
-        conn = self.get_connection()
-        if not conn:
-            return None
-
-        query = f"""
-            SELECT 
-                collect_time, equipment_id, port_id,
-                tx_error, rx_error, tx_bps, rx_bps, tx_pps, rx_pps, tx_power, rx_power
-            FROM performance_metrics
-            WHERE collect_time >= NOW() - INTERVAL {minutes} MINUTE
-            ORDER BY equipment_id, port_id, collect_time ASC
-        """
-        
+    def fetch_table_data(self, conn, table_name, query):
+        """테이블 존재 여부 확인 후 데이터를 조회합니다."""
+        cursor = conn.cursor()
         try:
-            # pd.read_sql은 커넥션 객체를 직접 받음
-            df = pd.read_sql(query, conn)
-            return df
+            cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+            if cursor.fetchone():
+                return pd.read_sql(query, conn)
         except Exception as e:
-            print(f"Error fetching data: {e}")
-            return None
+            print(f"Query Error on {table_name}: {e}")
         finally:
-            if conn and conn.is_connected():
-                conn.close()
+            cursor.close()
+        return pd.DataFrame()
+
+    def fetch_real_data(self, start_time, end_time):
+        """
+        운영 DB에서 PM 및 광파워 데이터를 조회하고 병합합니다.
+        """
+        from src.config import SIGNAL_TYPES
+        hours = pd.date_range(start=start_time, end=end_time, freq='h')
+        all_dfs = []
+        conn = self.get_connection()
+        if not conn: return None
+
+        try:
+            for hr in hours:
+                suffix = hr.strftime("%Y_%m_%d_%H")
+                pm_table = f"cowptn_noti_pm_{suffix}"
+                opt_table = f"cowptn_noti_pm_optic_power_{suffix}"
+                
+                # 1. PM 데이터 조회
+                q_pm = f"""
+                    SELECT occur_date, ip_addr, cid, lid,
+                           bbe_in_error as error_packet, es as tx_packet, ses as rx_packet
+                    FROM {pm_table}
+                    WHERE signal_type = {SIGNAL_TYPES['ETH']}
+                      AND occur_date BETWEEN '{start_time}' AND '{end_time}'
+                """
+                df_pm = self.fetch_table_data(conn, pm_table, q_pm)
+
+                # 2. 광파워 데이터 조회
+                q_opt = f"""
+                    SELECT occur_date, ip_addr, cid, lid, tx_avg_power, rx_avg_power
+                    FROM {opt_table}
+                    WHERE occur_date BETWEEN '{start_time}' AND '{end_time}'
+                """
+                df_opt = self.fetch_table_data(conn, opt_table, q_opt)
+
+                # 3. 데이터 병합 (Outer Merge)
+                if df_pm.empty and df_opt.empty:
+                    continue
+                
+                # 시간 정규화 및 병합
+                if not df_pm.empty:
+                    df_pm['occur_date_key'] = pd.to_datetime(df_pm['occur_date']).dt.round('1min')
+                if not df_opt.empty:
+                    df_opt['occur_date_key'] = pd.to_datetime(df_opt['occur_date']).dt.round('1min')
+
+                if not df_pm.empty and not df_opt.empty:
+                    df_merged = pd.merge(
+                        df_pm, df_opt, on=['occur_date_key', 'ip_addr', 'cid', 'lid'], 
+                        how='outer', suffixes=('', '_opt_raw')
+                    )
+                    df_merged['occur_date'] = df_merged['occur_date_key']
+                    df_merged = df_merged.drop(columns=['occur_date_key', 'occur_date_opt_raw'], errors='ignore')
+                else:
+                    df_merged = df_pm if not df_pm.empty else df_opt
+                    df_merged['occur_date'] = df_merged['occur_date_key']
+                    df_merged = df_merged.drop(columns=['occur_date_key'], errors='ignore')
+
+                all_dfs.append(df_merged)
+
+            if not all_dfs: return None
+            return pd.concat(all_dfs, ignore_index=True).sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+        finally:
+            if conn and conn.is_connected(): conn.close()
 
     def save_anomaly_results(self, df_results):
-        """이상 탐지 결과(RCA 포함)를 DB에 저장합니다."""
-        if df_results is None or df_results.empty:
-            return
-
+        """탐지 결과를 DB에 저장합니다."""
+        if df_results is None or df_results.empty: return
         conn = self.get_connection()
-        if not conn:
-            return
-
+        if not conn: return
         cursor = conn.cursor()
-        # anomaly_reason 칼럼이 추가된 쿼리
+        
         insert_query = """
             INSERT INTO anomaly_results (
-                collect_time, equipment_id, port_id, 
+                occur_date, ip_addr, cid, lid, 
                 anomaly_score, threshold, is_anomaly, anomaly_reason, detect_time
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
         """
-        
         try:
-            data_to_insert = []
-            for _, row in df_results.iterrows():
-                data_to_insert.append((
-                    row['collect_time'],
-                    row['equipment_id'],
-                    row['port_id'],
-                    float(row['anomaly_score']),
-                    float(row['threshold']),
-                    int(row['is_anomaly']),
-                    row.get('anomaly_reason', '') # RCA 결과 포함
-                ))
-            
-            cursor.executemany(insert_query, data_to_insert)
+            data = [(row['occur_date'], row['ip_addr'], row['cid'], row['lid'], 
+                     float(row['anomaly_score']), float(row['threshold']), 
+                     int(row['is_anomaly']), row.get('anomaly_reason', '')) 
+                    for _, row in df_results.iterrows()]
+            cursor.executemany(insert_query, data)
             conn.commit()
-            print(f"Successfully saved {len(data_to_insert)} results to DB.")
+            print(f"Successfully saved {len(data)} results to DB.")
         except Error as e:
             print(f"Error saving results: {e}")
             conn.rollback()
         finally:
             cursor.close()
-            if conn and conn.is_connected():
-                conn.close()
+            if conn and conn.is_connected(): conn.close()

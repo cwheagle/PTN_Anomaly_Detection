@@ -14,13 +14,14 @@ def test_run_inference_job_success():
         
         # 1. 데이터 추출 결과 Mock
         mock_df = pd.DataFrame({'test': range(20)})
-        mock_db.fetch_performance_data.return_value = mock_df
+        mock_db.fetch_real_data.return_value = mock_df
         
         # 2. 추론 결과 Mock
         mock_results = pd.DataFrame({
-            'collect_time': ['2026-04-22'],
-            'equipment_id': ['EQ001'],
-            'port_id': ['P1'],
+            'occur_date': ['2026-04-27 10:00:00'],
+            'ip_addr': ['192.168.1.1'],
+            'cid': [1],
+            'lid': [1],
             'anomaly_score': [0.5],
             'is_anomaly': [False]
         })
@@ -30,10 +31,9 @@ def test_run_inference_job_success():
         scheduler.run_inference_job()
         
         # 핵심 메서드들이 호출되었는지 확인
-        assert mock_db.fetch_performance_data.called
+        assert mock_db.fetch_real_data.called
         assert mock_detector.detect.called
         assert mock_db.save_anomaly_results.called
-        assert mock_db.disconnect.called
 
 def test_run_inference_job_no_data():
     """데이터가 없을 경우 스케줄러가 정상적으로 건너뛰는지 테스트"""
@@ -44,13 +44,12 @@ def test_run_inference_job_no_data():
         mock_detector = MockDetector.return_value
         
         # 데이터가 비어있는 경우
-        mock_db.fetch_performance_data.return_value = pd.DataFrame()
+        mock_db.fetch_real_data.return_value = pd.DataFrame()
         
         scheduler = PTNAnomalyScheduler()
         scheduler.run_inference_job()
         
         # 데이터가 없으므로 추론과 저장은 호출되지 않아야 함
-        assert mock_db.fetch_performance_data.called
+        assert mock_db.fetch_real_data.called
         assert not mock_detector.detect.called
         assert not mock_db.save_anomaly_results.called
-        assert mock_db.disconnect.called
