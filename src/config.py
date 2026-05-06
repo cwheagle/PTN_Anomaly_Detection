@@ -38,3 +38,4 @@ PATHS = {
 
 # Scheduler Configuration
 INTERVAL_MINUTES = 15
+RETENTION_DAYS = 30  # 탐지 결과 보관 주기 (일 단위)

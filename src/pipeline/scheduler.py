@@ -3,7 +3,7 @@ from datetime import datetime
 import pandas as pd
 from src.data.db_connector import DBConnector
 from src.pipeline.inference import AnomalyDetector
-from src.config import INTERVAL_MINUTES
+from src.config import INTERVAL_MINUTES, RETENTION_DAYS
 
 class PTNAnomalyScheduler:
     def __init__(self):
@@ -38,6 +38,9 @@ class PTNAnomalyScheduler:
                 
                 # 3. 결과 DB 저장
                 self.db_connector.save_anomaly_results(results)
+                
+                # 4. 오래된 데이터 정리 (Retention Policy)
+                self.db_connector.delete_old_results(RETENTION_DAYS)
                 
                 if not anomalies.empty:
                     print("--- ANOMALY DETECTED ---")

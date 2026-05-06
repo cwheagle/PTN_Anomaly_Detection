@@ -9,6 +9,38 @@ class DBConnector:
         self.config = DB_CONFIG
         self.pool = None
         self.initialize_pool()
+        self._ensure_anomaly_table()
+
+    def _ensure_anomaly_table(self):
+        """탐지 결과 저장용 테이블이 없으면 생성합니다."""
+        conn = self.get_connection()
+        if not conn: return
+        cursor = conn.cursor()
+        
+        create_query = """
+            CREATE TABLE IF NOT EXISTS anomaly_results (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                occur_date DATETIME NOT NULL,
+                ip_addr VARCHAR(50) NOT NULL,
+                cid INT,
+                lid INT,
+                anomaly_score FLOAT,
+                threshold FLOAT,
+                is_anomaly TINYINT(1),
+                anomaly_reason TEXT,
+                detect_time DATETIME,
+                INDEX idx_occur_date (occur_date),
+                INDEX idx_is_anomaly (is_anomaly)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+        try:
+            cursor.execute(create_query)
+            conn.commit()
+        except Error as e:
+            print(f"Error creating table: {e}")
+        finally:
+            cursor.close()
+            if conn and conn.is_connected(): conn.close()
 
     def initialize_pool(self):
         """MySQL Connection Pool을 초기화합니다."""
@@ -136,6 +168,25 @@ class DBConnector:
             print(f"Successfully saved {len(data)} results to DB.")
         except Error as e:
             print(f"Error saving results: {e}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            if conn and conn.is_connected(): conn.close()
+
+    def delete_old_results(self, days):
+        """설정된 보관 주기가 지난 데이터를 삭제합니다."""
+        conn = self.get_connection()
+        if not conn: return
+        cursor = conn.cursor()
+        
+        delete_query = f"DELETE FROM anomaly_results WHERE occur_date < DATE_SUB(NOW(), INTERVAL {days} DAY)"
+        try:
+            cursor.execute(delete_query)
+            conn.commit()
+            if cursor.rowcount > 0:
+                print(f"Cleaned up {cursor.rowcount} old anomaly results (older than {days} days).")
+        except Error as e:
+            print(f"Error during cleanup: {e}")
             conn.rollback()
         finally:
             cursor.close()
