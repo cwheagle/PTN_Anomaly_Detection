@@ -5,123 +5,98 @@ import os
 import json
 from src.models.model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
-from src.config import MODEL_CONFIG, PATHS
+from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS
 
 class AnomalyDetector:
-    def __init__(self, model_path=None):
+    def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.config = MODEL_CONFIG
-        self.model = LSTMAutoencoder(self.config).to(self.device)
-        self.global_threshold = None
-        
-        # 모델 로드
-        path = model_path or PATHS['model_save_path']
-        try:
-            if os.path.exists(path):
-                self.model.load_state_dict(torch.load(path, map_location=self.device))
-                self.model.eval()
-                print(f"Model loaded from {path}")
-            else:
-                print(f"Warning: Model file not found at {path}")
-        except Exception as e:
-            print(f"Failed to load model: {e}")
-            
-        self.processor = DataProcessor()
-        self.processor.load_scaler()
-        self.load_threshold()
+        self.tracks = {} # {f_type: {'model': m, 'proc': p, 'th': t}}
 
-    def load_threshold(self):
-        """저장된 임계치 정보를 로드합니다."""
-        path = PATHS.get('threshold_path', 'models/threshold.json')
-        if os.path.exists(path):
-            with open(path, 'r') as f:
-                data = json.load(f)
-                self.global_threshold = data['threshold']
-                print(f"Global threshold loaded: {self.global_threshold:.6f}")
-        else:
-            print("Global threshold not found. Will use dynamic thresholding.")
+        for ft in ['traffic', 'optical']:
+            cfg = MODEL_CONFIG.copy()
+            cfg['input_dim'] = len(FEATURE_GROUPS[ft])
+            model = LSTMAutoencoder(cfg).to(self.device)
+            
+            p = PATHS[ft]
+            if os.path.exists(p['model']):
+                model.load_state_dict(torch.load(p['model'], map_location=self.device))
+                model.eval()
+                
+                proc = DataProcessor(ft)
+                proc.load_scaler(p['scaler'])
+                
+                with open(p['threshold'], 'r') as f:
+                    th = json.load(f)['threshold']
+                
+                self.tracks[ft] = {'model': model, 'proc': proc, 'th': th}
 
-    def detect(self, df):
-        """
-        입력 데이터프레임에 대해 장비/포트별로 이상 탐지를 수행합니다.
-        """
-        # 1. 데이터 준비 (그룹별 시퀀스 생성)
-        grouped_sequences, df_clean = self.processor.prepare_inference_data(df)
+    def _analyze_track(self, df, ft):
+        """특정 트랙(Traffic/Optical)의 데이터를 분석하여 이상 점수 산출"""
+        if ft not in self.tracks: return None
         
-        if not grouped_sequences or df_clean is None:
-            return None
-            
-        all_results = []
-        feature_names = self.processor.feature_cols
+        track = self.tracks[ft]
+        df_clean = track['proc'].preprocess(df, is_train=False)
+        if df_clean is None: return None
         
-        # 2. 그룹별(IP/CID/LID) 추론 수행
-        for (ip, cid, lid), sequences in grouped_sequences.items():
-            input_tensor = torch.from_numpy(sequences).float().to(self.device)
-            
+        grouped_seqs = track['proc'].create_sequences(df_clean, is_train=False)
+        if not grouped_seqs: return None
+        
+        all_res = []
+        for (ip, cid, lid), seqs in grouped_seqs.items():
+            inputs = torch.from_numpy(seqs).float().to(self.device)
             with torch.no_grad():
-                reconstructed = self.model(input_tensor)
-                # 시퀀스의 마지막 시점(t)에 대한 복원 오차 계산
-                diff = (input_tensor[:, -1, :] - reconstructed[:, -1, :]) ** 2
-                feature_mse = diff.cpu().numpy()
-                mse = np.mean(feature_mse, axis=1)
+                outputs = track['model'](inputs)
+                diff = (inputs[:, -1, :] - outputs[:, -1, :]) ** 2
+                mse = np.mean(diff.cpu().numpy(), axis=1)
             
-            # 해당 그룹 데이터 필터링
-            group_df = df_clean[
-                (df_clean['ip_addr'] == ip) & 
-                (df_clean['cid'] == cid) & 
-                (df_clean['lid'] == lid)
-            ].copy()
-            
-            # 시간 단절 대응 인덱스 매핑
-            valid_indices = []
+            # 유효 시간 인덱스 매핑
+            group_df = df_clean[(df_clean['ip_addr']==ip)&(df_clean['cid']==cid)&(df_clean['lid']==lid)]
             time_diffs = group_df['occur_date'].diff().dt.total_seconds() / 60
-            for i in range(len(group_df) - self.config['window_size'] + 1):
-                window_diffs = time_diffs.iloc[i+1 : i + self.config['window_size']]
-                if not (window_diffs > 30).any():
-                    valid_indices.append(group_df.index[i + self.config['window_size'] - 1])
+            valid_indices = []
+            for i in range(len(group_df) - MODEL_CONFIG['window_size'] + 1):
+                if not (time_diffs.iloc[i+1 : i+MODEL_CONFIG['window_size']] > 20).any():
+                    valid_indices.append(group_df.index[i + MODEL_CONFIG['window_size'] - 1])
             
-            if not valid_indices or len(valid_indices) != len(mse):
-                continue
-                
-            df_res = group_df.loc[valid_indices].copy()
-            
-            # 임계치 적용
-            threshold = self.global_threshold if self.global_threshold is not None else np.percentile(mse, 99.5)
-            
-            df_res['anomaly_score'] = mse
-            df_res['is_anomaly'] = mse > threshold
-            df_res['threshold'] = threshold
-            
-            # 원인 분석 (RCA)
-            df_res['anomaly_reason'] = self.analyze_root_cause(feature_mse, feature_names)
-            all_results.append(df_res)
-            
-        if not all_results:
-            return None
-            
-        return pd.concat(all_results).sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
-
-    def analyze_root_cause(self, feature_mse, feature_names):
-        """복원 오차 기여도 기반으로 이상 원인을 분석합니다."""
-        total_error = np.sum(feature_mse, axis=1, keepdims=True)
-        total_error = np.where(total_error == 0, 1e-9, total_error)
-        contribution = (feature_mse / total_error) * 100
+            if len(valid_indices) == len(mse):
+                res = group_df.loc[valid_indices].copy()
+                res[f'{ft}_score'] = mse
+                res[f'is_{ft}_anomaly'] = mse > track['th']
+                all_res.append(res[['occur_date', 'ip_addr', 'cid', 'lid', f'{ft}_score', f'is_{ft}_anomaly']])
         
-        reasons = []
-        for i in range(len(feature_mse)):
-            main_causes = []
-            # 기여도가 높은 순으로 정렬
-            sorted_idx = np.argsort(contribution[i])[::-1]
+        return pd.concat(all_res) if all_res else None
+
+    def detect(self, df_traffic=None, df_optical=None):
+        """앙상블 분석 통합 인터페이스"""
+        res_t = self._analyze_track(df_traffic, 'traffic') if df_traffic is not None else None
+        res_o = self._analyze_track(df_optical, 'optical') if df_optical is not None else None
+        
+        if res_t is None and res_o is None: return None
+        
+        # 병합
+        if res_t is not None and res_o is not None:
+            final = pd.merge(res_t, res_o, on=['occur_date', 'ip_addr', 'cid', 'lid'], how='outer')
+        else:
+            final = res_t if res_t is not None else res_o
             
-            for idx in sorted_idx:
-                if contribution[i, idx] >= 15.0: # 15% 이상 기여 시 원인으로 포함
-                    main_causes.append(f"{feature_names[idx]}({contribution[i, idx]:.1f}%)")
-                if len(main_causes) >= 2: # 최대 2개까지 표시
-                    break
+        # NaN 값 처리 (데이터가 없는 트랙은 정상으로 간주)
+        for col in ['is_traffic_anomaly', 'is_optical_anomaly']:
+            if col in final.columns:
+                final[col] = final[col].fillna(False)
+        for col in ['traffic_score', 'optical_score']:
+            if col in final.columns:
+                final[col] = final[col].fillna(0.0)
+
+        # 통합 이상 판정
+        final['is_anomaly'] = (final.get('is_traffic_anomaly', False) == True) | \
+                             (final.get('is_optical_anomaly', False) == True)
+        
+        def get_reason(row):
+            reasons = []
+            if row.get('is_traffic_anomaly') is True: reasons.append("TRAFFIC")
+            if row.get('is_optical_anomaly') is True: reasons.append("OPTICAL")
+            return " + ".join(reasons) if reasons else "NORMAL"
             
-            if not main_causes:
-                top_idx = sorted_idx[0]
-                main_causes.append(f"{feature_names[top_idx]}({contribution[i, top_idx]:.1f}%)")
-                
-            reasons.append(", ".join(main_causes))
-        return reasons
+        final['anomaly_reason'] = final.apply(get_reason, axis=1)
+        final['anomaly_score'] = final[['traffic_score', 'optical_score']].max(axis=1)
+        
+        return final.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])

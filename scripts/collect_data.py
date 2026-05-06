@@ -8,59 +8,46 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.db_connector import DBConnector
 
-def collect_real_data(train_days=30, test_days=7):
-    """
-    운영 DB에서 실제 데이터를 수집하여 학습/테스트용 CSV를 생성합니다.
-    """
-    print("="*50)
-    print("PTN REAL DATA COLLECTION UTILITY")
-    print("="*50)
+def run_collection(days=37):
+    """트래픽과 광파워 데이터를 각각 독립적으로 수집하여 CSV 저장"""
+    print("="*60)
+    print("PTN DATA COLLECTION SYSTEM")
+    print("="*60)
     
-    connector = DBConnector()
+    db = DBConnector()
     now_dt = datetime.now()
+    start_dt = now_dt - timedelta(days=days)
+    split_dt = now_dt - timedelta(days=7)
     
-    # 기간 설정
-    test_start_dt = now_dt - timedelta(days=test_days)
-    train_start_dt = test_start_dt - timedelta(days=train_days)
+    start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+    end_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    split_str = split_dt.strftime('%Y-%m-%d')
     
     os.makedirs("data", exist_ok=True)
     
-    # 1. 학습 데이터 수집
-    print(f"[*] Step 1: Fetching training data ({train_days} days)...")
-    print(f"    Range: {train_start_dt.strftime('%Y-%m-%d')} ~ {test_start_dt.strftime('%Y-%m-%d')}")
-    
-    df_train = connector.fetch_real_data(
-        train_start_dt.strftime('%Y-%m-%d %H:%M:%S'),
-        test_start_dt.strftime('%Y-%m-%d %H:%M:%S')
-    )
-    
-    if df_train is not None and not df_train.empty:
-        train_path = "data/train_data.csv"
-        df_train.to_csv(train_path, index=False)
-        print(f"    [SUCCESS] Saved to {train_path} ({len(df_train)} rows)")
-    else:
-        print("    [FAILURE] No training data found.")
+    # 1. 트래픽 수집
+    print(f"[*] Collecting Traffic data...")
+    df_t = db.fetch_traffic(start_str, end_str)
+    if df_t is not None:
+        train = df_t[df_t['occur_date'] < split_str]
+        test = df_t[df_t['occur_date'] >= split_str]
+        train.to_csv("data/traffic_train.csv", index=False)
+        test.to_csv("data/traffic_test.csv", index=False)
+        print(f"    [OK] Traffic: {len(train)} train / {len(test)} test")
 
-    # 2. 테스트 데이터 수집
-    print(f"\n[*] Step 2: Fetching test data ({test_days} days)...")
-    print(f"    Range: {test_start_dt.strftime('%Y-%m-%d')} ~ {now_dt.strftime('%Y-%m-%d')}")
+    # 2. 광파워 수집
+    print(f"\n[*] Collecting Optical data...")
+    df_o = db.fetch_optical(start_str, end_str)
+    if df_o is not None:
+        train = df_o[df_o['occur_date'] < split_str]
+        test = df_o[df_o['occur_date'] >= split_str]
+        train.to_csv("data/optical_train.csv", index=False)
+        test.to_csv("data/optical_test.csv", index=False)
+        print(f"    [OK] Optical: {len(train)} train / {len(test)} test")
     
-    df_test = connector.fetch_real_data(
-        test_start_dt.strftime('%Y-%m-%d %H:%M:%S'),
-        now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    )
-    
-    if df_test is not None and not df_test.empty:
-        test_path = "data/test_data.csv"
-        df_test.to_csv(test_path, index=False)
-        print(f"    [SUCCESS] Saved to {test_path} ({len(df_test)} rows)")
-    else:
-        print("    [FAILURE] No test data found.")
-    
-    print("\n" + "="*50)
+    print("\n" + "="*60)
     print("COLLECTION COMPLETE")
-    print("="*50)
+    print("="*60)
 
 if __name__ == "__main__":
-    # 인자가 있으면 기간을 조절할 수 있게 확장 가능
-    collect_real_data()
+    run_collection()
