@@ -2,7 +2,7 @@ import os
 
 # Database Configuration
 DB_CONFIG = {
-    "host": "localhost",
+    "host": "192.168.99.253",
     "user": "root",
     "password": "root",
     "database": "cowptn",

@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 import joblib
 import os
 from src.config import MODEL_CONFIG, FEATURE_GROUPS
@@ -10,24 +10,42 @@ class DataProcessor:
         self.window_size = MODEL_CONFIG['window_size']
         self.feature_type = feature_type
         self.feature_cols = FEATURE_GROUPS[feature_type]
-        self.scaler = StandardScaler()
+        # 이상치에 강한 RobustScaler 사용
+        self.scaler = RobustScaler()
 
     def save_scaler(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump(self.scaler, path)
 
     def load_scaler(self, path):
+        """저장된 스케일러 로드"""
         if os.path.exists(path):
-            self.scaler = joblib.load(path)
-            return True
+            try:
+                self.scaler = joblib.load(path)
+                return True
+            except Exception as e:
+                print(f" [!] Error loading scaler: {e}")
+                return False
         return False
 
+    def _clean_and_transform(self, df):
+        """특성별 맞춤형 전처리 (Traffic: Log, Optical: Linear)"""
+        if df is None or df.empty: return df
+        df = df.copy()
+        
+        if self.feature_type == 'traffic':
+            for col in self.feature_cols:
+                # 음수 방지 및 로그 변환 (10^19 등 거대 수치는 학습 시 필터링됨)
+                df[col] = np.log1p(df[col].clip(lower=0))
+        # Optical은 이미 dBm이므로 별도 변환 없이 그대로 반환
+        return df
+
     def _filter_low_quality(self, df):
-        """결측치 및 무의미하거나 오염된 포트 데이터 필터링"""
+        """결측치 및 무의미하거나 오염된 포트 데이터 필터링 (원본 수치 기준)"""
         if df is None or df.empty: return df
         valid_indices = []
         for _, group in df.groupby(['ip_addr', 'cid', 'lid']):
-            # 1. 최소 데이터 개수 체크 (학습을 위해 최소 2개 윈도우 분량은 필요)
+            # 1. 최소 데이터 개수 체크
             if len(group.dropna(subset=self.feature_cols)) < self.window_size * 2:
                 continue
 
@@ -36,9 +54,11 @@ class DataProcessor:
                 if (group[self.feature_cols] <= -39.9).all().all():
                     continue
 
-            # 3. 트래픽 오염 데이터 체크 (에러 패킷이 너무 많은 시점이 포함된 포트)
+            # 3. 트래픽 오염 데이터 체크 (원본 수치 기준)
             if self.feature_type == 'traffic':
-                if group['error_packet'].max() > 1000: # 1,000개 이상 에러는 장애로 간주
+                # 에러 패킷 1,000개 초과 또는 트래픽 10억(1e9) 초과 시 포트 폐기
+                if (group['error_packet'] > 1000).any() or \
+                   (group[['tx_packet', 'rx_packet']] > 1e9).any().any():
                     continue
 
             valid_indices.extend(group.index)
@@ -50,20 +70,30 @@ class DataProcessor:
 
         df = df.copy()
         df['occur_date'] = pd.to_datetime(df['occur_date'])
-
-        # 1. 시간 정규화: 가장 가까운 15분 단위로 반올림
         df['occur_date'] = df['occur_date'].dt.round('15min')
 
-        # 2. 중복 제거 및 정렬
+        # 중복 제거 및 정렬
         df = df.drop_duplicates(subset=['ip_addr', 'cid', 'lid', 'occur_date'], keep='last')
         df = df.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
 
-        # 3. 시간축 재구성 (누락된 행 강제 생성 - 단일 결측치 보간용)
+        # 숫자형 변환 (필터링 및 변환 전 필수)
+        for col in self.feature_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 1. 학습 시 품질 필터링 (원본 수치 기준)
+        if is_train:
+            df = self._filter_low_quality(df)
+            if df is None or df.empty: return None
+
+        # 2. 특성별 맞춤형 변환 적용 (클리핑 및 로그)
+        # 필터링을 통과한 데이터에 대해 변환 수행
+        df = self._clean_and_transform(df)
+
+        # 3. 시간축 재구성 (누락된 행 강제 생성)
         reindexed_dfs = []
         for (ip, cid, lid), group in df.groupby(['ip_addr', 'cid', 'lid']):
             orig_max = group['occur_date'].max()
             group = group.set_index('occur_date')
-            # 원본 데이터의 최대 시간(orig_max)까지만 인덱스 생성 (유령 데이터 방지)
             full_range = pd.date_range(start=group.index.min(), end=orig_max, freq='15min')
             group = group.reindex(full_range)
             group['ip_addr'], group['cid'], group['lid'] = ip, cid, lid
@@ -72,16 +102,7 @@ class DataProcessor:
         df = pd.concat(reindexed_dfs, ignore_index=True) if reindexed_dfs else df
         df = df.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
 
-        # 숫자형 변환 (필수)
-        for col in self.feature_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # 학습 시에만 엄격한 품질 필터링 적용
-        if is_train:
-            df = self._filter_low_quality(df)
-            if df is None or df.empty: return None
-
-        # 4. 결측치 처리 (15분 데이터 1개 선형 보간)
+        # 4. 결측치 보간 (최대 1개 연속 누락까지만)
         for _, group in df.groupby(['ip_addr', 'cid', 'lid']):
             if len(group) > 1:
                 df.loc[group.index, self.feature_cols] = group[self.feature_cols].interpolate(
