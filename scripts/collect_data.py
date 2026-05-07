@@ -29,6 +29,9 @@ def run_collection(days=37):
     print(f"[*] Collecting Traffic data...")
     df_t = db.fetch_traffic(start_str, end_str)
     if df_t is not None:
+        # 가독성을 위한 정렬 추가
+        df_t = df_t.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+        
         train = df_t[df_t['occur_date'] < split_str]
         test = df_t[df_t['occur_date'] >= split_str]
         train.to_csv("data/traffic_train.csv", index=False)
@@ -39,6 +42,9 @@ def run_collection(days=37):
     print(f"\n[*] Collecting Optical data...")
     df_o = db.fetch_optical(start_str, end_str)
     if df_o is not None:
+        # 가독성을 위한 정렬 추가
+        df_o = df_o.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+        
         train = df_o[df_o['occur_date'] < split_str]
         test = df_o[df_o['occur_date'] >= split_str]
         train.to_csv("data/optical_train.csv", index=False)

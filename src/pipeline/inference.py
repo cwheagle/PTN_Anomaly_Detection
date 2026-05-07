@@ -38,30 +38,23 @@ class AnomalyDetector:
         df_clean = track['proc'].preprocess(df, is_train=False)
         if df_clean is None: return None
         
-        grouped_seqs = track['proc'].create_sequences(df_clean, is_train=False)
-        if not grouped_seqs: return None
+        grouped_data = track['proc'].create_sequences(df_clean, is_train=False)
+        if not grouped_data: return None
         
         all_res = []
-        for (ip, cid, lid), seqs in grouped_seqs.items():
+        for (ip, cid, lid), (seqs, indices) in grouped_data.items():
             inputs = torch.from_numpy(seqs).float().to(self.device)
             with torch.no_grad():
                 outputs = track['model'](inputs)
+                # 마지막 시점의 오차만 계산 (추론 시점의 점수)
                 diff = (inputs[:, -1, :] - outputs[:, -1, :]) ** 2
                 mse = np.mean(diff.cpu().numpy(), axis=1)
             
-            # 유효 시간 인덱스 매핑
-            group_df = df_clean[(df_clean['ip_addr']==ip)&(df_clean['cid']==cid)&(df_clean['lid']==lid)]
-            time_diffs = group_df['occur_date'].diff().dt.total_seconds() / 60
-            valid_indices = []
-            for i in range(len(group_df) - MODEL_CONFIG['window_size'] + 1):
-                if not (time_diffs.iloc[i+1 : i+MODEL_CONFIG['window_size']] > 20).any():
-                    valid_indices.append(group_df.index[i + MODEL_CONFIG['window_size'] - 1])
-            
-            if len(valid_indices) == len(mse):
-                res = group_df.loc[valid_indices].copy()
-                res[f'{ft}_score'] = mse
-                res[f'is_{ft}_anomaly'] = mse > track['th']
-                all_res.append(res[['occur_date', 'ip_addr', 'cid', 'lid', f'{ft}_score', f'is_{ft}_anomaly']])
+            # 매핑된 인덱스를 사용하여 결과 데이터프레임 생성
+            res = df_clean.loc[indices].copy()
+            res[f'{ft}_score'] = mse
+            res[f'is_{ft}_anomaly'] = mse > track['th']
+            all_res.append(res[['occur_date', 'ip_addr', 'cid', 'lid', f'{ft}_score', f'is_{ft}_anomaly']])
         
         return pd.concat(all_res) if all_res else None
 

@@ -24,7 +24,7 @@ MODEL_CONFIG = {
     "batch_size": 32,
     "learning_rate": 0.001,
     "epochs": 100,
-    "threshold_percentile": 99.5  # 조금 더 보수적으로 상향 (상위 0.5%)
+    "threshold_percentile": 99.9  # 극도로 보수적으로 상향 (상위 0.1%)
 }
 
 # Signal Types
