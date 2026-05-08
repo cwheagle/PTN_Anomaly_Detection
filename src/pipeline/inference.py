@@ -74,6 +74,16 @@ class AnomalyDetector:
 
             res[f'{ft}_severity'] = res[f'{ft}_score'].apply(lambda x: calculate_severity(x, track['th']))
             
+            # [Phase 6] 추세 분석 (Slope): 포트별 점수 변화율 산출
+            # 여러 시점의 결과가 있을 경우 선형 회귀 기울기 계산
+            if len(res) >= 2:
+                y = res[f'{ft}_severity'].values
+                x = np.arange(len(y))
+                slope, _ = np.polyfit(x, y, 1)
+                res[f'{ft}_slope'] = slope
+            else:
+                res[f'{ft}_slope'] = 0.0
+
             # 상세 사유 진단 로직 (원본 수치 복원)
             def get_detailed_reason(row):
                 if not row[f'is_{ft}_anomaly']: return "NORMAL"
@@ -94,7 +104,7 @@ class AnomalyDetector:
             
             res[f'{ft}_reason'] = res.apply(get_detailed_reason, axis=1)
             all_res.append(res[['occur_date', 'ip_addr', 'cid', 'lid', 
-                               f'{ft}_score', f'{ft}_severity', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason']])
+                               f'{ft}_score', f'{ft}_severity', f'{ft}_slope', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason']])
         
         return pd.concat(all_res) if all_res else None
 
@@ -130,29 +140,44 @@ class AnomalyDetector:
             
         final['anomaly_reason'] = final.apply(merge_reasons, axis=1)
         
-        # 통합 점수, 심각도 및 임계치
+        # 통합 점수
         score_cols = [c for c in ['traffic_score', 'optical_score'] if c in final.columns]
         final['anomaly_score'] = final[score_cols].max(axis=1) if score_cols else 0.0
-        
+
+        # 통합 심각도
         sev_cols = [c for c in ['traffic_severity', 'optical_severity'] if c in final.columns]
         final['severity'] = final[sev_cols].max(axis=1) if sev_cols else 0.0
 
+        # 통합 기울기
+        slope_cols = [c for c in ['traffic_slope', 'optical_slope'] if c in final.columns]
+        final['slope'] = final[slope_cols].max(axis=1) if slope_cols else 0.0
+
+        # 통합 임계치
         th_cols = [c for c in ['traffic_threshold', 'optical_threshold'] if c in final.columns]
         final['threshold'] = final[th_cols].max(axis=1) if th_cols else 0.0
+
+        # 추세 라벨
+        def get_slope_label(slope):
+            th = SEVERITY_CONFIG.get('slope_threshold', 3.0)
+            if slope > th: return "RISING"
+            elif slope < -th: return "FALLING"
+            return "STABLE"
+        final['slope_label'] = final['slope'].apply(get_slope_label)
 
         # 경보 등급 및 라벨 추가
         alarm_data = final['severity'].apply(self._get_alarm_info)
         final['alarm_level'] = alarm_data.apply(lambda x: x[0])
         final['alarm_label'] = alarm_data.apply(lambda x: x[1])
 
-        # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 19개 컬럼으로 확장
+        # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 23개 컬럼으로 확장
         standard_cols = [
             'occur_date', 'ip_addr', 'cid', 'lid', 
-            'traffic_score', 'traffic_severity', 'traffic_threshold', 'is_traffic_anomaly',
-            'optical_score', 'optical_severity', 'optical_threshold', 'is_optical_anomaly',
-            'anomaly_score', 'severity', 'threshold', 'is_anomaly', 
+            'traffic_score', 'traffic_severity', 'traffic_slope', 'traffic_threshold', 'is_traffic_anomaly',
+            'optical_score', 'optical_severity', 'optical_slope', 'optical_threshold', 'is_optical_anomaly',
+            'anomaly_score', 'severity', 'slope', 'slope_label', 'threshold', 'is_anomaly', 
             'alarm_level', 'alarm_label', 'anomaly_reason'
         ]
+
 
         
         final_cols = [c for c in standard_cols if c in final.columns]

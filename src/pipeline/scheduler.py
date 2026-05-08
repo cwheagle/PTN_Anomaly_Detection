@@ -3,7 +3,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime, timedelta
 from src.data.db_connector import DBConnector
 from src.pipeline.inference import AnomalyDetector
-from src.config import INTERVAL_MINUTES, RETENTION_DAYS
+from src.config import INTERVAL_MINUTES, RETENTION_DAYS, MODEL_CONFIG
 
 class PTNAnomalyScheduler:
     def __init__(self):
@@ -15,9 +15,13 @@ class PTNAnomalyScheduler:
         """15분 주기 독립 트랙 기반 통합 탐지 작업"""
         now_dt = datetime.now()
         now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-        start_str = (now_dt - timedelta(minutes=180)).strftime('%Y-%m-%d %H:%M:%S')
         
-        print(f"\n[{now_str}] Starting anomaly detection cycle...")
+        # 추세 분석을 위해 (window_size + 4개 시점) 만큼 데이터 조회
+        # 12(window) + 4(trend) = 16시점 * 15분 = 240분
+        fetch_minutes = (MODEL_CONFIG['window_size'] + 4) * INTERVAL_MINUTES
+        start_str = (now_dt - timedelta(minutes=fetch_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        print(f"\n[{now_str}] Starting anomaly detection cycle (Fetch: {fetch_minutes}m)...")
         
         try:
             # 1. 독립 트랙별 데이터 수집
@@ -36,13 +40,14 @@ class PTNAnomalyScheduler:
                 self.db.save_results(results)
                 self.db.delete_old_data(RETENTION_DAYS)
 
-                # 4. 하이브리드 로그 (CSV 파일 누적)
-                csv_path = "data/live_anomalies.csv"
+                # 4. 하이브리드 로그 (전체 결과 CSV 누적 - 일자별 분리)
+                date_str = now_dt.strftime('%Y%m%d')
+                csv_path = f"data/history_{date_str}.csv"
                 file_exists = os.path.exists(csv_path)
-                # 전체 결과가 아닌 이상치만 CSV에 누적 (운영자 확인용)
-                if not anomalies.empty:
-                    anomalies.to_csv(csv_path, mode='a', index=False, header=not file_exists)
-                    print(f"    - Anomalies appended to: {csv_path}")
+                
+                # 전체 결과를 CSV에 누적
+                results.to_csv(csv_path, mode='a', index=False, header=not file_exists)
+                print(f"    - Full results appended to: {csv_path}")
             else:
                 print("    - No valid data to analyze in this cycle.")
                 

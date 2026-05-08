@@ -46,16 +46,20 @@ class DBConnector:
                 -- 트래픽 트랙 상세
                 traffic_score FLOAT DEFAULT 0.0,
                 traffic_severity FLOAT DEFAULT 0.0,
+                traffic_slope FLOAT DEFAULT 0.0,
                 traffic_threshold FLOAT DEFAULT 0.0,
                 is_traffic_anomaly TINYINT(1) DEFAULT 0,
                 -- 광성능 트랙 상세
                 optical_score FLOAT DEFAULT 0.0,
                 optical_severity FLOAT DEFAULT 0.0,
+                optical_slope FLOAT DEFAULT 0.0,
                 optical_threshold FLOAT DEFAULT 0.0,
                 is_optical_anomaly TINYINT(1) DEFAULT 0,
                 -- 통합 결과
                 anomaly_score FLOAT DEFAULT 0.0,
                 severity FLOAT DEFAULT 0.0,
+                slope FLOAT DEFAULT 0.0,
+                slope_label VARCHAR(20) DEFAULT 'STABLE',
                 threshold FLOAT DEFAULT 0.0,
                 is_anomaly TINYINT(1) DEFAULT 0,
                 alarm_level INT DEFAULT 0,
@@ -136,11 +140,11 @@ class DBConnector:
         query = """
             INSERT IGNORE INTO anomaly_detection (
                 occur_date, ip_addr, cid, lid, 
-                traffic_score, traffic_severity, traffic_threshold, is_traffic_anomaly,
-                optical_score, optical_severity, optical_threshold, is_optical_anomaly,
-                anomaly_score, severity, threshold, is_anomaly, 
+                traffic_score, traffic_severity, traffic_slope, traffic_threshold, is_traffic_anomaly,
+                optical_score, optical_severity, optical_slope, optical_threshold, is_optical_anomaly,
+                anomaly_score, severity, slope, slope_label, threshold, is_anomaly, 
                 alarm_level, alarm_label, anomaly_reason, detect_time
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
         """
         try:
             data = []
@@ -148,10 +152,11 @@ class DBConnector:
                 data.append((
                     row['occur_date'], row['ip_addr'], row['cid'], row['lid'],
                     float(row.get('traffic_score', 0)), float(row.get('traffic_severity', 0)), 
-                    float(row.get('traffic_threshold', 0)), int(row.get('is_traffic_anomaly', 0)),
+                    float(row.get('traffic_slope', 0)), float(row.get('traffic_threshold', 0)), int(row.get('is_traffic_anomaly', 0)),
                     float(row.get('optical_score', 0)), float(row.get('optical_severity', 0)), 
-                    float(row.get('optical_threshold', 0)), int(row.get('is_optical_anomaly', 0)),
+                    float(row.get('optical_slope', 0)), float(row.get('optical_threshold', 0)), int(row.get('is_optical_anomaly', 0)),
                     float(row.get('anomaly_score', 0)), float(row.get('severity', 0)), 
+                    float(row.get('slope', 0)), row.get('slope_label', 'STABLE'),
                     float(row.get('threshold', 0)), int(row.get('is_anomaly', 0)),
                     int(row.get('alarm_level', 0)), row.get('alarm_label', 'NORMAL'),
                     row.get('anomaly_reason', '')

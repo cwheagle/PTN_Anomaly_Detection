@@ -32,7 +32,8 @@ SEVERITY_CONFIG = {
     "NORMAL": {"min": 0, "max": 50, "level": 0, "label": "NORMAL"},
     "MINOR": {"min": 50, "max": 70, "level": 1, "label": "MINOR"},
     "MAJOR": {"min": 70, "max": 90, "level": 2, "label": "MAJOR"},
-    "CRITICAL": {"min": 90, "max": 100, "level": 3, "label": "CRITICAL"}
+    "CRITICAL": {"min": 90, "max": 100, "level": 3, "label": "CRITICAL"},
+    "slope_threshold": 3.0  # 추세 분석(RISING/FALLING) 판단 기준 수치
 }
 
 # Signal Types
