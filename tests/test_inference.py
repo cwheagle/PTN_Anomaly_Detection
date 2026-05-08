@@ -42,8 +42,8 @@ def run_inference_test():
     df_t = pd.read_csv("data/traffic_test.csv") if os.path.exists("data/traffic_test.csv") else None
     df_o = pd.read_csv("data/optical_test.csv") if os.path.exists("data/optical_test.csv") else None
     
-    # 2. 추론 실행
-    results = detector.detect(df_traffic=df_t, df_optical=df_o)
+    # 2. 추론 실행 (테스트 시에는 전체 이력 분석을 위해 latest_only=False 설정)
+    results = detector.detect(df_traffic=df_t, df_optical=df_o, latest_only=False)
     
     if results is not None:
         anomalies = results[results['is_anomaly']].copy()

@@ -108,7 +108,7 @@ class AnomalyDetector:
         
         return pd.concat(all_res) if all_res else None
 
-    def detect(self, df_traffic=None, df_optical=None):
+    def detect(self, df_traffic=None, df_optical=None, latest_only=True):
         """앙상블 분석 통합 인터페이스"""
         res_t = self._analyze_track(df_traffic, 'traffic') if df_traffic is not None else None
         res_o = self._analyze_track(df_optical, 'optical') if df_optical is not None else None
@@ -181,4 +181,9 @@ class AnomalyDetector:
 
         
         final_cols = [c for c in standard_cols if c in final.columns]
-        return final[final_cols].sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+        results = final[final_cols].sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+        
+        # [최신화] 스케줄러 동작 시(latest_only=True) 최신 1건만 반환, 백테스트 시(False) 전체 반환
+        if latest_only:
+            return results.groupby(['ip_addr', 'cid', 'lid']).tail(1).copy()
+        return results
