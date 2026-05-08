@@ -27,6 +27,14 @@ MODEL_CONFIG = {
     "threshold_percentile": 99.9  # 극도로 보수적으로 상향 (상위 0.1%)
 }
 
+# Severity Configuration (Phase 6: 다단계 경보 체계)
+SEVERITY_CONFIG = {
+    "NORMAL": {"min": 0, "max": 50, "level": 0, "label": "NORMAL"},
+    "MINOR": {"min": 50, "max": 70, "level": 1, "label": "MINOR"},
+    "MAJOR": {"min": 70, "max": 90, "level": 2, "label": "MAJOR"},
+    "CRITICAL": {"min": 90, "max": 100, "level": 3, "label": "CRITICAL"}
+}
+
 # Signal Types
 SIGNAL_TYPES = {
     "ETH": 6,

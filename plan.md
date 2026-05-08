@@ -16,7 +16,7 @@
 
 ## 3. Implementation Steps (하네스 기반 파이프라인 구현 단계)
 
-### Phase 1: 기반 설정 및 데이터 파이프라인 구축 (Go - Data Layer)
+### Phase 1: 기반 설정 및 데이터 파이프라인 구축 (Complete - Data Layer)
 - **목표:** MySQL 연결 및 데이터 추출, 전처리 로직 구현.
 - **작업 내용:**
   - `config.py` 작성 (DB 접속 정보, 모델 하이퍼파라미터 등 설정 관리).
@@ -24,14 +24,14 @@
   - `data_processor.py` 작성 (데이터 정제, 스케일링, 시계열 시퀀스(Window) 생성).
 - **검증 (QA):** Mock 데이터를 활용하여 전처리 결과물 형태 및 DB 연결 정상 여부 단위 테스트 (`test_data.py`).
 
-### Phase 2: 모델 개발 및 학습 로직 (Go - Model Layer)
+### Phase 2: 모델 개발 및 학습 로직 (Complete - Model Layer)
 - **목표:** LSTM-AE 모델 구조 정의 및 학습 코드 작성.
 - **작업 내용:**
   - `model.py` 작성 (PyTorch `nn.Module`을 상속받은 LSTM-Autoencoder 클래스 구현).
   - `trainer.py` 작성 (Loss function(MSE), Optimizer 설정, 모델 학습 루프 및 모델 가중치(pth) 저장).
 - **검증 (QA):** 더미 텐서를 입력으로 받아 모델의 forward/backward 패스가 에러 없이 동작하는지 테스트 (`test_model.py`).
 
-### Phase 3: 추론 엔진 및 스케줄러 통합 (Go - Application Layer)
+### Phase 3: 추론 엔진 및 스케줄러 통합 (Complete - Application Layer)
 - **목표:** 15분 주기로 동작하는 자동화된 추론 및 결과 저장 파이프라인 완성.
 - **작업 내용:**
   - `inference.py` 작성 (저장된 모델 로드, 최신 데이터 예측, Reconstruction Error 기반 이상 점수 산출 및 임계치(Threshold) 비교).
@@ -39,7 +39,7 @@
   - 추론 결과를 DB 테이블에 `INSERT` 하는 로직 추가.
 - **검증 (QA):** 전체 파이프라인(End-to-End) 모의 실행 테스트.
 
-### Phase 4: 앙상블 아키텍처 및 데이터 표준화 (Go - Advanced Layer)
+### Phase 4: 앙상블 아키텍처 및 데이터 표준화 (Complete - Advanced Layer)
 - **목표:** Traffic과 Optical 트랙을 분리하여 정확도를 높이고 실데이터 대응력 강화.
 - **작업 내용:**
   - 데이터 스키마 표준화 (`ip_addr`, `cid`, `lid` 기반 식별 체계 확립).
@@ -47,22 +47,25 @@
   - 실제 장애 패턴 분석을 위한 진단 메시지(`anomaly_reason`) 생성 로직 추가.
 - **검증 (QA):** `export_anomalies.py`를 통한 과거 장애 이력 재현 및 탐지율 검증.
 
-### Phase 5: 고신뢰성 운영 및 모니터링 (Go - Operations Layer)
-- **목표:** 유령 데이터 차단 및 데이터 무결성 확보를 통한 운영 안정화.
+### Phase 5: 모델 최적화 및 통합 검증 파이프라인 (Complete - Operations Layer)
+- **목표:** 실제 운영 환경 데이터를 수용하는 고정밀 모델 학습 및 자동화된 검증 체계 구축.
 - **작업 내용:**
-  - 시간축 재구성(`Reindexing`)을 통한 누락 데이터 보간 및 유령 타임스탬프 완벽 제거.
-  - 시퀀스 생성 시 원본 인덱스 매핑 최적화로 추론 시점의 정확성 확보.
-  - 원격 DB 연동 및 실제 운영 환경 데이터셋 확보.
-- **검증 (QA):** 장기 가동 테스트를 통한 메모리 누수 및 스케줄러 안정성 확인.
+  - **비선형 전처리**: Traffic 데이터 `log1p` 변환 및 `RobustScaler` 적용을 통한 이상치 내성 확보.
+  - **모델 고도화**: LSTM-Autoencoder 100 에포크 학습, Loss 0.003 수준의 안정적 수렴 달성.
+  - **통합 검증 엔진**: `test_inference.py`를 개편하여 [추론 + CSV 저장 + 상세 진단 리포트] 기능 통합.
+  - **시각화 자동화**: 탐지된 이상 사례의 트래픽 패턴과 점수를 매칭한 그래프 생성 도구(`visualize_results.py`) 개발.
+- **검증 (QA):**
+    - 과거 장애 이력 데이터를 활용한 실제 탐지 성능(Hit Rate) 확인 및 시각적 검증 완료.
+    - **장기 가동 테스트**: 15분 주기 스케줄러의 안정적 반복 동작 및 메모리 누수 여부 확인 (진행 예정).
 
-### Phase 6: 예지 정비 및 지능형 분석 엔진 (Future - Intelligence Layer)
-- **목표:** 단순 탐지를 넘어 고장 시점을 예측하는 예지 정비(PdM) 엔진으로 진화.
+### Phase 6: 예지 정비 및 지능형 분석 엔진 (Go - Intelligence Layer)
+- **목표:** 탐지된 이상을 수치화하고, 추세 분석을 통해 미래 장애를 예측하는 지능형 엔진 구현.
 - **작업 내용:**
-  - **심각도 정규화**: `Z-Score` 및 `Threshold 비율` 기반의 직관적 위험도 지표 도입.
-  - **예측 엔진(RUL)**: 이상 점수의 상승 추세를 분석하여 임계치 도달 예상 시간(Time to Failure) 산출.
-  - **다단계 알람**: 주의/경고/심각 단계별 대응 가이드라인 자동 생성.
-  - **강건한 학습**: 데이터 특성에 따른 MSE/MAE 손실 함수 동적 선택 전략 적용.
-- **검증 (QA):** 실제 장애 발생 전 사전 경보 리드타임(Lead Time) 측정 및 정확도 평가.
+  - **심각도 정규화 (Severity Scoring) (Complete)**: 원본 MSE 점수를 0~100 사이의 직관적 점수로 변환하는 비선형 매핑 함수 구현.
+  - **다단계 경보 체계 (Alerting) (Complete)**: 점수 구간별 주의(Minor), 경고(Major), 심각(Critical) 등급 부여 로직 수립.
+  - **추세 분석 기초 (Trend Analysis) (Go)**: 이상 점수의 상승 기울기(Slope) 분석을 통한 초기 단계 장애 징후 포착.
+  - **UI 연동 준비**: 시각화된 그래프 및 진단 리포트를 운영자가 쉽게 조회할 수 있는 구조화된 데이터(JSON/CSV) 제공.
+- **검증 (QA):** 실제 장애 발생 시나리오 기반의 경보 리드타임(Lead Time) 측정 및 정확도 평가.
 
 ## 4. Harness Checklists & Rules (하네스 체크리스트 및 원칙)
 - **(방향 제시) Target-Plan 매핑:** 작성된 모든 모듈은 본 `plan.md`의 목표와 연결되어야 함. 목적 없는 코드 작성 금지.

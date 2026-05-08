@@ -1,3 +1,4 @@
+import os
 from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime, timedelta
 from src.data.db_connector import DBConnector
@@ -31,9 +32,17 @@ class PTNAnomalyScheduler:
                 print(f"    - Processed items: {len(results)}")
                 print(f"    - Anomalies found: {len(anomalies)}")
                 
-                # 3. 결과 저장 및 정리
+                # 3. DB 저장
                 self.db.save_results(results)
                 self.db.delete_old_data(RETENTION_DAYS)
+
+                # 4. 하이브리드 로그 (CSV 파일 누적)
+                csv_path = "data/live_anomalies.csv"
+                file_exists = os.path.exists(csv_path)
+                # 전체 결과가 아닌 이상치만 CSV에 누적 (운영자 확인용)
+                if not anomalies.empty:
+                    anomalies.to_csv(csv_path, mode='a', index=False, header=not file_exists)
+                    print(f"    - Anomalies appended to: {csv_path}")
             else:
                 print("    - No valid data to analyze in this cycle.")
                 

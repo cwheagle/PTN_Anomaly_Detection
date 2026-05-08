@@ -1,7 +1,11 @@
 import mysql.connector
 from mysql.connector import Error, pooling
 import pandas as pd
+import warnings
 from src.config import DB_CONFIG, SIGNAL_TYPES
+
+# pandas의 SQLAlchemy 권고 경고 무시
+warnings.filterwarnings('ignore', category=UserWarning)
 
 class DBConnector:
     def __init__(self):
@@ -33,20 +37,35 @@ class DBConnector:
         if not conn: return
         cursor = conn.cursor()
         create_query = """
-            CREATE TABLE IF NOT EXISTS anomaly_results (
+            CREATE TABLE IF NOT EXISTS anomaly_detection (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 occur_date DATETIME NOT NULL,
                 ip_addr VARCHAR(50) NOT NULL,
                 cid INT,
                 lid INT,
-                anomaly_score FLOAT,
-                threshold FLOAT,
-                is_anomaly TINYINT(1),
+                -- 트래픽 트랙 상세
+                traffic_score FLOAT DEFAULT 0.0,
+                traffic_severity FLOAT DEFAULT 0.0,
+                traffic_threshold FLOAT DEFAULT 0.0,
+                is_traffic_anomaly TINYINT(1) DEFAULT 0,
+                -- 광성능 트랙 상세
+                optical_score FLOAT DEFAULT 0.0,
+                optical_severity FLOAT DEFAULT 0.0,
+                optical_threshold FLOAT DEFAULT 0.0,
+                is_optical_anomaly TINYINT(1) DEFAULT 0,
+                -- 통합 결과
+                anomaly_score FLOAT DEFAULT 0.0,
+                severity FLOAT DEFAULT 0.0,
+                threshold FLOAT DEFAULT 0.0,
+                is_anomaly TINYINT(1) DEFAULT 0,
+                alarm_level INT DEFAULT 0,
+                alarm_label VARCHAR(20) DEFAULT 'NORMAL',
                 anomaly_reason TEXT,
                 detect_time DATETIME,
                 UNIQUE KEY uk_anomaly (occur_date, ip_addr, cid, lid),
                 INDEX idx_occur_date (occur_date),
-                INDEX idx_is_anomaly (is_anomaly)
+                INDEX idx_is_anomaly (is_anomaly),
+                INDEX idx_severity (severity)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """
         try:
@@ -115,16 +134,28 @@ class DBConnector:
         if not conn: return
         cursor = conn.cursor()
         query = """
-            INSERT IGNORE INTO anomaly_results (
+            INSERT IGNORE INTO anomaly_detection (
                 occur_date, ip_addr, cid, lid, 
-                anomaly_score, threshold, is_anomaly, anomaly_reason, detect_time
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                traffic_score, traffic_severity, traffic_threshold, is_traffic_anomaly,
+                optical_score, optical_severity, optical_threshold, is_optical_anomaly,
+                anomaly_score, severity, threshold, is_anomaly, 
+                alarm_level, alarm_label, anomaly_reason, detect_time
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
         """
         try:
-            data = [(row['occur_date'], row['ip_addr'], row['cid'], row['lid'], 
-                     float(row['anomaly_score']), float(row.get('threshold', 0)), 
-                     int(row['is_anomaly']), row.get('anomaly_reason', '')) 
-                    for _, row in df.iterrows()]
+            data = []
+            for _, row in df.iterrows():
+                data.append((
+                    row['occur_date'], row['ip_addr'], row['cid'], row['lid'],
+                    float(row.get('traffic_score', 0)), float(row.get('traffic_severity', 0)), 
+                    float(row.get('traffic_threshold', 0)), int(row.get('is_traffic_anomaly', 0)),
+                    float(row.get('optical_score', 0)), float(row.get('optical_severity', 0)), 
+                    float(row.get('optical_threshold', 0)), int(row.get('is_optical_anomaly', 0)),
+                    float(row.get('anomaly_score', 0)), float(row.get('severity', 0)), 
+                    float(row.get('threshold', 0)), int(row.get('is_anomaly', 0)),
+                    int(row.get('alarm_level', 0)), row.get('alarm_label', 'NORMAL'),
+                    row.get('anomaly_reason', '')
+                ))
             cursor.executemany(query, data)
             conn.commit()
         except Error as e:
@@ -140,7 +171,7 @@ class DBConnector:
         if not conn: return
         cursor = conn.cursor()
         try:
-            cursor.execute(f"DELETE FROM anomaly_results WHERE occur_date < DATE_SUB(NOW(), INTERVAL {days} DAY)")
+            cursor.execute(f"DELETE FROM anomaly_detection WHERE occur_date < DATE_SUB(NOW(), INTERVAL {days} DAY)")
             conn.commit()
         finally:
             cursor.close()

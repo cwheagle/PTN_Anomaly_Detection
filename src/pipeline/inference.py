@@ -5,7 +5,7 @@ import os
 import json
 from src.models.model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
-from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS
+from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS, SEVERITY_CONFIG
 
 class AnomalyDetector:
     def __init__(self):
@@ -30,6 +30,13 @@ class AnomalyDetector:
                 
                 self.tracks[ft] = {'model': model, 'proc': proc, 'th': th}
 
+    def _get_alarm_info(self, severity):
+        """심각도 점수에 따른 경보 등급 및 라벨 반환"""
+        for tier in ["CRITICAL", "MAJOR", "MINOR"]:
+            if severity >= SEVERITY_CONFIG[tier]["min"]:
+                return SEVERITY_CONFIG[tier]["level"], SEVERITY_CONFIG[tier]["label"]
+        return SEVERITY_CONFIG["NORMAL"]["level"], SEVERITY_CONFIG["NORMAL"]["label"]
+
     def _analyze_track(self, df, ft):
         """특정 트랙(Traffic/Optical)의 데이터를 분석하여 이상 점수 산출"""
         if ft not in self.tracks: return None
@@ -46,15 +53,48 @@ class AnomalyDetector:
             inputs = torch.from_numpy(seqs).float().to(self.device)
             with torch.no_grad():
                 outputs = track['model'](inputs)
-                # 마지막 시점의 오차만 계산 (추론 시점의 점수)
+                # 마지막 시점의 오차만 계산
                 diff = (inputs[:, -1, :] - outputs[:, -1, :]) ** 2
                 mse = np.mean(diff.cpu().numpy(), axis=1)
             
-            # 매핑된 인덱스를 사용하여 결과 데이터프레임 생성
             res = df_clean.loc[indices].copy()
             res[f'{ft}_score'] = mse
             res[f'is_{ft}_anomaly'] = mse > track['th']
-            all_res.append(res[['occur_date', 'ip_addr', 'cid', 'lid', f'{ft}_score', f'is_{ft}_anomaly']])
+            res[f'{ft}_threshold'] = track['th']
+            
+            # 심각도 점수 산출 로직 (0~100 정규화)
+            def calculate_severity(mse, threshold):
+                if threshold <= 0: return 0.0
+                ratio = mse / threshold
+                if ratio <= 1.0:
+                    return ratio * 50.0 # 정상 구간 (0~50)
+                else:
+                    # 이상 구간 (50~100 수렴): 50 + 50 * (1 - exp(-0.5 * (ratio-1)))
+                    return 50.0 + 50.0 * (1 - np.exp(-0.5 * (ratio - 1.0)))
+
+            res[f'{ft}_severity'] = res[f'{ft}_score'].apply(lambda x: calculate_severity(x, track['th']))
+            
+            # 상세 사유 진단 로직 (원본 수치 복원)
+            def get_detailed_reason(row):
+                if not row[f'is_{ft}_anomaly']: return "NORMAL"
+                if ft == 'traffic':
+                    # 로그 역변환하여 원본 수치 근사값 산출
+                    err = int(np.expm1(row.get('error_packet', 0)))
+                    tx = int(np.expm1(row.get('tx_packet', 0)))
+                    rx = int(np.expm1(row.get('rx_packet', 0)))
+                    reason = f"Traffic (TX:{tx}, RX:{rx}"
+                    if err > 0: reason += f", Err:{err}"
+                    reason += ")"
+                    return reason
+                elif ft == 'optical':
+                    rx = row.get('rx_avg_power', 0)
+                    tx = row.get('tx_avg_power', 0)
+                    return f"Optical (RX:{rx:.2f}, TX:{tx:.2f})"
+                return "Anomaly"
+            
+            res[f'{ft}_reason'] = res.apply(get_detailed_reason, axis=1)
+            all_res.append(res[['occur_date', 'ip_addr', 'cid', 'lid', 
+                               f'{ft}_score', f'{ft}_severity', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason']])
         
         return pd.concat(all_res) if all_res else None
 
@@ -65,31 +105,55 @@ class AnomalyDetector:
         
         if res_t is None and res_o is None: return None
         
-        # 병합
         if res_t is not None and res_o is not None:
             final = pd.merge(res_t, res_o, on=['occur_date', 'ip_addr', 'cid', 'lid'], how='outer')
         else:
             final = res_t if res_t is not None else res_o
             
-        # NaN 값 처리 (데이터가 없는 트랙은 정상으로 간주)
-        for col in ['is_traffic_anomaly', 'is_optical_anomaly']:
-            if col in final.columns:
-                final[col] = final[col].fillna(False)
-        for col in ['traffic_score', 'optical_score']:
-            if col in final.columns:
-                final[col] = final[col].fillna(0.0)
+        # 결측값 및 통합 필드 처리
+        for ft in ['traffic', 'optical']:
+            if f'is_{ft}_anomaly' in final.columns:
+                final[f'is_{ft}_anomaly'] = final[f'is_{ft}_anomaly'].fillna(False)
+                final[f'{ft}_score'] = final[f'{ft}_score'].fillna(0.0)
+                final[f'{ft}_severity'] = final[f'{ft}_severity'].fillna(0.0)
+                final[f'{ft}_reason'] = final[f'{ft}_reason'].fillna("NORMAL")
+                if f'{ft}_threshold' not in final.columns: final[f'{ft}_threshold'] = 0.0
 
-        # 통합 이상 판정
         final['is_anomaly'] = (final.get('is_traffic_anomaly', False) == True) | \
                              (final.get('is_optical_anomaly', False) == True)
         
-        def get_reason(row):
+        def merge_reasons(row):
             reasons = []
-            if row.get('is_traffic_anomaly') is True: reasons.append("TRAFFIC")
-            if row.get('is_optical_anomaly') is True: reasons.append("OPTICAL")
+            if row.get('is_traffic_anomaly'): reasons.append(f"T:{row['traffic_reason']}")
+            if row.get('is_optical_anomaly'): reasons.append(f"O:{row['optical_reason']}")
             return " + ".join(reasons) if reasons else "NORMAL"
             
-        final['anomaly_reason'] = final.apply(get_reason, axis=1)
-        final['anomaly_score'] = final[['traffic_score', 'optical_score']].max(axis=1)
+        final['anomaly_reason'] = final.apply(merge_reasons, axis=1)
         
-        return final.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+        # 통합 점수, 심각도 및 임계치
+        score_cols = [c for c in ['traffic_score', 'optical_score'] if c in final.columns]
+        final['anomaly_score'] = final[score_cols].max(axis=1) if score_cols else 0.0
+        
+        sev_cols = [c for c in ['traffic_severity', 'optical_severity'] if c in final.columns]
+        final['severity'] = final[sev_cols].max(axis=1) if sev_cols else 0.0
+
+        th_cols = [c for c in ['traffic_threshold', 'optical_threshold'] if c in final.columns]
+        final['threshold'] = final[th_cols].max(axis=1) if th_cols else 0.0
+
+        # 경보 등급 및 라벨 추가
+        alarm_data = final['severity'].apply(self._get_alarm_info)
+        final['alarm_level'] = alarm_data.apply(lambda x: x[0])
+        final['alarm_label'] = alarm_data.apply(lambda x: x[1])
+
+        # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 19개 컬럼으로 확장
+        standard_cols = [
+            'occur_date', 'ip_addr', 'cid', 'lid', 
+            'traffic_score', 'traffic_severity', 'traffic_threshold', 'is_traffic_anomaly',
+            'optical_score', 'optical_severity', 'optical_threshold', 'is_optical_anomaly',
+            'anomaly_score', 'severity', 'threshold', 'is_anomaly', 
+            'alarm_level', 'alarm_label', 'anomaly_reason'
+        ]
+
+        
+        final_cols = [c for c in standard_cols if c in final.columns]
+        return final[final_cols].sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])

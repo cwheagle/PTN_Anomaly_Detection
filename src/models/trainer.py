@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import time
 from .model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS
@@ -48,7 +49,10 @@ class Trainer:
             
         loader, sequences = result
         self.model.train()
+        
+        start_time = time.time()
         for epoch in range(self.config['epochs']):
+            epoch_start = time.time()
             loss_sum = 0
             for batch in loader:
                 inputs = batch[0].to(self.device)
@@ -60,8 +64,13 @@ class Trainer:
                 self.optimizer.step()
                 loss_sum += loss.item()
             
-            if (epoch + 1) % 20 == 0:
-                print(f"    Epoch [{epoch+1}/{self.config['epochs']}], Loss: {loss_sum/len(loader):.6f}")
+            avg_loss = loss_sum / len(loader)
+            epoch_duration = time.time() - epoch_start
+            total_elapsed = time.time() - start_time
+            
+            # 매 에포크마다 상세 로그 출력
+            print(f"    Epoch [{epoch+1}/{self.config['epochs']}], Loss: {avg_loss:.6f}, "
+                  f"Time: {epoch_duration:.2f}s (Total: {total_elapsed/60:.1f}m)")
         
         # 저장
         torch.save(self.model.state_dict(), self.paths['model'])
