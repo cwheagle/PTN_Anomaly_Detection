@@ -64,6 +64,10 @@ class DBConnector:
                 is_anomaly TINYINT(1) DEFAULT 0,
                 alarm_level INT DEFAULT 0,
                 alarm_label VARCHAR(20) DEFAULT 'NORMAL',
+                -- 예지 정비
+                ttf_minutes FLOAT DEFAULT NULL,
+                expected_fatal_time DATETIME DEFAULT NULL,
+                -- 상세 정보
                 anomaly_reason TEXT,
                 detect_time DATETIME,
                 UNIQUE KEY uk_anomaly (occur_date, ip_addr, cid, lid),
@@ -143,12 +147,17 @@ class DBConnector:
                 traffic_score, traffic_severity, traffic_slope, traffic_threshold, is_traffic_anomaly,
                 optical_score, optical_severity, optical_slope, optical_threshold, is_optical_anomaly,
                 anomaly_score, severity, slope, slope_label, threshold, is_anomaly, 
-                alarm_level, alarm_label, anomaly_reason, detect_time
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
+                alarm_level, alarm_label, ttf_minutes, expected_fatal_time, 
+                anomaly_reason, detect_time
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
         """
         try:
             data = []
             for _, row in df.iterrows():
+                # NaN 처리 (None으로 변환하여 DB에 NULL로 입력)
+                ttf = float(row.get('ttf_minutes')) if pd.notnull(row.get('ttf_minutes')) else None
+                fatal_time = row.get('expected_fatal_time') if pd.notnull(row.get('expected_fatal_time')) else None
+                
                 data.append((
                     row['occur_date'], row['ip_addr'], row['cid'], row['lid'],
                     float(row.get('traffic_score', 0)), float(row.get('traffic_severity', 0)), 
@@ -159,7 +168,7 @@ class DBConnector:
                     float(row.get('slope', 0)), row.get('slope_label', 'STABLE'),
                     float(row.get('threshold', 0)), int(row.get('is_anomaly', 0)),
                     int(row.get('alarm_level', 0)), row.get('alarm_label', 'NORMAL'),
-                    row.get('anomaly_reason', '')
+                    ttf, fatal_time, row.get('anomaly_reason', '')
                 ))
             cursor.executemany(query, data)
             conn.commit()

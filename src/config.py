@@ -33,7 +33,8 @@ SEVERITY_CONFIG = {
     "MINOR": {"min": 50, "max": 70, "level": 1, "label": "MINOR"},
     "MAJOR": {"min": 70, "max": 90, "level": 2, "label": "MAJOR"},
     "CRITICAL": {"min": 90, "max": 100, "level": 3, "label": "CRITICAL"},
-    "slope_threshold": 3.0  # 추세 분석(RISING/FALLING) 판단 기준 수치
+    "slope_threshold": 1.0,  # 추세 분석(RISING/FALLING) 판단 기준 수치 (15분당 1.0점 상승)
+    "rul_target": 90.0       # RUL 예측 목표 심각도 (Critical 임계치)
 }
 
 # Signal Types

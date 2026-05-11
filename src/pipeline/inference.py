@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import math
+from datetime import timedelta
 from src.models.model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS, SEVERITY_CONFIG
@@ -169,13 +171,35 @@ class AnomalyDetector:
         final['alarm_level'] = alarm_data.apply(lambda x: x[0])
         final['alarm_label'] = alarm_data.apply(lambda x: x[1])
 
+        # [Phase 6] 잔여 수명 예측 (RUL)
+        def calculate_rul(row):
+            target_sev = SEVERITY_CONFIG.get('rul_target', 90.0)
+            slope_th = SEVERITY_CONFIG.get('slope_threshold', 3.0)
+            curr_sev = row['severity']
+            slope = row['slope']
+            
+            # 기울기가 설정된 임계치보다 크고(상승 중), 현재 심각도가 목표보다 낮을 때만 계산
+            if slope > slope_th and curr_sev < target_sev:
+                # 1. 원본 TTF 계산 (분 단위)
+                raw_ttf = ((target_sev - curr_sev) / slope) * 15
+                
+                # 2. 15분 단위 정규화 (올림 처리)
+                # 예: 12분 -> 15분, 16분 -> 30분
+                ttf = math.ceil(raw_ttf / 15) * 15
+                
+                expected_time = row['occur_date'] + timedelta(minutes=ttf)
+                return pd.Series([ttf, expected_time])
+            return pd.Series([None, None])
+
+        final[['ttf_minutes', 'expected_fatal_time']] = final.apply(calculate_rul, axis=1)
+
         # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 23개 컬럼으로 확장
         standard_cols = [
             'occur_date', 'ip_addr', 'cid', 'lid', 
             'traffic_score', 'traffic_severity', 'traffic_slope', 'traffic_threshold', 'is_traffic_anomaly',
             'optical_score', 'optical_severity', 'optical_slope', 'optical_threshold', 'is_optical_anomaly',
             'anomaly_score', 'severity', 'slope', 'slope_label', 'threshold', 'is_anomaly', 
-            'alarm_level', 'alarm_label', 'anomaly_reason'
+            'alarm_level', 'alarm_label', 'ttf_minutes', 'expected_fatal_time', 'anomaly_reason'
         ]
 
 
