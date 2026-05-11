@@ -19,3 +19,21 @@ logs/
 # IDEs
 .vscode/
 .idea/
+
+# UI / Frontend
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/*.local
+ui/package-lock.json
+
+# Secrets & Config
+src/config.py
+.env
+
+# OS Related
+.DS_Store
+Thumbs.db
+
+# Project Specific
+logs/plots/

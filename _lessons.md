@@ -58,5 +58,9 @@
 - **교훈**: 운영 중 실수나 작업으로 DB 테이블(`anomaly_detection`)이 삭제되더라도, 시스템의 `DBConnector`가 초기화 시 `CREATE TABLE IF NOT EXISTS` 로직을 포함하고 있어 즉시 복구가 가능함.
 - **원칙**: 중요한 탐지 결과는 DB 외에도 일자별 CSV 파일(`data/history_YYYYMMDD.csv`)에 이중 기록(Dual Logging)하여 데이터 유실에 대비함.
 
+## 14. 최신 시각 기반 결과 필터링 (Latest Batch Filtering)
+- **교훈**: `latest_only=True` 상황에서 `groupby().tail(1)`을 사용하면, 특정 포트의 데이터 수집이 지연되어 과거(예: 45분 전) 데이터가 마지막인 경우 해당 과거 데이터가 현재 배치 결과에 섞여 들어오는 "데이터 오염" 현상이 발생함.
+- **해결**: `tail(1)` 대신 배치 전체 결과 중 가장 최신 시각(`max(occur_date)`)인 행들만 필터링하도록 수정하여, 현재 추론 주기에 해당하는 결과만 정확히 추출함.
+
 ---
 *최종 업데이트: 2026-05-11 (Phase 5 완료 및 Phase 6 RUL 설계 진입)*

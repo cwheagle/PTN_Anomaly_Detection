@@ -1,5 +1,5 @@
 import os
-from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
 from src.data.db_connector import DBConnector
 from src.pipeline.inference import AnomalyDetector
@@ -7,9 +7,14 @@ from src.config import INTERVAL_MINUTES, RETENTION_DAYS, MODEL_CONFIG
 
 class PTNAnomalyScheduler:
     def __init__(self):
-        self.scheduler = BlockingScheduler()
+        self.scheduler = AsyncIOScheduler()
         self.detector = AnomalyDetector()
         self.db = DBConnector()
+        self.callback = None
+
+    def set_callback(self, callback_func):
+        """추론 결과 처리를 위한 콜백 함수 등록"""
+        self.callback = callback_func
 
     def run_job(self):
         """15분 주기 독립 트랙 기반 통합 탐지 작업"""
@@ -40,7 +45,11 @@ class PTNAnomalyScheduler:
                 self.db.save_results(results)
                 self.db.delete_old_data(RETENTION_DAYS)
 
-                # 4. 하이브리드 로그 (전체 결과 CSV 누적 - 일자별 분리)
+                # 4. 콜백 실행 (SSE 알림 등 외부 연동)
+                if self.callback:
+                    self.callback(results)
+
+                # 5. 하이브리드 로그 (전체 결과 CSV 누적 - 일자별 분리)
                 date_str = now_dt.strftime('%Y%m%d')
                 csv_path = f"data/history_{date_str}.csv"
                 file_exists = os.path.exists(csv_path)
@@ -64,3 +73,9 @@ class PTNAnomalyScheduler:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):
             print("[*] Scheduler stopped.")
+
+    def restart(self):
+        """스케줄러 재가동"""
+        self.scheduler.remove_all_jobs()
+        self.run_job()
+        self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES)

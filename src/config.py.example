@@ -2,10 +2,10 @@ import os
 
 # Database Configuration
 DB_CONFIG = {
-    "host": "192.168.99.253",
-    "user": "root",
-    "password": "root",
-    "database": "cowptn",
+    "host": "YOUR_DB_HOST",
+    "user": "YOUR_DB_USER",
+    "password": "YOUR_DB_PASSWORD",
+    "database": "YOUR_DB_NAME",
     "port": 3306
 }
 

@@ -67,14 +67,14 @@
   - **잔여 수명 예측 (RUL Prediction)**: 현재 추세 지속 시 장애 발생 예상 시점(Time to Failure)을 산출하고, 15분 수집 주기에 맞춰 정규화(Ceil) 처리 로직 구현 완료. (2026-05-11)
 - **검증 (QA):** 실제 장애 발생 시나리오 기반의 경보 리드타임 측정 및 RUL 정확도 검증 완료.
 
-### Phase 7: 통합 서비스 아키텍처 및 Web UI 구현 (Go - Service Layer)
-- **목표:** 엔진을 TSDN 컨트롤러와 연동 가능한 서비스 형태로 승격시키고 웹 대시보드 구축.
+### Phase 7: 통합 서비스 아키텍처 및 Web UI 구현 (Complete - Service Layer)
+- **목표:** 엔진을 TSDN 컨트롤러와 연동 가능한 서비스 형태로 승격시키고, 실시간성을 보장하는 현대적인 웹 대시보드 구축.
 - **작업 내용:**
-  - **Backend API 기반 통합 (FastAPI)**: 기존 스케줄러를 내재화한 통합 API 서버 구축 및 REST 엔드포인트 제공.
-  - **실시간 알림 엔진 (EventStream/SSE)**: Critical 경보 발생 시 웹/컨트롤러로 즉시 데이터를 푸시하는 SSE 엔드포인트 구현.
-  - **공식 API 명세서 분리 작성**: TSDN 연동을 위한 독립된 `docs/api_spec.md` 가이드라인 작성.
-  - **통합 모니터링 Web GUI (Streamlit)**: 실시간 장비 상태, RUL 예보, 상세 분석 그래프를 포함한 웹 대시보드 구현.
-- **검증 (QA):** API 응답성 테스트 및 E2E 실시간 이벤트 스트리밍 동작 확인.
+  - **Backend API 기반 통합 (FastAPI)**: 기존 스케줄러를 내재화한 통합 API 서버 구축 및 REST 엔드포인트 제공 완료.
+  - **API 고도화 및 통합**: `/api/trend`를 `/api/anomalies`로 통합하고, 유연한 필터링(Min/Max Severity, Rising Trend) 및 가장 최신 배치 데이터 자동 조회 기능 구현 완료.
+  - **실시간 알림 엔진 (EventStream/SSE)**: Critical 경보 발생 시 웹/컨트롤러로 즉시 데이터를 푸시하는 SSE 엔드포인트 구현 완료.
+  - **통합 모니터링 Web GUI (Vue 3)**: Vue 3 기반 실시간 대시보드 구현. Watchlist(상승 추세 감시), 클라이언트 측 페이징(Pagination), 직관적인 심각도 시각화 포함.
+- **검증 (QA):** API-UI 연동 무결성 확인 및 실시간 이벤트 스트리밍을 통한 대시보드 자동 갱신 검증 완료. (2026-05-11)
 
 ## 4. Harness Checklists & Rules (하네스 체크리스트 및 원칙)
 - **(방향 제시) Target-Plan 매핑:** 작성된 모든 모듈은 본 `plan.md`의 목표와 연결되어야 함. 목적 없는 코드 작성 금지.

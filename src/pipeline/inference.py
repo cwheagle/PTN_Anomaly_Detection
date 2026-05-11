@@ -207,7 +207,9 @@ class AnomalyDetector:
         final_cols = [c for c in standard_cols if c in final.columns]
         results = final[final_cols].sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
         
-        # [최신화] 스케줄러 동작 시(latest_only=True) 최신 1건만 반환, 백테스트 시(False) 전체 반환
-        if latest_only:
-            return results.groupby(['ip_addr', 'cid', 'lid']).tail(1).copy()
+        # [최신화] 스케줄러 동작 시(latest_only=True) 배치 내 가장 최신 시점(max)의 데이터만 반환
+        # tail(1)을 쓰면 과거에 데이터가 끊긴 포트의 마지막 데이터가 섞여 들어오는 현상 방지
+        if latest_only and not results.empty:
+            latest_time = results['occur_date'].max()
+            return results[results['occur_date'] == latest_time].copy()
         return results
