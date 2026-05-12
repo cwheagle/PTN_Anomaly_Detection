@@ -13,10 +13,13 @@ from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS
 
 class Trainer:
-    def __init__(self, feature_type='traffic', config_override=None):
+    def __init__(self, feature_type='traffic', config_override=None, progress_callback=None):
         self.feature_type = feature_type
+        self.progress_callback = progress_callback
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+        self.stop_requested = False
+        self.early_stopped = False # 조기 종료 여부 플래그 추가
+
         # 1. 설정값 병합 (기본값 + 외부 주입값)
         self.config = MODEL_CONFIG.copy()
         if config_override:
@@ -32,17 +35,24 @@ class Trainer:
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.config['learning_rate'])
 
+    def stop(self):
+        """학습 중지 요청"""
+        self.stop_requested = True
+        print(f"[*] Stop requested for {self.feature_type} trainer.")
+
     def _prepare_loader(self, data_path):
         if not os.path.exists(data_path):
             print(f"    [ERROR] Data file not found: {data_path}")
             return None
             
         df = pd.read_csv(data_path)
+        if self.stop_requested: return None
+
         df_clean = self.processor.preprocess(df, is_train=True)
-        if df_clean is None: return None
+        if df_clean is None or self.stop_requested: return None
         
         sequences = self.processor.create_sequences(df_clean, is_train=True)
-        if len(sequences) == 0: return None
+        if len(sequences) == 0 or self.stop_requested: return None
         
         dataset = TensorDataset(torch.from_numpy(sequences).float())
         return DataLoader(dataset, batch_size=self.config['batch_size'], shuffle=True), sequences
@@ -54,7 +64,10 @@ class Trainer:
         
         # 1. 데이터 로더 준비
         t_res = self._prepare_loader(t_path)
+        if self.stop_requested: return False
+        
         v_res = self._prepare_loader(v_path) # 검증 데이터
+        if self.stop_requested: return False
         
         if not t_res:
             print(f"    [SKIP] Insufficient training data for {self.feature_type}")
@@ -63,8 +76,10 @@ class Trainer:
         train_loader, train_sequences = t_res
         val_loader = v_res[0] if v_res else None
         
-        start_time = time.time()
         best_val_loss = float('inf')
+        best_model_state = None
+        patience = self.config['patience']
+        no_improve_count = 0
         
         for epoch in range(self.config['epochs']):
             epoch_start = time.time()
@@ -73,6 +88,8 @@ class Trainer:
             self.model.train()
             train_loss_sum = 0
             for batch in train_loader:
+                if self.stop_requested: return False # 배치 단위 중지 체크
+                
                 inputs = batch[0].to(self.device)
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, inputs)
@@ -91,26 +108,54 @@ class Trainer:
                 val_loss_sum = 0
                 with torch.no_grad():
                     for batch in val_loader:
+                        if self.stop_requested: return False # 배치 단위 중지 체크
+                        
                         inputs = batch[0].to(self.device)
                         outputs = self.model(inputs)
                         loss = self.criterion(outputs, inputs)
                         val_loss_sum += loss.item()
                 avg_val_loss = val_loss_sum / len(val_loader)
                 
-                # 최적 모델 체크 (필요시 저장 로직 확장 가능)
+                # 최적 모델 체크 및 조기 종료 로직
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
+                    best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    no_improve_count = 0
+                    print(f"    [SAVE] Best model updated at epoch {epoch+1} (Val Loss: {best_val_loss:.6f})")
+                else:
+                    no_improve_count += 1
+                    if no_improve_count >= patience:
+                        print(f"    [EARLY STOP] No improvement for {patience} epochs. Stopping at epoch {epoch+1}")
+                        self.early_stopped = True # 플래그 설정
+                        break
 
             # 로그 출력
             epoch_duration = time.time() - epoch_start
             log_msg = f"    Epoch [{epoch+1}/{self.config['epochs']}] Train Loss: {avg_train_loss:.6f}"
             if avg_val_loss is not None:
                 log_msg += f", Val Loss: {avg_val_loss:.6f}"
+                if no_improve_count > 0:
+                    log_msg += f" (No improvement for {no_improve_count} epochs)"
             log_msg += f" ({epoch_duration:.1f}s)"
             print(log_msg)
+
+            # 진행 상황 콜백 호출
+            if self.progress_callback:
+                self.progress_callback(epoch + 1, self.config['epochs'], avg_train_loss, avg_val_loss)
+
+            # 중지 요청 확인 (Early Exit)
+            if self.stop_requested:
+                print(f"    [STOP] Training interrupted by user at epoch {epoch+1}")
+                return False
         
         # 3. 모델 및 스케일러 저장
         os.makedirs(os.path.dirname(self.paths['model']), exist_ok=True)
+        
+        # 최적의 모델 상태가 있다면 그것을 로드한 뒤 저장, 없으면 현재 상태 저장
+        if best_model_state:
+            self.model.load_state_dict(best_model_state)
+            print(f"[*] Deploying best model (Val Loss: {best_val_loss:.6f})")
+        
         torch.save(self.model.state_dict(), self.paths['model'])
         self.processor.save_scaler(self.paths['scaler'])
         

@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import warnings
 from mysql.connector import Error, pooling
@@ -90,7 +91,7 @@ class DBConnector:
             cursor.close()
             conn.close()
 
-    def fetch_traffic(self, start_time, end_time):
+    def fetch_traffic(self, start_time, end_time, stop_checker=None):
         """이더넷 트래픽 성능 데이터 조회"""
         hours = pd.date_range(start=start_time, end=end_time, freq='h')
         conn = self.get_connection()
@@ -98,6 +99,11 @@ class DBConnector:
         all_dfs = []
         try:
             for hr in hours:
+                # 중지 요청 확인
+                if stop_checker and stop_checker():
+                    print("[DB] fetch_traffic interrupted by user.")
+                    break
+
                 table = f"cowptn_noti_pm_{hr.strftime('%Y_%m_%d_%H')}"
                 query = f"""
                     SELECT occur_date, ip_addr, cid, lid,
@@ -116,7 +122,7 @@ class DBConnector:
         finally:
             conn.close()
 
-    def fetch_optical(self, start_time, end_time):
+    def fetch_optical(self, start_time, end_time, stop_checker=None):
         """광파워 성능 데이터 조회"""
         hours = pd.date_range(start=start_time, end=end_time, freq='h')
         conn = self.get_connection()
@@ -124,6 +130,11 @@ class DBConnector:
         all_dfs = []
         try:
             for hr in hours:
+                # 중지 요청 확인
+                if stop_checker and stop_checker():
+                    print("[DB] fetch_optical interrupted by user.")
+                    break
+
                 table = f"cowptn_noti_pm_optic_power_{hr.strftime('%Y_%m_%d_%H')}"
                 query = f"""
                     SELECT occur_date, ip_addr, cid, lid, tx_avg_power, rx_avg_power
@@ -139,6 +150,12 @@ class DBConnector:
             return pd.concat(all_dfs, ignore_index=True) if all_dfs else None
         finally:
             conn.close()
+
+    def _clean_value(self, val, default=0):
+        """NaN, inf 등의 값을 DB에 안전한 None(NULL) 또는 기본값으로 변환"""
+        if pd.isna(val) or (isinstance(val, float) and (np.isinf(val) or np.isnan(val))):
+            return None if default is None else default
+        return val
 
     def save_results(self, df):
         """탐지 결과 저장"""
@@ -160,23 +177,35 @@ class DBConnector:
         try:
             data = []
             for _, row in df.iterrows():
-                # NaN 처리
-                ttf = float(row.get('ttf_minutes')) if pd.notnull(row.get('ttf_minutes')) else None
-                fatal_time = row.get('expected_fatal_time') if pd.notnull(row.get('expected_fatal_time')) else None
-                
+                # 모든 필드에 대해 안전한 값 변환 적용
                 data.append((
                     row['occur_date'], row['ip_addr'], row['cid'], row['lid'],
-                    int(row.get('tx_packet', 0)), int(row.get('rx_packet', 0)), int(row.get('error_packet', 0)),
-                    float(row.get('tx_avg_power', 0)), float(row.get('rx_avg_power', 0)),
-                    float(row.get('traffic_score', 0)), float(row.get('traffic_severity', 0)), 
-                    float(row.get('traffic_slope', 0)), float(row.get('traffic_threshold', 0)), int(row.get('is_traffic_anomaly', 0)),
-                    float(row.get('optical_score', 0)), float(row.get('optical_severity', 0)), 
-                    float(row.get('optical_slope', 0)), float(row.get('optical_threshold', 0)), int(row.get('is_optical_anomaly', 0)),
-                    float(row.get('anomaly_score', 0)), float(row.get('severity', 0)), 
-                    float(row.get('slope', 0)), row.get('slope_label', 'STABLE'),
-                    float(row.get('threshold', 0)), int(row.get('is_anomaly', 0)),
-                    int(row.get('alarm_level', 0)), row.get('alarm_label', 'NORMAL'),
-                    ttf, fatal_time, row.get('anomaly_reason', '')
+                    int(self._clean_value(row.get('tx_packet'), 0)),
+                    int(self._clean_value(row.get('rx_packet'), 0)),
+                    int(self._clean_value(row.get('error_packet'), 0)),
+                    float(self._clean_value(row.get('tx_avg_power'), 0.0)),
+                    float(self._clean_value(row.get('rx_avg_power'), 0.0)),
+                    float(self._clean_value(row.get('traffic_score'), 0.0)),
+                    float(self._clean_value(row.get('traffic_severity'), 0.0)), 
+                    float(self._clean_value(row.get('traffic_slope'), 0.0)),
+                    float(self._clean_value(row.get('traffic_threshold'), 0.0)),
+                    int(self._clean_value(row.get('is_traffic_anomaly'), 0)),
+                    float(self._clean_value(row.get('optical_score'), 0.0)),
+                    float(self._clean_value(row.get('optical_severity'), 0.0)), 
+                    float(self._clean_value(row.get('optical_slope'), 0.0)),
+                    float(self._clean_value(row.get('optical_threshold'), 0.0)),
+                    int(self._clean_value(row.get('is_optical_anomaly'), 0)),
+                    float(self._clean_value(row.get('anomaly_score'), 0.0)),
+                    float(self._clean_value(row.get('severity'), 0.0)), 
+                    float(self._clean_value(row.get('slope'), 0.0)),
+                    row.get('slope_label', 'STABLE'),
+                    float(self._clean_value(row.get('threshold'), 0.0)),
+                    int(self._clean_value(row.get('is_anomaly'), 0)),
+                    int(self._clean_value(row.get('alarm_level'), 0)),
+                    row.get('alarm_label', 'NORMAL'),
+                    self._clean_value(row.get('ttf_minutes'), None), # 예지정비는 NULL 허용
+                    self._clean_value(row.get('expected_fatal_time'), None),
+                    row.get('anomaly_reason', '')
                 ))
             cursor.executemany(query, data)
             conn.commit()

@@ -104,6 +104,19 @@
                            min="90" max="99.9"
                            class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 focus:border-amber-500/50 outline-none transition-colors" />
                   </div>
+
+                  <div class="space-y-2">
+                    <div class="group relative flex items-center gap-2">
+                      <label class="text-xs text-slate-500 uppercase font-bold block">Early Stop Patience</label>
+                      <span class="text-slate-700 cursor-help text-xs">ⓘ</span>
+                      <div class="absolute bottom-full left-0 mb-2 invisible group-hover:visible bg-slate-700 text-white text-[10px] px-2 py-1 rounded whitespace-nowrap z-10 shadow-xl border border-slate-600">
+                        Stop after N epochs with no improvement.
+                      </div>
+                    </div>
+                    <input type="number" v-model.number="trainConfigs[ft as string].patience" 
+                           min="1" max="100"
+                           class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 focus:border-amber-500/50 outline-none transition-colors" />
+                  </div>
                 </div>
 
                 <div class="space-y-4 pt-4">
@@ -134,12 +147,51 @@
                   </div>
                 </div>
 
-                <button @click="handleTrain(ft as string)" 
-                        :disabled="isTraining[ft as string]"
-                        class="w-full py-4 bg-amber-600/10 hover:bg-amber-600/20 border border-amber-500/30 text-amber-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-3">
-                  <svg v-if="isTraining[ft as string]" class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                  {{ isTraining[ft as string] ? 'Training...' : 'Train' }}
+                <!-- Training Control (Inline Layout) -->
+                <div v-if="isTraining[ft as string]" class="flex gap-2 w-full">
+                  <div class="flex-1 flex items-center justify-between px-6 py-4 bg-amber-600/10 border border-amber-500/30 text-amber-500 rounded-xl font-bold opacity-90">
+                    <div class="flex items-center gap-3">
+                      <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                      <span class="text-sm">Training...</span>
+                    </div>
+                    <div v-if="store.modelStatus[ft]?.training" class="text-[11px] font-mono text-amber-400/90 bg-amber-500/10 px-3 py-1 rounded-lg border border-amber-500/20">
+                      {{ store.modelStatus[ft].training.current_epoch }}/{{ store.modelStatus[ft].training.total_epochs }} 
+                      | Loss: {{ store.modelStatus[ft].training.loss?.toFixed(5) }}
+                      <span v-if="store.modelStatus[ft].training.val_loss !== null">
+                        | Val: {{ store.modelStatus[ft].training.val_loss?.toFixed(5) }}
+                      </span>
+                    </div>
+                  </div>
+                  <button @click="handleStop(ft as string)"
+                          class="px-5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-500 rounded-xl text-xs font-bold transition-all flex items-center justify-center">
+                    Stop
+                  </button>
+                </div>
+                <button v-else
+                        @click="handleTrain(ft as string)" 
+                        class="w-full py-4 bg-amber-600/10 hover:bg-amber-600/20 border border-amber-500/30 text-amber-500 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-3">
+                  Train
                 </button>
+
+                <!-- Error Message Display -->
+                <div v-if="!isTraining[ft as string] && store.modelStatus[ft]?.training?.last_error" 
+                     class="mt-4 p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-start gap-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-rose-400 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                  <div class="space-y-1">
+                    <p class="text-xs font-bold text-rose-400 uppercase tracking-wider">Training Fail</p>
+                    <p class="text-sm text-rose-300/80 leading-relaxed">{{ store.modelStatus[ft].training.last_error }}</p>
+                  </div>
+                </div>
+
+                <!-- Success Message Display -->
+                <div v-if="!isTraining[ft as string] && store.modelStatus[ft]?.training?.success_msg" 
+                     class="mt-4 p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl flex items-start gap-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                  <div class="space-y-1">
+                    <p class="text-xs font-bold text-emerald-400 uppercase tracking-wider">Training Success</p>
+                    <p class="text-sm text-emerald-300/80 leading-relaxed">{{ store.modelStatus[ft].training.success_msg }}</p>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -196,7 +248,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, reactive } from 'vue'
+import { ref, onMounted, onUnmounted, watch, reactive } from 'vue'
 import { store } from '../store'
 
 const isTraining = reactive<Record<string, boolean>>({
@@ -210,8 +262,8 @@ const infConfigs = ref<Record<string, any>>({
 })
 
 const trainConfigs = ref<Record<string, any>>({
-  traffic: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.9 },
-  optical: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.9 }
+  traffic: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.9, patience: 10 },
+  optical: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.9, patience: 10 }
 })
 
 const getPastDate = (days: number) => {
@@ -247,11 +299,14 @@ watch(() => store.modelStatus, (newVal) => {
   if (newVal.traffic) {
     infConfigs.value.traffic = { ...newVal.traffic.inference_config }
     trainConfigs.value.traffic = { ...newVal.traffic.training_config }
+    // 서버 응답의 경로를 정확히 참조 (info.training.is_training)
+    isTraining.traffic = newVal.traffic.training?.is_training || false
     infDirty.traffic = false
   }
   if (newVal.optical) {
     infConfigs.value.optical = { ...newVal.optical.inference_config }
     trainConfigs.value.optical = { ...newVal.optical.training_config }
+    isTraining.optical = newVal.optical.training?.is_training || false
     infDirty.optical = false
   }
 }, { deep: true, immediate: true })
@@ -264,26 +319,78 @@ const handleSaveInference = async (ft: string) => {
     await store.updateInferenceConfig(ft, infConfigs.value[ft])
     showNotice(`${ft.toUpperCase()} inference configuration applied.`)
     infDirty[ft] = false
-  } catch (err) {
-    showNotice(`Failed to update ${ft} configuration.`, 'error')
+  } catch (err: any) {
+    const errMsg = err.response?.data?.detail || err.message || `Failed to update ${ft} configuration.`
+    showNotice(errMsg, 'error')
   }
+}
+
+let statusTimer: any = null
+
+const stopPolling = () => {
+  if (statusTimer) {
+    clearInterval(statusTimer)
+    statusTimer = null
+    console.log('[Poll] Stopped polling (No active training)')
+  }
+}
+
+const startPolling = () => {
+  if (statusTimer) return // Already polling
+  console.log('[Poll] Started polling for training progress')
+  statusTimer = setInterval(async () => {
+    await store.fetchModelStatus()
+    
+    // 모든 모델의 학습 상태 확인
+    const isAnyTraining = Object.values(store.modelStatus).some((m: any) => m.training?.is_training)
+    if (!isAnyTraining) {
+      stopPolling()
+    }
+  }, 10000)
 }
 
 const handleTrain = async (ft: string) => {
   const dates = dateConfigs.value[ft]
-  if (!confirm(`Trigger ${ft} model training?`)) return
-  isTraining[ft] = true
+  if (!confirm(`설정한 파라미터로 모델을 훈련하시겠습니까?`)) return
+  
+  isTraining[ft] = true 
   try {
     await store.trainModel(ft, trainConfigs.value[ft], dates)
     showNotice(`${ft.toUpperCase()} training task started.`)
-  } catch (err) {
-    showNotice(`Failed to start ${ft} training.`, 'error')
+    await store.fetchModelStatus()
+    startPolling() // 학습 시작 시 폴링 시작
+  } catch (err: any) {
+    const errMsg = err.response?.data?.detail || err.message || `Failed to start ${ft} training.`
+    showNotice(errMsg, 'error')
     isTraining[ft] = false
+  }
+}
+
+const handleStop = async (ft: string) => {
+  if (!confirm(`훈련을 중지하시겠습니까?`)) return
+  try {
+    await store.stopTraining(ft)
+    showNotice(`${ft.toUpperCase()} training stop requested.`)
+    await store.fetchModelStatus()
+    // handleStop 후에도 폴링은 계속됨 (서버에서 완전히 멈출 때까지 기다림)
+  } catch (err: any) {
+    const errMsg = err.response?.data?.detail || err.message || `Failed to stop ${ft} training.`
+    showNotice(errMsg, 'error')
   }
 }
 
 onMounted(async () => {
   await store.fetchModelStatus()
+  
+  // 진입 시 이미 학습 중인 모델이 있다면 폴링 시작
+  const isAnyTraining = Object.values(store.modelStatus).some((m: any) => m.training?.is_training)
+  if (isAnyTraining) {
+    startPolling()
+  }
+})
+
+onUnmounted(() => {
+  stopPolling()
 })
 </script>
 

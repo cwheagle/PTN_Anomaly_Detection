@@ -27,6 +27,12 @@ scheduler_instance = None
 db = DBConnector()
 collector = DataCollector()
 event_queues = set() # SSE 클라이언트들을 위한 큐 집합
+# 학습 진행 상태 상세 추적
+training_status = {
+    "traffic": {"is_training": False, "current_epoch": 0, "total_epochs": 0, "loss": 0, "val_loss": None, "last_error": None, "success_msg": None}, 
+    "optical": {"is_training": False, "current_epoch": 0, "total_epochs": 0, "loss": 0, "val_loss": None, "last_error": None, "success_msg": None}
+} 
+active_trainers = {} # 현재 실행 중인 Trainer 인스턴스 (중지용)
 
 async def broadcast_alarm(alarm_data: dict):
     """모든 연결된 SSE 클라이언트에게 알람 전송"""
@@ -102,6 +108,7 @@ async def get_model_status():
         # 기본 구조 정의
         info = {
             "exists": os.path.exists(p['model']),
+            "training": training_status.get(ft, {"is_training": False}),
             "last_trained": None,
             "samples_used": 0,
             # 추론 설정 (실시간 수정 가능)
@@ -116,7 +123,8 @@ async def get_model_status():
                 "learning_rate": MODEL_CONFIG['learning_rate'],
                 "batch_size": MODEL_CONFIG['batch_size'],
                 "threshold_percentile": MODEL_CONFIG['threshold_percentile'],
-                "window_size": MODEL_CONFIG['window_size']
+                "window_size": MODEL_CONFIG['window_size'],
+                "patience": MODEL_CONFIG['patience']
             }
         }
         
@@ -176,26 +184,82 @@ async def update_inference_config(ft: str = Query(..., regex="^(traffic|optical)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
-    """백그라운드 학습 실행 (명시적인 훈련 설정 및 날짜 범위 사용)"""
+def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
+    """백그라운드 학습 실행 (스레드에서 실행되어 이벤트 루프 차단 방지)"""
     print(f"[*] [BG] Starting training pipeline for {ft}...")
+    
+    # 상태 초기화
+    training_status[ft] = {
+        "is_training": True, 
+        "current_epoch": 0, 
+        "total_epochs": training_config.get('epochs', MODEL_CONFIG['epochs']), 
+        "loss": 0, 
+        "val_loss": None,
+        "last_error": None,
+        "success_msg": None
+    }
+    
+    def on_progress(epoch, total, loss, val_loss):
+        training_status[ft].update({
+            "current_epoch": epoch,
+            "total_epochs": total,
+            "loss": loss,
+            "val_loss": val_loss
+        })
+
+    # Trainer 생성 및 등록
+    trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress)
+    active_trainers[ft] = trainer
+
     try:
-        # 데이터 수집 (날짜 파라미터 기반)
-        collector.collect_and_save(
+        # 데이터 수집 전 중지 요청 확인
+        if trainer.stop_requested:
+            print(f"[*] [BG] {ft} training cancelled before data collection.")
+            return
+
+        # 데이터 수집 (날짜 파라미터 기반, 요청된 ft만 수집)
+        results = collector.collect_and_save(
             train_start=date_params['train_start'],
             train_end=date_params['train_end'],
             test_start=date_params['test_start'],
-            test_end=date_params['test_end']
+            test_end=date_params['test_end'],
+            feature_type=ft,
+            stop_checker=lambda: trainer.stop_requested
         )
         
-        # Trainer 생성 시 주입된 training_config가 우선 적용됨
-        trainer = Trainer(feature_type=ft, config_override=training_config)
+        # 데이터 수집 후 중지 요청 확인
+        if trainer.stop_requested:
+            print(f"[*] [BG] {ft} training cancelled after data collection.")
+            return
+
+        # 데이터 수집 결과 검증
+        min_samples = MODEL_CONFIG.get('window_size', 12)
+        if not results or ft not in results or results[ft]['train'] < min_samples:
+            count = results.get(ft, {}).get('train', 0) if results else 0
+            err_msg = f"Insufficient train data: {count} datas found. (Min required: {min_samples})"
+            training_status[ft]["last_error"] = err_msg
+            print(f"[!] [BG] {ft} training failed: {err_msg}")
+            return
+
+        # 학습 실행
         if trainer.train():
-            print(f"[*] [BG] {ft.capitalize()} model training complete.")
+            msg = "Model training complete."
+            if trainer.early_stopped:
+                msg = f"Training finished early at epoch {training_status[ft]['current_epoch']} (Optimal weights saved)."
+            training_status[ft]["success_msg"] = msg
+            print(f"[*] [BG] {ft.capitalize()} {msg}")
         else:
+            if training_status[ft]["last_error"] is None:
+                training_status[ft]["last_error"] = "Model training failed or was stopped."
             print(f"[!] [BG] {ft.capitalize()} model training failed.")
     except Exception as e:
-        print(f"[!] [BG] Training Error: {e}")
+        err_msg = f"Runtime Error: {str(e)}"
+        training_status[ft]["last_error"] = err_msg
+        print(f"[!] [BG] Training Error: {err_msg}")
+    finally:
+        training_status[ft]["is_training"] = False
+        if ft in active_trainers:
+            del active_trainers[ft]
 
 @app.post("/api/model/train")
 async def train_model(
@@ -208,7 +272,7 @@ async def train_model(
     test_end: str = Query(None)
 ):
     """사용자가 지정한 훈련 설정 및 날짜 범위를 기반으로 모델 재학습 시작"""
-    # 날짜 파라미터가 없으면 기본값(최근 37일/7일) 생성
+    # 날짜 파라미터가 없으면 기본값 생성
     now = datetime.now()
     if not train_start: train_start = (now - timedelta(days=37)).strftime('%Y-%m-%d')
     if not train_end:   train_end   = (now - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -227,6 +291,17 @@ async def train_model(
         "message": f"{ft} model training task queued.",
         "range": date_params
     }
+
+@app.post("/api/model/train/stop")
+async def stop_training(ft: str = Query(..., regex="^(traffic|optical)$")):
+    """현재 진행 중인 모델 학습 강제 중지"""
+    trainer = active_trainers.get(ft)
+    if not trainer:
+        return {"status": "ignored", "message": f"No active training task found for {ft}."}
+    
+    trainer.stop()
+    training_status[ft]["last_error"] = "Training stopped by user."
+    return {"status": "success", "message": f"Stop request sent to {ft} trainer."}
 
 # --- 데이터 및 스케줄러 API ---
 

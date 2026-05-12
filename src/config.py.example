@@ -25,6 +25,7 @@ MODEL_CONFIG = {
     "learning_rate": 0.001,
     "epochs": 100,
     "threshold_percentile": 99.9,
+    "patience": 10,
     "threshold": 0.1  # 기본 임계치
 }
 

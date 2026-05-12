@@ -122,5 +122,16 @@ export const store = reactive({
       console.error('Failed to trigger training', err)
       throw err
     }
+  },
+
+  async stopTraining(ft: string) {
+    try {
+      const res = await axios.post(`/api/model/train/stop?ft=${ft}`)
+      await this.fetchModelStatus()
+      return res.data
+    } catch (err) {
+      console.error('Failed to stop training', err)
+      throw err
+    }
   }
 })

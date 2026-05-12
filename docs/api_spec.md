@@ -87,7 +87,7 @@
 
 #### 2.4.1 모델 상태 조회
 - **Endpoint**: `GET /api/model/status`
-- **Description**: 현재 학습된 모델의 유무, 마지막 학습 시간, 적용 중인 설정값(훈련/추론 분리)을 반환합니다.
+- **Description**: 현재 학습된 모델의 유무, 마지막 학습 시간, 그리고 **현재 진행 중인 학습 상태(에포크, 손실률 등)** 및 설정을 반환합니다.
 - **Response**:
 ```json
 {
@@ -95,6 +95,15 @@
     "exists": true,
     "last_trained": "2026-05-12 14:30:00",
     "samples_used": 15200,
+    "training": {
+      "is_training": true,
+      "current_epoch": 45,
+      "total_epochs": 100,
+      "loss": 0.0024,
+      "val_loss": 0.0031,
+      "last_error": null,
+      "success_msg": null
+    },
     "inference_config": {
       "threshold": 0.1245,
       "slope_threshold": 1.5,
@@ -131,7 +140,19 @@
   - `train_end`: 훈련 종료일 (YYYY-MM-DD)
   - `test_start`: 검증 시작일 (YYYY-MM-DD)
   - `test_end`: 검증 종료일 (YYYY-MM-DD)
-- **Body**: `training_config` 객체 (epochs, learning_rate 등)
+- **Body**: `training_config` 객체 (epochs, learning_rate 등 - 생략 시 기본값 사용)
+
+#### 2.4.4 모델 학습 중지
+- **Endpoint**: `POST /api/model/train/stop`
+- **Description**: 현재 실행 중인 모델 학습 작업을 즉시 중단합니다.
+- **Query Params**: `ft=traffic|optical`
+- **Response**:
+```json
+{
+  "status": "success",
+  "message": "Stop request sent to traffic trainer."
+}
+```
 
 ## 3. 실시간 알림 스트림 (SSE)
 이상 발생 시 서버에서 클라이언트로 즉시 푸시 알림을 전달합니다.
