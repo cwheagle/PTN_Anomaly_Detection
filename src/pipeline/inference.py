@@ -12,25 +12,48 @@ from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS, SEVERITY_CONFIG
 class AnomalyDetector:
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tracks = {} # {f_type: {'model': m, 'proc': p, 'th': t}}
+        self.tracks = {} # {f_type: {'model': m, 'proc': p, 'th': t, 'config': c}}
 
         for ft in ['traffic', 'optical']:
+            p = PATHS[ft]
+            # 모델 파일명과 동일한 설정 파일 (예: traffic_ae.json)
+            meta_path = p['model'].replace('.pth', '.json')
+            
+            # 1. 설정 파일이 있으면 거기서 모델 구성을 로드, 없으면 기본 config.py 사용
             cfg = MODEL_CONFIG.copy()
+            th = None
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, 'r') as f:
+                        meta = json.load(f)
+                        cfg.update(meta.get('config', {}))
+                        th = meta.get('threshold')
+                        print(f"[*] Loaded metadata for {ft} model (Trained at: {meta.get('trained_at')})")
+                except Exception as e:
+                    print(f"[!] Error reading meta for {ft}: {e}")
+
             cfg['input_dim'] = len(FEATURE_GROUPS[ft])
             model = LSTMAutoencoder(cfg).to(self.device)
             
-            p = PATHS[ft]
             if os.path.exists(p['model']):
-                model.load_state_dict(torch.load(p['model'], map_location=self.device))
-                model.eval()
-                
-                proc = DataProcessor(ft)
-                proc.load_scaler(p['scaler'])
-                
-                with open(p['threshold'], 'r') as f:
-                    th = json.load(f)['threshold']
-                
-                self.tracks[ft] = {'model': model, 'proc': proc, 'th': th}
+                try:
+                    model.load_state_dict(torch.load(p['model'], map_location=self.device, weights_only=True))
+                    model.eval()
+                    
+                    # 2. 로드된 cfg를 DataProcessor에도 전달 (window_size 정합성 확보)
+                    proc = DataProcessor(ft, config=cfg)
+                    if proc.load_scaler(p['scaler']):
+                        if th is not None:
+                            self.tracks[ft] = {'model': model, 'proc': proc, 'th': th, 'config': cfg}
+                            print(f"[*] Loaded {ft} model track successfully.")
+                        else:
+                            print(f"[!] No threshold found for {ft}")
+                    else:
+                        print(f" [!] Failed to load scaler for {ft}")
+                except Exception as e:
+                    print(f"[!] Error loading {ft} model weight: {e}")
+            else:
+                print(f"[!] {ft.capitalize()} model file not found: {p['model']}")
 
     def _get_alarm_info(self, severity):
         """심각도 점수에 따른 경보 등급 및 라벨 반환"""
@@ -86,14 +109,19 @@ class AnomalyDetector:
             else:
                 res[f'{ft}_slope'] = 0.0
 
-            # 상세 사유 진단 로직 (원본 수치 복원)
+            # 1. 데이터 복구 (Inverse Transform) - 사유 진단 및 DB 저장용
+            if ft == 'traffic':
+                res['tx_packet'] = np.expm1(res['tx_packet']).astype(int)
+                res['rx_packet'] = np.expm1(res['rx_packet']).astype(int)
+                res['error_packet'] = np.expm1(res['error_packet']).astype(int)
+
+            # 2. 상세 사유 진단 로직 (복구된 수치 사용)
             def get_detailed_reason(row):
                 if not row[f'is_{ft}_anomaly']: return "NORMAL"
                 if ft == 'traffic':
-                    # 로그 역변환하여 원본 수치 근사값 산출
-                    err = int(np.expm1(row.get('error_packet', 0)))
-                    tx = int(np.expm1(row.get('tx_packet', 0)))
-                    rx = int(np.expm1(row.get('rx_packet', 0)))
+                    err = int(row.get('error_packet', 0))
+                    tx = int(row.get('tx_packet', 0))
+                    rx = int(row.get('rx_packet', 0))
                     reason = f"Traffic (TX:{tx}, RX:{rx}"
                     if err > 0: reason += f", Err:{err}"
                     reason += ")"
@@ -105,8 +133,17 @@ class AnomalyDetector:
                 return "Anomaly"
             
             res[f'{ft}_reason'] = res.apply(get_detailed_reason, axis=1)
-            all_res.append(res[['occur_date', 'ip_addr', 'cid', 'lid', 
-                               f'{ft}_score', f'{ft}_severity', f'{ft}_slope', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason']])
+            
+            # 3. 최종 컬럼 정리 (DB 저장용)
+            cols_to_keep = ['occur_date', 'ip_addr', 'cid', 'lid', 
+                           f'{ft}_score', f'{ft}_severity', f'{ft}_slope', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason']
+            
+            if ft == 'traffic':
+                cols_to_keep.extend(['tx_packet', 'rx_packet', 'error_packet'])
+            elif ft == 'optical':
+                cols_to_keep.extend(['tx_avg_power', 'rx_avg_power'])
+                
+            all_res.append(res[cols_to_keep])
         
         return pd.concat(all_res) if all_res else None
 
@@ -130,14 +167,19 @@ class AnomalyDetector:
                 final[f'{ft}_severity'] = final[f'{ft}_severity'].fillna(0.0)
                 final[f'{ft}_reason'] = final[f'{ft}_reason'].fillna("NORMAL")
                 if f'{ft}_threshold' not in final.columns: final[f'{ft}_threshold'] = 0.0
+        
+        # 원본 수치 결측값 처리
+        for col in ['tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power']:
+            if col in final.columns:
+                final[col] = final[col].fillna(0)
 
         final['is_anomaly'] = (final.get('is_traffic_anomaly', False) == True) | \
                              (final.get('is_optical_anomaly', False) == True)
         
         def merge_reasons(row):
             reasons = []
-            if row.get('is_traffic_anomaly'): reasons.append(f"T:{row['traffic_reason']}")
-            if row.get('is_optical_anomaly'): reasons.append(f"O:{row['optical_reason']}")
+            if row.get('is_traffic_anomaly'): reasons.append(row['traffic_reason'])
+            if row.get('is_optical_anomaly'): reasons.append(row['optical_reason'])
             return " + ".join(reasons) if reasons else "NORMAL"
             
         final['anomaly_reason'] = final.apply(merge_reasons, axis=1)
@@ -160,7 +202,9 @@ class AnomalyDetector:
 
         # 추세 라벨
         def get_slope_label(slope):
-            th = SEVERITY_CONFIG.get('slope_threshold', 3.0)
+            # 트래픽 트랙의 설정을 우선 참조
+            active_cfg = self.tracks['traffic']['config'] if 'traffic' in self.tracks else SEVERITY_CONFIG
+            th = active_cfg.get('slope_threshold', SEVERITY_CONFIG.get('slope_threshold', 3.0))
             if slope > th: return "RISING"
             elif slope < -th: return "FALLING"
             return "STABLE"
@@ -173,8 +217,9 @@ class AnomalyDetector:
 
         # [Phase 6] 잔여 수명 예측 (RUL)
         def calculate_rul(row):
-            target_sev = SEVERITY_CONFIG.get('rul_target', 90.0)
-            slope_th = SEVERITY_CONFIG.get('slope_threshold', 3.0)
+            active_cfg = self.tracks['traffic']['config'] if 'traffic' in self.tracks else SEVERITY_CONFIG
+            target_sev = active_cfg.get('rul_target', SEVERITY_CONFIG.get('rul_target', 90.0))
+            slope_th = active_cfg.get('slope_threshold', SEVERITY_CONFIG.get('slope_threshold', 3.0))
             curr_sev = row['severity']
             slope = row['slope']
             
@@ -193,9 +238,10 @@ class AnomalyDetector:
 
         final[['ttf_minutes', 'expected_fatal_time']] = final.apply(calculate_rul, axis=1)
 
-        # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 23개 컬럼으로 확장
+        # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 확장
         standard_cols = [
             'occur_date', 'ip_addr', 'cid', 'lid', 
+            'tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power',
             'traffic_score', 'traffic_severity', 'traffic_slope', 'traffic_threshold', 'is_traffic_anomaly',
             'optical_score', 'optical_severity', 'optical_slope', 'optical_threshold', 'is_optical_anomaly',
             'anomaly_score', 'severity', 'slope', 'slope_label', 'threshold', 'is_anomaly', 

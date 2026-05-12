@@ -6,8 +6,11 @@ import os
 from src.config import MODEL_CONFIG, FEATURE_GROUPS
 
 class DataProcessor:
-    def __init__(self, feature_type='traffic'):
-        self.window_size = MODEL_CONFIG['window_size']
+    def __init__(self, feature_type='traffic', config=None):
+        # 1. 설정값 우선순위: config 파라미터 > MODEL_CONFIG 기본값
+        active_config = config if config else MODEL_CONFIG
+        self.window_size = active_config.get('window_size', MODEL_CONFIG['window_size'])
+        
         self.feature_type = feature_type
         self.feature_cols = FEATURE_GROUPS[feature_type]
         # 이상치에 강한 RobustScaler 사용

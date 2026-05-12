@@ -32,12 +32,39 @@
     "slope_label": "RISING",
     "ttf_minutes": 30.0,
     "expected_fatal_time": "2026-05-11 10:45:00",
-    "anomaly_reason": "T:Traffic Anomaly (TX:1200, RX:0)"
+    "anomaly_reason": "Traffic (TX:1200, RX:0)"
   }
 ]
 ```
 
-### 2.2. 스케줄러 상태 및 제어
+### 2.2. 특정 포트 과거 이력 조회
+특정 포트의 시계열 성능 데이터와 이상 점수 이력을 조회합니다 (그래프용).
+
+- **URL**: `/api/anomalies/history`
+- **Method**: `GET`
+- **Query Parameters**:
+    - `ip_addr` (Required): 대상 장비 IP
+    - `slot_id` (Required): 대상 슬롯 ID (CID)
+    - `port_id` (Required): 대상 포트 ID (LID)
+    - `days` (Optional): 조회 기간 (Default: `1`)
+- **Response**:
+```json
+[
+  {
+    "occur_date": "2026-05-11 10:00:00",
+    "tx_packet": 1200,
+    "rx_packet": 1150,
+    "error_packet": 0,
+    "tx_avg_power": 0.0,
+    "rx_avg_power": 0.0,
+    "anomaly_score": 0.02,
+    "severity": 15.2,
+    "threshold": 0.15
+  }
+]
+```
+
+### 2.3. 스케줄러 상태 및 제어
 추론 엔진의 가동 상태를 조회하거나 제어합니다.
 
 - **URL**: `/api/scheduler/status`
@@ -55,6 +82,56 @@
   "action": "start"  // "start", "stop"
 }
 ```
+
+### 2.4. 모델 관리 및 훈련
+
+#### 4.1 모델 상태 조회
+- **Endpoint**: `GET /api/model/status`
+- **Description**: 현재 학습된 모델의 유무, 마지막 학습 시간, 적용 중인 설정값(훈련/추론 분리)을 반환합니다.
+- **Response**:
+```json
+{
+  "traffic": {
+    "exists": true,
+    "last_trained": "2026-05-12 14:30:00",
+    "samples_used": 15200,
+    "inference_config": {
+      "threshold": 0.1245,
+      "slope_threshold": 1.5,
+      "rul_target": 90.0
+    },
+    "training_config": {
+      "epochs": 100,
+      "learning_rate": 0.001,
+      "batch_size": 32,
+      "threshold_percentile": 99.9
+    }
+  }
+}
+```
+
+#### 4.2 추론 설정 업데이트 (재학습 없음)
+- **Endpoint**: `POST /api/model/inference-config`
+- **Description**: 모델 재학습 없이 임계값이나 감도 설정만 즉시 업데이트합니다.
+- **Query Params**: `ft=traffic|optical`
+- **Body**:
+```json
+{
+  "threshold": 0.15,
+  "slope_threshold": 2.0
+}
+```
+
+#### 4.3 모델 학습 실행
+- **Endpoint**: `POST /api/model/train`
+- **Description**: 지정된 파라미터와 날짜 범위를 사용하여 모델을 재학습합니다. (백그라운드 실행)
+- **Query Params**: 
+  - `ft`: 모델 타입 (traffic/optical)
+  - `train_start`: 훈련 시작일 (YYYY-MM-DD)
+  - `train_end`: 훈련 종료일 (YYYY-MM-DD)
+  - `test_start`: 검증 시작일 (YYYY-MM-DD)
+  - `test_end`: 검증 종료일 (YYYY-MM-DD)
+- **Body**: `training_config` 객체 (epochs, learning_rate 등)
 
 ## 3. 실시간 알림 스트림 (SSE)
 이상 발생 시 서버에서 클라이언트로 즉시 푸시 알림을 전달합니다.
@@ -75,4 +152,4 @@
 ```
 
 ---
-*최종 업데이트: 2026-05-11*
+*최종 업데이트: 2026-05-12*

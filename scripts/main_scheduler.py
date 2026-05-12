@@ -2,7 +2,9 @@ import os
 import sys
 
 # 프로젝트 루트 디렉토리를 path에 추가 (scripts 폴더에서 실행 시 대응)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(root_dir)
+os.chdir(root_dir) # 작업 디렉토리를 프로젝트 루트로 강제 변경
 
 from src.pipeline.scheduler import PTNAnomalyScheduler
 

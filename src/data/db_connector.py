@@ -43,6 +43,12 @@ class DBConnector:
                 ip_addr VARCHAR(50) NOT NULL,
                 cid INT,
                 lid INT,
+                -- 원본 성능 데이터 (그래프용)
+                tx_packet BIGINT DEFAULT 0,
+                rx_packet BIGINT DEFAULT 0,
+                error_packet BIGINT DEFAULT 0,
+                tx_avg_power FLOAT DEFAULT 0.0,
+                rx_avg_power FLOAT DEFAULT 0.0,
                 -- 트래픽 트랙 상세
                 traffic_score FLOAT DEFAULT 0.0,
                 traffic_severity FLOAT DEFAULT 0.0,
@@ -144,22 +150,25 @@ class DBConnector:
         query = """
             INSERT IGNORE INTO anomaly_detection (
                 occur_date, ip_addr, cid, lid, 
+                tx_packet, rx_packet, error_packet, tx_avg_power, rx_avg_power,
                 traffic_score, traffic_severity, traffic_slope, traffic_threshold, is_traffic_anomaly,
                 optical_score, optical_severity, optical_slope, optical_threshold, is_optical_anomaly,
                 anomaly_score, severity, slope, slope_label, threshold, is_anomaly, 
                 alarm_level, alarm_label, ttf_minutes, expected_fatal_time, 
                 anomaly_reason, detect_time
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
         """
         try:
             data = []
             for _, row in df.iterrows():
-                # NaN 처리 (None으로 변환하여 DB에 NULL로 입력)
+                # NaN 처리
                 ttf = float(row.get('ttf_minutes')) if pd.notnull(row.get('ttf_minutes')) else None
                 fatal_time = row.get('expected_fatal_time') if pd.notnull(row.get('expected_fatal_time')) else None
                 
                 data.append((
                     row['occur_date'], row['ip_addr'], row['cid'], row['lid'],
+                    int(row.get('tx_packet', 0)), int(row.get('rx_packet', 0)), int(row.get('error_packet', 0)),
+                    float(row.get('tx_avg_power', 0)), float(row.get('rx_avg_power', 0)),
                     float(row.get('traffic_score', 0)), float(row.get('traffic_severity', 0)), 
                     float(row.get('traffic_slope', 0)), float(row.get('traffic_threshold', 0)), int(row.get('is_traffic_anomaly', 0)),
                     float(row.get('optical_score', 0)), float(row.get('optical_severity', 0)), 
