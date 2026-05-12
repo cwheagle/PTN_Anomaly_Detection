@@ -1,7 +1,6 @@
-import mysql.connector
-from mysql.connector import Error, pooling
 import pandas as pd
 import warnings
+from mysql.connector import Error, pooling
 from src.config import DB_CONFIG, SIGNAL_TYPES
 
 # pandas의 SQLAlchemy 권고 경고 무시

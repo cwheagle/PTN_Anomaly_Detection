@@ -24,7 +24,8 @@ MODEL_CONFIG = {
     "batch_size": 32,
     "learning_rate": 0.001,
     "epochs": 100,
-    "threshold_percentile": 99.9  # 극도로 보수적으로 상향 (상위 0.1%)
+    "threshold_percentile": 99.9,
+    "threshold": 0.1  # 기본 임계치
 }
 
 # Severity Configuration (Phase 6: 다단계 경보 체계)
@@ -43,17 +44,15 @@ SIGNAL_TYPES = {
     "OPTIC": 44
 }
 
-# Path Configuration (앙상블 모델용 분리)
+# Path Configuration
 PATHS = {
     "traffic": {
         "model": "models/traffic_ae.pth",
-        "scaler": "models/traffic_scaler.joblib",
-        "threshold": "models/traffic_threshold.json"
+        "scaler": "models/traffic_scaler.joblib"
     },
     "optical": {
         "model": "models/optical_ae.pth",
-        "scaler": "models/optical_scaler.joblib",
-        "threshold": "models/optical_threshold.json"
+        "scaler": "models/optical_scaler.joblib"
     },
     "log_path": "logs/anomaly_detection.log"
 }

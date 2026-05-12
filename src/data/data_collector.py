@@ -1,6 +1,4 @@
 import os
-import pandas as pd
-from datetime import datetime, timedelta
 from src.data.db_connector import DBConnector
 
 class DataCollector:

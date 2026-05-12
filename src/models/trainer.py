@@ -1,12 +1,12 @@
+import os
+import json
+import time
+import pandas as pd
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import pandas as pd
-import numpy as np
-import os
-import json
-import time
 from datetime import datetime
 from .model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
@@ -153,8 +153,3 @@ class Trainer:
         config_path = self.paths['model'].replace('.pth', '.json')
         with open(config_path, 'w') as f:
             json.dump(meta, f, indent=4)
-
-if __name__ == "__main__":
-    # 직접 실행 시 기본값으로 학습
-    for ft in ['traffic', 'optical']:
-        Trainer(ft).train()

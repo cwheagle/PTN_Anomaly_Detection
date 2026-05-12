@@ -1,7 +1,6 @@
 import sys
 import os
 import pandas as pd
-import numpy as np
 sys.path.append(os.getcwd())
 from src.pipeline.inference import AnomalyDetector
 

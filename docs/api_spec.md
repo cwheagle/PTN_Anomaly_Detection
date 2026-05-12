@@ -85,7 +85,7 @@
 
 ### 2.4. 모델 관리 및 훈련
 
-#### 4.1 모델 상태 조회
+#### 2.4.1 모델 상태 조회
 - **Endpoint**: `GET /api/model/status`
 - **Description**: 현재 학습된 모델의 유무, 마지막 학습 시간, 적용 중인 설정값(훈련/추론 분리)을 반환합니다.
 - **Response**:
@@ -110,7 +110,7 @@
 }
 ```
 
-#### 4.2 추론 설정 업데이트 (재학습 없음)
+#### 2.4.2 추론 설정 업데이트 (재학습 없음)
 - **Endpoint**: `POST /api/model/inference-config`
 - **Description**: 모델 재학습 없이 임계값이나 감도 설정만 즉시 업데이트합니다.
 - **Query Params**: `ft=traffic|optical`
@@ -122,7 +122,7 @@
 }
 ```
 
-#### 4.3 모델 학습 실행
+#### 2.4.3 모델 학습 실행
 - **Endpoint**: `POST /api/model/train`
 - **Description**: 지정된 파라미터와 날짜 범위를 사용하여 모델을 재학습합니다. (백그라운드 실행)
 - **Query Params**: 
