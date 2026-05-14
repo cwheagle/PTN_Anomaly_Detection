@@ -26,6 +26,7 @@
     - **통합 검증**: API-UI 연동 안정성, 실시간 이벤트 스트리밍, 모델 학습 제어 기능 검증 완료.
     - **신뢰성 고도화**: API 버전 체계(v1.0.0) 정립, RUL 예측 로직 정교화, APScheduler 비동기 최적화 완료.
     - **데이터 정합성 및 동기화**: DB Upsert(ON DUPLICATE KEY UPDATE) 도입 및 클라이언트 간 알람 상태 동기화(Pull+Push) 구현 완료.
+    - **Blackwell 최적화**: GB10 GPU 전용 `torch.compile` 및 FP8 연산(Transformer Engine) 반영, 하드웨어 이식성(Fallback) 확보 완료.
 - **진행 중**:
     - **UI 고도화**: 대시보드 디자인 폴리싱(글래스모피즘, 글로우 효과), 전문적인 시각화 및 상호작용 강화 작업 진행 중.
     - **Phase 8 준비**: 동적 임계치 및 자동 재학습 전략 구체화.

@@ -29,6 +29,16 @@ class Trainer:
         
         # 2. 주입된 설정값으로 모델 및 프로세서 초기화
         self.model = LSTMAutoencoder(self.config).to(self.device)
+        
+        # [Blackwell 최적화] PyTorch 2.0+ 및 CUDA 환경에서 컴파일 적용 (이식성 유지)
+        if hasattr(torch, "compile") and self.device.type == "cuda":
+            try:
+                # 첫 실행 시 컴파일 시간이 걸리지만 이후 속도가 비약적으로 향상됨
+                print(f"[*] Optimizing model with torch.compile (mode: max-autotune)...")
+                self.model = torch.compile(self.model, mode="max-autotune")
+            except Exception as e:
+                print(f"[!] torch.compile failed, falling back to eager mode: {e}")
+
         self.processor = DataProcessor(feature_type, config=self.config)
         self.paths = PATHS[feature_type]
         
@@ -87,12 +97,27 @@ class Trainer:
             # --- 훈련 단계 ---
             self.model.train()
             train_loss_sum = 0
+            
+            # [Blackwell 최적화] 라이브러리 임포트 및 존재 여부 확인
+            try:
+                from transformer_engine.pytorch import fp8_autocast
+            except (ImportError, ModuleNotFoundError):
+                fp8_autocast = None
+
+            # [Blackwell 최적화] FP8 Autocast 컨텍스트 준비
+            if fp8_autocast and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9:
+                fp8_ctx = fp8_autocast(enabled=True)
+            else:
+                fp8_ctx = torch.amp.autocast('cuda', enabled=False)
+
             for batch in train_loader:
                 if self.stop_requested: return False # 배치 단위 중지 체크
                 
                 inputs = batch[0].to(self.device)
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, inputs)
+                
+                with fp8_ctx:
+                    outputs = self.model(inputs)
+                    loss = self.criterion(outputs, inputs)
                 
                 self.optimizer.zero_grad()
                 loss.backward()

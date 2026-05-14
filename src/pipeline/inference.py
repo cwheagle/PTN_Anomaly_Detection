@@ -38,6 +38,16 @@ class AnomalyDetector:
             if os.path.exists(p['model']):
                 try:
                     model.load_state_dict(torch.load(p['model'], map_location=self.device, weights_only=True))
+                    
+                    # [Blackwell 최적화] 추론 성능 향상을 위한 컴파일 적용
+                    if hasattr(torch, "compile") and self.device.type == "cuda":
+                        try:
+                            # 추론 시에는 오버헤드 감소 모드가 유리
+                            print(f"[*] Compiling {ft} model for inference optimization...")
+                            model = torch.compile(model, mode="reduce-overhead")
+                        except Exception as e:
+                            print(f"[!] torch.compile failed for {ft}: {e}")
+                            
                     model.eval()
                     
                     # 2. 로드된 cfg를 DataProcessor에도 전달 (window_size 정합성 확보)
@@ -93,11 +103,24 @@ class AnomalyDetector:
         grouped_data = track['proc'].create_sequences(df_clean, is_train=False)
         if not grouped_data: return None
         
+        # [Blackwell 최적화] 라이브러리 임포트 및 존재 여부 확인
+        try:
+            from transformer_engine.pytorch import fp8_autocast
+        except (ImportError, ModuleNotFoundError):
+            fp8_autocast = None
+
+        # [Blackwell 최적화] FP8 Autocast 컨텍스트 준비
+        if fp8_autocast and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9:
+            fp8_ctx = fp8_autocast(enabled=True)
+        else:
+            fp8_ctx = torch.amp.autocast('cuda', enabled=False)
+
         all_res = []
         for (ip, cid, lid), (seqs, indices) in grouped_data.items():
             inputs = torch.from_numpy(seqs).float().to(self.device)
             with torch.no_grad():
-                outputs = track['model'](inputs)
+                with fp8_ctx:
+                    outputs = track['model'](inputs)
                 # 마지막 시점의 오차만 계산
                 diff = (inputs[:, -1, :] - outputs[:, -1, :]) ** 2
                 mse = np.mean(diff.cpu().numpy(), axis=1)
