@@ -32,7 +32,9 @@
     "slope_label": "RISING",
     "ttf_minutes": 30.0,
     "expected_fatal_time": "2026-05-14 10:45:00",
-    "anomaly_reason": "Traffic (TX:1200, RX:0)"
+    "anomaly_reason": "Traffic (TX:1200, RX:0)",
+    "is_traffic_anomaly": 1,
+    "is_optical_anomaly": 0
   }
 ]
 ```
@@ -55,11 +57,22 @@
     "tx_packet": 1200,
     "rx_packet": 1150,
     "error_packet": 0,
-    "tx_avg_power": 0.0,
-    "rx_avg_power": 0.0,
+    "tx_avg_power": -15.5,
+    "rx_avg_power": -18.2,
     "anomaly_score": 0.02,
+    "threshold": 0.15,
     "severity": 15.2,
-    "threshold": 0.15
+    "alarm_level": 3,
+    "alarm_label": "CRITICAL",
+    "anomaly_reason": "Optical (RX:-14.31, TX:-6.30)",
+    "traffic_score": 0.0238122,
+    "traffic_threshold": 0.73775,
+    "traffic_severity": 15.2,
+    "optical_score": 0.519406,
+    "optical_threshold": 0.0123261,
+    "optical_severity": 5.0,
+    "is_traffic_anomaly": 0,
+    "is_optical_anomaly": 1
   }
 ]
 ```
@@ -173,12 +186,13 @@
 - **Data Example**:
 ```json
 {
+  "type": "ALARM", // 해제시 "CLEAR"
   "event_time": "2026-05-14 10:15:05",
   "ip_addr": "192.168.99.226",
   "slot_id": 1,
   "port_id": 5,
   "severity": "CRITICAL",
-  "reason": "Traffic (TX:24702658, RX:24702607)"
+  "message": "Traffic (TX:24702658, RX:24702607)" // 해제시  "Alarm cleared"
 }
 ```
 

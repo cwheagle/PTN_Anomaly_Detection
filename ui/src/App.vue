@@ -19,7 +19,7 @@
                class="absolute right-0 mt-3 w-80 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-[100] overflow-hidden animate-in fade-in zoom-in duration-200">
             <div class="p-4 bg-slate-700/50 border-b border-slate-700 flex justify-between items-center">
               <h3 class="font-bold text-sm text-slate-200">Critical Alarms History</h3>
-              <button @click="store.alarms = []" class="text-[10px] text-slate-500 hover:text-rose-400 font-bold uppercase">Clear All</button>
+              <button @click="store.alarms = []" class="text-[10px] text-slate-500 hover:text-rose-400 font-bold uppercase">Clear</button>
             </div>
             <div class="max-h-96 overflow-y-auto p-2 space-y-2">
               <div v-for="(alarm, idx) in store.alarms" :key="idx" class="p-3 bg-slate-900/50 border border-slate-700 rounded-lg hover:border-rose-500/30 transition-colors">
@@ -69,20 +69,25 @@
     <!-- Floating Toasts -->
     <div class="fixed top-6 right-6 z-[200] flex flex-col gap-3 w-80 pointer-events-none">
       <div v-for="toast in activeToasts" :key="toast.id" 
-           class="bg-slate-800 border-l-4 border-rose-500 p-4 rounded-lg shadow-2xl pointer-events-auto animate-in slide-in-from-right duration-300">
+           :class="['bg-slate-800 border-l-4 p-4 rounded-lg shadow-2xl pointer-events-auto animate-in slide-in-from-right duration-300',
+                    toast.type === 'ALARM' ? 'border-rose-500' : 'border-emerald-500']">
         <div class="flex justify-between items-start mb-2">
           <div class="flex items-center gap-2">
-            <span class="relative flex h-2 w-2">
+            <span v-if="toast.type === 'ALARM'" class="relative flex h-2 w-2">
               <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
               <span class="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
             </span>
-            <span class="text-xs font-bold text-rose-400 uppercase tracking-tighter">Critical Alarm</span>
+            <span v-else class="flex h-2 w-2 rounded-full bg-emerald-500"></span>
+            <span :class="['text-xs font-bold uppercase tracking-tighter', 
+                           toast.type === 'ALARM' ? 'text-rose-400' : 'text-emerald-400']">
+              {{ toast.type === 'ALARM' ? 'Critical Alarm' : 'Alarm Cleared' }}
+            </span>
           </div>
           <button @click="activeToasts = activeToasts.filter(t => t.id !== toast.id)" class="text-slate-500 hover:text-slate-300">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           </button>
         </div>
-        <div class="text-sm font-bold text-slate-200">{{ toast.ip_addr }}</div>
+        <div class="text-sm font-bold text-slate-200">{{ toast.ip_addr }} (S{{ toast.slot_id }}/P{{ toast.port_id }})</div>
         <div class="text-xs text-slate-400 mt-1 line-clamp-2">{{ toast.message }}</div>
       </div>
     </div>
@@ -106,22 +111,39 @@ const setupSSE = () => {
   sseSource.value = source
   
   source.addEventListener('alarm', (event) => {
-    if (store.schedulerStatus !== 'running') return
+    // unknown 상태(초기화 중)이거나 running일 때 모두 수신 허용
+    if (store.schedulerStatus === 'stopped') return
     
     const data = JSON.parse(event.data)
+    console.log('[SSE] Alarm received:', data)
+    const key = `${data.ip_addr}-${data.slot_id}-${data.port_id}`
     
-    store.alarms.unshift(data)
-    if (store.alarms.length > 20) store.alarms.pop()
-    
-    const toastId = Date.now()
-    activeToasts.value.push({ id: toastId, ...data })
-    
-    setTimeout(() => {
-      activeToasts.value = activeToasts.value.filter(t => t.id !== toastId)
-    }, 6000)
+    if (data.type === 'ALARM') {
+      // 1. 중복 제거: 기존 동일 포트 알람이 있다면 삭제 후 최신으로 교체
+      store.alarms = store.alarms.filter(a => `${a.ip_addr}-${a.slot_id}-${a.port_id}` !== key)
+      store.alarms.unshift(data)
+      if (store.alarms.length > 30) store.alarms.pop()
+      
+      const toastId = Date.now()
+      activeToasts.value.push({ id: toastId, type: 'ALARM', ...data })
+      setTimeout(() => {
+        activeToasts.value = activeToasts.value.filter(t => t.id !== toastId)
+      }, 8000)
+    } 
+    else if (data.type === 'CLEAR') {
+      // 2. 자동 해제: 정상으로 돌아온 포트의 알람은 목록에서 삭제
+      const wasExisting = store.alarms.some(a => `${a.ip_addr}-${a.slot_id}-${a.port_id}` !== key)
+      store.alarms = store.alarms.filter(a => `${a.ip_addr}-${a.slot_id}-${a.port_id}` !== key)
+      
+      const toastId = Date.now()
+      activeToasts.value.push({ id: toastId, type: 'CLEAR', ...data })
+      setTimeout(() => {
+        activeToasts.value = activeToasts.value.filter(t => t.id !== toastId)
+      }, 5000)
+    }
 
-    store.fetchAnomalies()
-    store.fetchWatchlist()
+    // 전역 스토어의 디바운스된 fetch 호출
+    store.debouncedFetch(1000)
   })
 
   source.onerror = (err) => {
@@ -135,6 +157,7 @@ onMounted(() => {
   store.fetchAnomalies()
   store.fetchWatchlist()
   store.fetchSchedulerStatus()
+  store.fetchActiveAlarms()
   setupSSE()
   
   const interval = setInterval(() => {

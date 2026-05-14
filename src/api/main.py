@@ -35,28 +35,71 @@ training_status = {
 active_trainers = {} # 현재 실행 중인 Trainer 인스턴스 (중지용)
 
 async def broadcast_alarm(alarm_data: dict):
-    """모든 연결된 SSE 클라이언트에게 알람 전송"""
+    """모든 연결된 SSE 클라이언트에게 알람 전송 (전송 성공 여부 반환)"""
     if not event_queues:
-        return
+        print(f"    [SSE] No active clients connected. Skipping broadcast.")
+        return False
     
+    print(f"    [SSE] Broadcasting to {len(event_queues)} clients...")
     message = json.dumps(alarm_data)
     for queue in event_queues:
         await queue.put(message)
+    return True
+
+# 글로벌 알람 상태 관리: {(ip, slot, port): occur_date}
+active_alarms_state = {}
 
 async def alarm_callback(anomalies_df):
-    """스케줄러에서 호출할 콜백 함수: Critical 알람 필터링 및 브로드캐스트"""
+    """스케줄러에서 호출할 콜백 함수: 중복 방지 및 자동 해제 로직 포함"""
+    global active_alarms_state
+    
+    # 1. 현재 탐지된 Critical 목록 추출
     criticals = anomalies_df[anomalies_df['alarm_label'] == 'CRITICAL']
-    if not criticals.empty:
-        for _, row in criticals.iterrows():
-            alarm_info = {
-                "event_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "ip_addr": row['ip_addr'],
-                "slot_id": int(row['cid']),
-                "port_id": int(row['lid']),
-                "severity": row['alarm_label'],
-                "reason": row['anomaly_reason']
-            }
-            await broadcast_alarm(alarm_info)
+    current_critical_keys = set()
+    
+    for _, row in criticals.iterrows():
+        key = (row['ip_addr'], int(row['cid']), int(row['lid']))
+        current_critical_keys.add(key)
+        
+        # 중복 발송 방지: 동일 포트, 동일 발생 시점이면 무시
+        if key in active_alarms_state and active_alarms_state[key] == str(row['occur_date']):
+            continue
+            
+        # 신규 발생 또는 업데이트된 알람 발송
+        alarm_info = {
+            "type": "ALARM",
+            "event_time": str(row['occur_date']),
+            "ip_addr": row['ip_addr'],
+            "slot_id": int(row['cid']),
+            "port_id": int(row['lid']),
+            "severity": row['alarm_label'],
+            "message": row['anomaly_reason']
+        }
+        
+        # 실제 전송에 성공했을 때만 상태 업데이트
+        if await broadcast_alarm(alarm_info):
+            active_alarms_state[key] = str(row['occur_date'])
+            print(f"    [SSE] Successfully broadcasted ALARM: {key}")
+        else:
+            print(f"    [SSE] Retrying ALARM later (No clients): {key}")
+
+    # 2. 자동 해제(Recovery) 처리
+    # 이전에 Critical이었으나 현재 목록에 없는 경우 해제 이벤트 전송
+    prev_critical_keys = set(active_alarms_state.keys())
+    recovered_keys = prev_critical_keys - current_critical_keys
+    
+    for key in recovered_keys:
+        clear_info = {
+            "type": "CLEAR",
+            "event_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "ip_addr": key[0],
+            "slot_id": key[1],
+            "port_id": key[2],
+            "message": "Alarm cleared"
+        }
+        await broadcast_alarm(clear_info)
+        del active_alarms_state[key]
+        print(f"    [SSE] Broadcasted CLEAR: {key}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -329,7 +372,8 @@ async def get_anomalies(
         query = f"""
             SELECT occur_date, ip_addr, cid as slot_id, lid as port_id, 
                    severity, alarm_level, alarm_label, slope, slope_label, 
-                   ttf_minutes, expected_fatal_time, anomaly_reason
+                   ttf_minutes, expected_fatal_time, anomaly_reason,
+                   is_traffic_anomaly, is_optical_anomaly
             FROM anomaly_detection
             WHERE {" AND ".join(where_clauses)}
             ORDER BY severity DESC, slope DESC
@@ -348,8 +392,11 @@ async def get_anomaly_history(ip_addr: str, slot_id: int, port_id: int, days: in
     if not conn: raise HTTPException(status_code=500, detail="DB connection failed")
     try:
         query = """
-            SELECT occur_date, tx_packet, rx_packet, error_packet, 
-                   tx_avg_power, rx_avg_power, anomaly_score, severity, threshold
+            SELECT occur_date, tx_packet, rx_packet, error_packet, tx_avg_power, rx_avg_power, 
+                    anomaly_score, threshold, severity, alarm_level, alarm_label, anomaly_reason,
+                    traffic_score, traffic_threshold, traffic_severity,
+                    optical_score, optical_threshold, optical_severity,
+                    is_traffic_anomaly, is_optical_anomaly
             FROM anomaly_detection
             WHERE ip_addr = %s AND cid = %s AND lid = %s
               AND occur_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
@@ -387,6 +434,16 @@ async def get_scheduler_status():
         if jobs and jobs[0].next_run_time:
             next_run = jobs[0].next_run_time.strftime('%Y-%m-%d %H:%M:%S')
     return {"status": status_str, "next_run_time": next_run}
+
+@app.post("/api/scheduler/run-now")
+async def run_scheduler_now():
+    """즉시 분석 작업(데이터 수집->추론->저장) 실행"""
+    try:
+        # 비동기로 실행하여 API 응답은 즉시 반환
+        asyncio.create_task(scheduler_instance.run_job())
+        return {"status": "success", "message": "Manual analysis task started in background."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/scheduler/status")
 async def control_scheduler(data: dict = Body(...)):

@@ -70,8 +70,8 @@ class PTNAnomalyScheduler:
     def start(self):
         """스케줄러 가동"""
         print(f"[*] PTN Scheduler initialized. Interval: {INTERVAL_MINUTES}m")
-        # 비동기 루프 내에서 작업 추가
-        self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES, next_run_time=datetime.now())
+        first_run = datetime.now() + timedelta(seconds=1)
+        self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES, next_run_time=first_run)
         try:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):

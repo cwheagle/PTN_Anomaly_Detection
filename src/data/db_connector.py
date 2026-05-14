@@ -177,7 +177,13 @@ class DBConnector:
         ]
         
         placeholders = ", ".join(["%s"] * len(cols))
-        query = f"INSERT IGNORE INTO anomaly_detection ({', '.join(cols)}) VALUES ({placeholders})"
+        # Upsert 로직: PK/Unique Key 충돌 시 최신 분석 데이터로 업데이트
+        update_parts = [f"{c} = VALUES({c})" for c in cols if c not in ['occur_date', 'ip_addr', 'cid', 'lid']]
+        query = f"""
+            INSERT INTO anomaly_detection ({', '.join(cols)}) 
+            VALUES ({placeholders})
+            ON DUPLICATE KEY UPDATE {', '.join(update_parts)}
+        """
         
         try:
             data = []

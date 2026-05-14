@@ -8,10 +8,39 @@ export const store = reactive({
   alarms: [] as any[],
   anomalies: [] as any[],
   watchlist: [] as any[],
-  modelStatus: {} as any,
+  modelStatus: {} as Record<string, any>,
   isRefreshingAnomalies: false,
   isRefreshingWatchlist: false,
   isRefreshingModelStatus: false,
+  _refreshTimer: null as any,
+
+  debouncedFetch(delay = 1000) {
+    if (this._refreshTimer) clearTimeout(this._refreshTimer)
+    this._refreshTimer = setTimeout(() => {
+      this.fetchAnomalies()
+      this.fetchWatchlist()
+      this._refreshTimer = null
+      console.log('[Store] Dashboard data refreshed (globally debounced)')
+    }, delay)
+  },
+
+  async fetchActiveAlarms() {
+    try {
+      // 최신 시점의 Critical 알람만 가져오기
+      const res = await axios.get('/api/anomalies?severity_min=3')
+      this.alarms = res.data.map((a: any) => ({
+        type: 'ALARM',
+        event_time: a.occur_date,
+        ip_addr: a.ip_addr,
+        slot_id: a.slot_id,
+        port_id: a.port_id,
+        message: a.anomaly_reason
+      }))
+      console.log('[Store] Active alarms synchronized from DB:', this.alarms.length)
+    } catch (err) {
+      console.error('Failed to sync active alarms', err)
+    }
+  },
 
   async fetchAnomalies() {
     this.isRefreshingAnomalies = true
@@ -67,6 +96,16 @@ export const store = reactive({
     } catch (err) {
       console.error('Failed to control scheduler', err)
       this.fetchSchedulerStatus()
+      throw err
+    }
+  },
+
+  async runNow() {
+    try {
+      const res = await axios.post('/api/scheduler/run-now')
+      return res.data
+    } catch (err) {
+      console.error('Failed to trigger manual run', err)
       throw err
     }
   },
