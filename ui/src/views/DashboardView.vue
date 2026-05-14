@@ -340,7 +340,7 @@ const scoreChartData = computed(() => ({
     },
     {
       label: 'Anomaly Score',
-      data: historyData.value.map(d => d.anomaly_score * 10),
+      data: historyData.value.map(d => d.anomaly_score),
       borderColor: '#3b82f6',
       borderDash: [5, 5],
       tension: 0.4,
@@ -348,7 +348,7 @@ const scoreChartData = computed(() => ({
     },
     {
       label: 'Threshold',
-      data: historyData.value.map(d => d.threshold * 10),
+      data: historyData.value.map(d => d.threshold),
       borderColor: '#94a3b8',
       borderDash: [2, 2],
       pointRadius: 0,

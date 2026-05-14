@@ -48,7 +48,7 @@ class DataProcessor:
         if df is None or df.empty: return df
         valid_indices = []
         for _, group in df.groupby(['ip_addr', 'cid', 'lid']):
-            # 1. 최소 데이터 개수 체크
+            # 1. 최소 데이터 개수 체크 (해당 인스턴스의 window_size 참조)
             if len(group.dropna(subset=self.feature_cols)) < self.window_size * 2:
                 continue
 

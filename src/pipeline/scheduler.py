@@ -1,4 +1,5 @@
 import os
+import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
 from src.data.db_connector import DBConnector
@@ -16,7 +17,7 @@ class PTNAnomalyScheduler:
         """추론 결과 처리를 위한 콜백 함수 등록"""
         self.callback = callback_func
 
-    def run_job(self):
+    async def run_job(self):
         """15분 주기 독립 트랙 기반 통합 탐지 작업"""
         now_dt = datetime.now()
         now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -45,9 +46,12 @@ class PTNAnomalyScheduler:
                 self.db.save_results(results)
                 self.db.delete_old_data(RETENTION_DAYS)
 
-                # 4. 콜백 실행 (SSE 알림 등 외부 연동)
+                # 4. 콜백 실행 (SSE 알림 등 외부 연동) - 비동기 대응
                 if self.callback:
-                    self.callback(results)
+                    if asyncio.iscoroutinefunction(self.callback):
+                        await self.callback(results)
+                    else:
+                        self.callback(results)
 
                 # 5. 하이브리드 로그 (전체 결과 CSV 누적 - 일자별 분리)
                 date_str = now_dt.strftime('%Y%m%d')
@@ -66,9 +70,8 @@ class PTNAnomalyScheduler:
     def start(self):
         """스케줄러 가동"""
         print(f"[*] PTN Scheduler initialized. Interval: {INTERVAL_MINUTES}m")
-        # 즉시 실행 후 예약
-        self.run_job()
-        self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES)
+        # 비동기 루프 내에서 작업 추가
+        self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES, next_run_time=datetime.now())
         try:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):
@@ -77,5 +80,4 @@ class PTNAnomalyScheduler:
     def restart(self):
         """스케줄러 재가동"""
         self.scheduler.remove_all_jobs()
-        self.run_job()
-        self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES)
+        self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES, next_run_time=datetime.now())

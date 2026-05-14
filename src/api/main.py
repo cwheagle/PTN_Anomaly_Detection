@@ -20,7 +20,7 @@ from src.pipeline.scheduler import PTNAnomalyScheduler
 from src.data.db_connector import DBConnector
 from src.data.data_collector import DataCollector
 from src.models.trainer import Trainer
-from src.config import PATHS, MODEL_CONFIG, SEVERITY_CONFIG
+from src.config import PATHS, MODEL_CONFIG, API_VERSION
 
 # 글로벌 객체
 scheduler_instance = None
@@ -43,11 +43,10 @@ async def broadcast_alarm(alarm_data: dict):
     for queue in event_queues:
         await queue.put(message)
 
-def alarm_callback(anomalies_df):
+async def alarm_callback(anomalies_df):
     """스케줄러에서 호출할 콜백 함수: Critical 알람 필터링 및 브로드캐스트"""
     criticals = anomalies_df[anomalies_df['alarm_label'] == 'CRITICAL']
     if not criticals.empty:
-        loop = asyncio.get_event_loop()
         for _, row in criticals.iterrows():
             alarm_info = {
                 "event_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -57,8 +56,7 @@ def alarm_callback(anomalies_df):
                 "severity": row['alarm_label'],
                 "reason": row['anomaly_reason']
             }
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(broadcast_alarm(alarm_info), loop)
+            await broadcast_alarm(alarm_info)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -82,6 +80,13 @@ app = FastAPI(
     description="REST API for PTN Anomaly Detection & Predictive Maintenance",
     lifespan=lifespan
 )
+
+# API 버전 및 커스텀 헤더 미들웨어
+@app.middleware("http")
+async def add_api_version_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-API-Version"] = API_VERSION
+    return response
 
 # CORS 설정
 app.add_middleware(
@@ -111,19 +116,17 @@ async def get_model_status():
             "training": training_status.get(ft, {"is_training": False}),
             "last_trained": None,
             "samples_used": 0,
-            # 추론 설정 (실시간 수정 가능)
+            # 추론 설정 (실시간 수정 가능 항목만 노출)
             "inference_config": {
                 "threshold": MODEL_CONFIG.get('threshold', 0.1),
-                "slope_threshold": SEVERITY_CONFIG.get('slope_threshold', 1.0),
-                "rul_target": SEVERITY_CONFIG.get('rul_target', 90.0)
+                "slope_threshold": MODEL_CONFIG.get('slope_threshold', 1.0)
             },
-            # 훈련 설정 (학습 시에만 적용)
+            # 훈련 설정 (학습 시 수정 가능 항목만 노출)
             "training_config": {
                 "epochs": MODEL_CONFIG['epochs'],
                 "learning_rate": MODEL_CONFIG['learning_rate'],
                 "batch_size": MODEL_CONFIG['batch_size'],
                 "threshold_percentile": MODEL_CONFIG['threshold_percentile'],
-                "window_size": MODEL_CONFIG['window_size'],
                 "patience": MODEL_CONFIG['patience']
             }
         }
@@ -180,6 +183,11 @@ async def update_inference_config(ft: str = Query(..., regex="^(traffic|optical)
             
         with open(meta_path, 'w') as f:
             json.dump(meta, f, indent=4)
+            
+        # 메모리에 즉시 반영 (실시간 리로드)
+        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
+            scheduler_instance.detector.reload_config(ft)
+            
         return {"status": "success", "updated_config": settings}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

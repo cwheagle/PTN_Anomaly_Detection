@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import warnings
+from datetime import datetime
 from mysql.connector import Error, pooling
 from src.config import DB_CONFIG, SIGNAL_TYPES
 
@@ -158,59 +159,57 @@ class DBConnector:
         return val
 
     def save_results(self, df):
-        """탐지 결과 저장"""
+        """탐지 결과 저장 (안전한 값 변환 및 정합성 보장)"""
         if df is None or df.empty: return
         conn = self.get_connection()
         if not conn: return
         cursor = conn.cursor()
-        query = """
-            INSERT IGNORE INTO anomaly_detection (
-                occur_date, ip_addr, cid, lid, 
-                tx_packet, rx_packet, error_packet, tx_avg_power, rx_avg_power,
-                traffic_score, traffic_severity, traffic_slope, traffic_threshold, is_traffic_anomaly,
-                optical_score, optical_severity, optical_slope, optical_threshold, is_optical_anomaly,
-                anomaly_score, severity, slope, slope_label, threshold, is_anomaly, 
-                alarm_level, alarm_label, ttf_minutes, expected_fatal_time, 
-                anomaly_reason, detect_time
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) 
-        """
+        
+        # 명시적 컬럼 정의 (DB 스키마와 1:1 매핑)
+        cols = [
+            'occur_date', 'ip_addr', 'cid', 'lid', 
+            'tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power',
+            'traffic_score', 'traffic_severity', 'traffic_slope', 'traffic_threshold', 'is_traffic_anomaly',
+            'optical_score', 'optical_severity', 'optical_slope', 'optical_threshold', 'is_optical_anomaly',
+            'anomaly_score', 'severity', 'slope', 'slope_label', 'threshold', 'is_anomaly', 
+            'alarm_level', 'alarm_label', 'ttf_minutes', 'expected_fatal_time', 
+            'anomaly_reason', 'detect_time'
+        ]
+        
+        placeholders = ", ".join(["%s"] * len(cols))
+        query = f"INSERT IGNORE INTO anomaly_detection ({', '.join(cols)}) VALUES ({placeholders})"
+        
         try:
             data = []
             for _, row in df.iterrows():
-                # 모든 필드에 대해 안전한 값 변환 적용
-                data.append((
-                    row['occur_date'], row['ip_addr'], row['cid'], row['lid'],
-                    int(self._clean_value(row.get('tx_packet'), 0)),
-                    int(self._clean_value(row.get('rx_packet'), 0)),
-                    int(self._clean_value(row.get('error_packet'), 0)),
-                    float(self._clean_value(row.get('tx_avg_power'), 0.0)),
-                    float(self._clean_value(row.get('rx_avg_power'), 0.0)),
-                    float(self._clean_value(row.get('traffic_score'), 0.0)),
-                    float(self._clean_value(row.get('traffic_severity'), 0.0)), 
-                    float(self._clean_value(row.get('traffic_slope'), 0.0)),
-                    float(self._clean_value(row.get('traffic_threshold'), 0.0)),
-                    int(self._clean_value(row.get('is_traffic_anomaly'), 0)),
-                    float(self._clean_value(row.get('optical_score'), 0.0)),
-                    float(self._clean_value(row.get('optical_severity'), 0.0)), 
-                    float(self._clean_value(row.get('optical_slope'), 0.0)),
-                    float(self._clean_value(row.get('optical_threshold'), 0.0)),
-                    int(self._clean_value(row.get('is_optical_anomaly'), 0)),
-                    float(self._clean_value(row.get('anomaly_score'), 0.0)),
-                    float(self._clean_value(row.get('severity'), 0.0)), 
-                    float(self._clean_value(row.get('slope'), 0.0)),
-                    row.get('slope_label', 'STABLE'),
-                    float(self._clean_value(row.get('threshold'), 0.0)),
-                    int(self._clean_value(row.get('is_anomaly'), 0)),
-                    int(self._clean_value(row.get('alarm_level'), 0)),
-                    row.get('alarm_label', 'NORMAL'),
-                    self._clean_value(row.get('ttf_minutes'), None), # 예지정비는 NULL 허용
-                    self._clean_value(row.get('expected_fatal_time'), None),
-                    row.get('anomaly_reason', '')
-                ))
+                row_data = []
+                for col in cols:
+                    if col == 'detect_time':
+                        row_data.append(datetime.now())
+                        continue
+                        
+                    val = row.get(col)
+                    
+                    # 타입별 정밀 처리
+                    if col == 'ttf_minutes':
+                        row_data.append(float(val) if pd.notna(val) else None)
+                    elif col in ['occur_date', 'expected_fatal_time']:
+                        row_data.append(val if pd.notna(val) else None)
+                    elif col in ['ip_addr', 'slope_label', 'alarm_label', 'anomaly_reason']:
+                        row_data.append(str(val) if pd.notna(val) else "")
+                    elif col in ['tx_packet', 'rx_packet', 'error_packet', 'is_anomaly', 
+                               'is_traffic_anomaly', 'is_optical_anomaly', 'cid', 'lid', 'alarm_level']:
+                        row_data.append(int(self._clean_value(val, 0)))
+                    else: # 점수, 임계치 등 나머지 실수형
+                        row_data.append(float(self._clean_value(val, 0.0)))
+                
+                data.append(tuple(row_data))
+                
             cursor.executemany(query, data)
             conn.commit()
+            print(f"    [DB] Successfully saved {len(data)} results.")
         except Error as e:
-            print(f"[DB] Save error: {e}")
+            print(f"    [DB] Save error: {e}")
             conn.rollback()
         finally:
             cursor.close()

@@ -1,5 +1,3 @@
-import os
-
 # Database Configuration
 DB_CONFIG = {
     "host": "YOUR_DB_HOST",
@@ -15,7 +13,7 @@ FEATURE_GROUPS = {
     "optical": ['tx_avg_power', 'rx_avg_power']
 }
 
-# Model Configuration (공통 아키텍처 설정)
+# Model Configuration (공통 아키텍처 및 분석 설정)
 MODEL_CONFIG = {
     "hidden_dim": 32,
     "latent_dim": 16,
@@ -26,17 +24,17 @@ MODEL_CONFIG = {
     "epochs": 100,
     "threshold_percentile": 99.9,
     "patience": 10,
-    "threshold": 0.1  # 기본 임계치
+    "threshold": 0.1,  # 기본 임계치
+    "slope_threshold": 1.0,  # 추세 분석(RISING/FALLING) 판단 기준
+    "rul_target": 90.0       # RUL 예측 목표 심각도 (Critical 임계치)
 }
 
-# Severity Configuration (Phase 6: 다단계 경보 체계)
+# Severity Configuration (고정 경보 등급 체계)
 SEVERITY_CONFIG = {
     "NORMAL": {"min": 0, "max": 50, "level": 0, "label": "NORMAL"},
     "MINOR": {"min": 50, "max": 70, "level": 1, "label": "MINOR"},
     "MAJOR": {"min": 70, "max": 90, "level": 2, "label": "MAJOR"},
-    "CRITICAL": {"min": 90, "max": 100, "level": 3, "label": "CRITICAL"},
-    "slope_threshold": 1.0,  # 추세 분석(RISING/FALLING) 판단 기준 수치 (15분당 1.0점 상승)
-    "rul_target": 90.0       # RUL 예측 목표 심각도 (Critical 임계치)
+    "CRITICAL": {"min": 90, "max": 100, "level": 3, "label": "CRITICAL"}
 }
 
 # Signal Types

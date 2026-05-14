@@ -55,6 +55,26 @@ class AnomalyDetector:
             else:
                 print(f"[!] {ft.capitalize()} model file not found: {p['model']}")
 
+    def reload_config(self, ft):
+        """저장된 메타데이터 파일(.json)에서 설정을 다시 읽어 메모리에 반영"""
+        if ft not in self.tracks: return False
+        
+        p = PATHS[ft]
+        meta_path = p['model'].replace('.pth', '.json')
+        
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r') as f:
+                    meta = json.load(f)
+                    # 기존 config 유지하면서 meta의 config로 업데이트
+                    self.tracks[ft]['config'].update(meta.get('config', {}))
+                    self.tracks[ft]['th'] = meta.get('threshold', self.tracks[ft]['th'])
+                    print(f"[*] Reloaded config for {ft} track (Threshold: {self.tracks[ft]['th']})")
+                    return True
+            except Exception as e:
+                print(f"[!] Error reloading config for {ft}: {e}")
+        return False
+
     def _get_alarm_info(self, severity):
         """심각도 점수에 따른 경보 등급 및 라벨 반환"""
         for tier in ["CRITICAL", "MAJOR", "MINOR"]:
@@ -184,59 +204,55 @@ class AnomalyDetector:
             
         final['anomaly_reason'] = final.apply(merge_reasons, axis=1)
         
-        # 통합 점수
-        score_cols = [c for c in ['traffic_score', 'optical_score'] if c in final.columns]
-        final['anomaly_score'] = final[score_cols].max(axis=1) if score_cols else 0.0
+        # 통합 지표 결정: 가장 심각도가 높은(dominant) 트랙의 값을 선택
+        # 점수, 임계치, 기울기, RUL(장애 예측)까지 해당 트랙의 전문 설정으로 일괄 계산
+        def get_dominant_metrics(row):
+            t_sev = row.get('traffic_severity', 0.0)
+            o_sev = row.get('optical_severity', 0.0)
+            
+            # 우세 트랙 결정
+            ft = 'traffic' if t_sev >= o_sev else 'optical'
+            
+            # 기본 지표 추출
+            res = {
+                'anomaly_score': row.get(f'{ft}_score', 0.0),
+                'threshold': row.get(f'{ft}_threshold', 0.0),
+                'slope': row.get(f'{ft}_slope', 0.0),
+                'severity': row.get(f'{ft}_severity', 0.0),
+                'slope_label': "STABLE",
+                'ttf_minutes': None,
+                'expected_fatal_time': None
+            }
+            
+            # 해당 트랙의 전문 설정(config) 참조하여 지능형 지표 산출
+            if ft in self.tracks:
+                cfg = self.tracks[ft]['config']
+                
+                # 1. 추세 라벨 판정
+                slope_th = cfg.get('slope_threshold', 1.0)
+                if res['slope'] > slope_th: res['slope_label'] = "RISING"
+                elif res['slope'] < -slope_th: res['slope_label'] = "FALLING"
+                
+                # 2. 잔여 수명 예측 (RUL)
+                target_sev = cfg.get('rul_target', 90.0)
+                if res['slope_label'] == "RISING" and res['severity'] < target_sev:
+                    # 원본 TTF 계산 (분 단위)
+                    raw_ttf = ((target_sev - res['severity']) / res['slope']) * 15
+                    # 15분 단위 정규화 (올림)
+                    res['ttf_minutes'] = math.ceil(raw_ttf / 15) * 15
+                    res['expected_fatal_time'] = row['occur_date'] + timedelta(minutes=res['ttf_minutes'])
+            
+            return pd.Series([
+                res['anomaly_score'], res['threshold'], res['slope'], 
+                res['severity'], res['slope_label'], res['ttf_minutes'], res['expected_fatal_time']
+            ])
 
-        # 통합 심각도
-        sev_cols = [c for c in ['traffic_severity', 'optical_severity'] if c in final.columns]
-        final['severity'] = final[sev_cols].max(axis=1) if sev_cols else 0.0
-
-        # 통합 기울기
-        slope_cols = [c for c in ['traffic_slope', 'optical_slope'] if c in final.columns]
-        final['slope'] = final[slope_cols].max(axis=1) if slope_cols else 0.0
-
-        # 통합 임계치
-        th_cols = [c for c in ['traffic_threshold', 'optical_threshold'] if c in final.columns]
-        final['threshold'] = final[th_cols].max(axis=1) if th_cols else 0.0
-
-        # 추세 라벨
-        def get_slope_label(slope):
-            # 트래픽 트랙의 설정을 우선 참조
-            active_cfg = self.tracks['traffic']['config'] if 'traffic' in self.tracks else SEVERITY_CONFIG
-            th = active_cfg.get('slope_threshold', SEVERITY_CONFIG.get('slope_threshold', 3.0))
-            if slope > th: return "RISING"
-            elif slope < -th: return "FALLING"
-            return "STABLE"
-        final['slope_label'] = final['slope'].apply(get_slope_label)
+        final[['anomaly_score', 'threshold', 'slope', 'severity', 'slope_label', 'ttf_minutes', 'expected_fatal_time']] = final.apply(get_dominant_metrics, axis=1)
 
         # 경보 등급 및 라벨 추가
         alarm_data = final['severity'].apply(self._get_alarm_info)
         final['alarm_level'] = alarm_data.apply(lambda x: x[0])
         final['alarm_label'] = alarm_data.apply(lambda x: x[1])
-
-        # [Phase 6] 잔여 수명 예측 (RUL)
-        def calculate_rul(row):
-            active_cfg = self.tracks['traffic']['config'] if 'traffic' in self.tracks else SEVERITY_CONFIG
-            target_sev = active_cfg.get('rul_target', SEVERITY_CONFIG.get('rul_target', 90.0))
-            slope_th = active_cfg.get('slope_threshold', SEVERITY_CONFIG.get('slope_threshold', 3.0))
-            curr_sev = row['severity']
-            slope = row['slope']
-            
-            # 기울기가 설정된 임계치보다 크고(상승 중), 현재 심각도가 목표보다 낮을 때만 계산
-            if slope > slope_th and curr_sev < target_sev:
-                # 1. 원본 TTF 계산 (분 단위)
-                raw_ttf = ((target_sev - curr_sev) / slope) * 15
-                
-                # 2. 15분 단위 정규화 (올림 처리)
-                # 예: 12분 -> 15분, 16분 -> 30분
-                ttf = math.ceil(raw_ttf / 15) * 15
-                
-                expected_time = row['occur_date'] + timedelta(minutes=ttf)
-                return pd.Series([ttf, expected_time])
-            return pd.Series([None, None])
-
-        final[['ttf_minutes', 'expected_fatal_time']] = final.apply(calculate_rul, axis=1)
 
         # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 확장
         standard_cols = [
@@ -247,8 +263,6 @@ class AnomalyDetector:
             'anomaly_score', 'severity', 'slope', 'slope_label', 'threshold', 'is_anomaly', 
             'alarm_level', 'alarm_label', 'ttf_minutes', 'expected_fatal_time', 'anomaly_reason'
         ]
-
-
         
         final_cols = [c for c in standard_cols if c in final.columns]
         results = final[final_cols].sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])

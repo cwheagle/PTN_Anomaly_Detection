@@ -1,96 +1,98 @@
-# PTN EMS 딥러닝 기반 이상탐지 솔루션 구현 계획서 (plan.md)
+# PTN EMS 이상탐지 프로젝트 실행 계획 (plan.md)
 
 ## 1. Background & Motivation (배경 및 목적)
-- **배경:** PTN(Packet Transport Network) EMS(Element Management System) 장비에서 15분 단위로 성능 데이터(누적 Packet, Error, BPS, PPS)와 광모듈 파워 데이터(Tx/Rx)가 수집되어 MySQL DB에 저장되고 있음.
-- **목표:** 수집된 시계열 데이터를 기반으로 시스템의 이상 징후를 선제적으로 파악하기 위해 딥러닝 기반(LSTM-Autoencoder)의 이상탐지 솔루션을 개발 및 온프레미스 환경에 구축.
-- **하네스 도입:** AI 에이전트 기반 자율 개발(Harness Coding) 파이프라인을 적용하여, 설계-구현-테스트-학습의 제어 루프를 통해 코드의 안정성과 품질을 확보.
+- **배경:** PTN(Packet Transport Network) EMS(Element Management System) 장비의 15분 단위 성능 데이터(In Packet, Error, BPS, PPS)와 광 모듈 상태 데이터(Tx/Rx)가 다중 MySQL DB 서버에 분산 저장되어 있음.
+- **목표:** 해당 시계열 데이터를 기반으로 딥러닝 기술을 적용하여 장애를 사전에 탐지하고 예지 정비가 가능한 통합 엔진 개발 및 시각화 서비스 구축.
+- **개발 원칙:** AI 에이전트 기반 개발(Harness Coding) 방법론을 적용하여, 목표-조사-설계-구현-테스트-학습의 루프를 통한 코드 품질과 유지보수성 확보.
 
 ## 2. Scope & Architecture (범위 및 아키텍처)
 - **개발 언어 및 프레임워크:** Python, PyTorch (Deep Learning), Pandas/NumPy (Data Processing), SQLAlchemy (DB Connection), APScheduler (Task Scheduling).
-- **데이터베이스:** MySQL (입력 데이터 소스 및 탐지 결과 저장소).
+- **데이터베이스:** MySQL (원본 성능 데이터 및 분석 결과 저장).
 - **핵심 컴포넌트:**
   1. `DataFetcher`: MySQL DB에서 주기적(15분)으로 최신 데이터를 조회.
-  2. `Preprocessor`: 결측치 처리, 파생 변수 생성(예: 누적 Packet의 증감량 변환), 스케일링(MinMaxScaler).
-  3. `AnomalyDetector (Model)`: LSTM-Autoencoder 모델 아키텍처 정의, 학습(Train) 및 추론(Inference) 기능.
-  4. `InferenceEngine`: 스케줄러를 통해 주기적으로 전체 파이프라인(Fetch -> Preprocess -> Detect -> Save) 실행.
+  2. `Preprocessor`: 결측치, 이상치(예: 큰 Packet) 처리 및 스케일링(RobustScaler).
+  3. `AnomalyDetector (Model)`: LSTM-Autoencoder 모델 아키텍처 설계(Train) 및 추론(Inference) 기능.
+  4. `InferenceEngine`: 스케줄러를 통한 주기적(Real-time) 이상 탐지 수행.
 
-## 3. Implementation Steps (하네스 기반 파이프라인 구현 단계)
+## 3. Implementation Steps (구현 단계별 세부 단계)
 
-### Phase 1: 기반 설정 및 데이터 파이프라인 구축 (Complete - Data Layer)
+### Phase 1: 기반 설정 및 데이터 연동 (Complete)
 - **목표:** MySQL 연결 및 데이터 추출, 전처리 로직 구현.
-- **작업 내용:**
-  - `config.py` 작성 (DB 접속 정보, 모델 하이퍼파라미터 등 설정 관리).
-  - `db_connector.py` 작성 (데이터베이스 연결 및 쿼리 실행).
-  - `data_processor.py` 작성 (데이터 정제, 스케일링, 시계열 시퀀스(Window) 생성).
-- **검증 (QA):** Mock 데이터를 활용하여 전처리 결과물 형태 및 DB 연결 정상 여부 단위 테스트 (`test_data.py`).
+- **세부 내용:**
+  - `config.py` 구축 (DB 접속 정보, 모델 하이퍼파라미터 등 설정 관리).
+  - `db_connector.py` 구현 (데이터베이스 연결 및 쿼리 시스템).
+  - `data_processor.py` 구현 (데이터 정제, 스케일링, 시퀀스(Window) 생성).
+- **검증:** 단위 데이터 전처리 결과 확인 및 DB 연결 성공 여부 유닛 테스트 (`test_data.py`).
 
-### Phase 2: 모델 개발 및 학습 로직 (Complete - Model Layer)
-- **목표:** LSTM-AE 모델 구조 정의 및 학습 코드 작성.
-- **작업 내용:**
-  - `model.py` 작성 (PyTorch `nn.Module`을 상속받은 LSTM-Autoencoder 클래스 구현).
-  - `trainer.py` 작성 (Loss function(MSE), Optimizer 설정, 모델 학습 루프 및 모델 가중치(pth) 저장).
-- **검증 (QA):** 더미 텐서를 입력으로 받아 모델의 forward/backward 패스가 에러 없이 동작하는지 테스트 (`test_model.py`).
+### Phase 2: 모델 개발 및 학습 로직 (Complete)
+- **목표:** LSTM-AE 모델 구조 설계 및 학습 코드 개발.
+- **세부 내용:**
+  - `model.py` 구현 (PyTorch `nn.Module` 기반 LSTM-Autoencoder 클래스 구현).
+  - `trainer.py` 구현 (Loss function(MSE), Optimizer 설정, 모델 학습 루프 및 모델 가중치 저장).
+- **검증:** 더미 데이터를 이용한 학습 프로세스 정상 동작 여부 및 모델 아키텍처 차원 확인 테스트 (`test_model.py`).
 
-### Phase 3: 추론 엔진 및 스케줄러 통합 (Complete - Application Layer)
-- **목표:** 15분 주기로 동작하는 자동화된 추론 및 결과 저장 파이프라인 완성.
-- **작업 내용:**
-  - `inference.py` 작성 (저장된 모델 로드, 최신 데이터 예측, Reconstruction Error 기반 이상 점수 산출 및 임계치(Threshold) 비교).
-  - `scheduler.py` 작성 (APScheduler 적용, 15분마다 `inference.py`의 핵심 함수 호출).
-  - 추론 결과를 DB 테이블에 `INSERT` 하는 로직 추가.
-- **검증 (QA):** 전체 파이프라인(End-to-End) 모의 실행 테스트.
+### Phase 3: 추론 엔진 및 스케줄러 통합 (Complete)
+- **목표:** 15분 주기로 동작하는 실시간 추론 및 결과 저장 시스템 구축.
+- **세부 내용:**
+  - `inference.py` 구현 (학습 모델 로드, 최신 데이터 예측, Reconstruction Error 기반 점수 및 임계치 산출).
+  - `scheduler.py` 구현 (APScheduler 적용, 15분마다 `inference.py` 핵심 함수 호출).
+  - 추론 결과를 DB에 저장하는 로직 추가.
+- **검증:** 전체 파이프라인(조회-전처리-추론-저장) 통합 테스트.
 
-### Phase 4: 앙상블 아키텍처 및 데이터 표준화 (Complete - Advanced Layer)
-- **목표:** Traffic과 Optical 트랙을 분리하여 정확도를 높이고 실데이터 대응력 강화.
-- **작업 내용:**
+### Phase 4: 세부 아키텍처 데이터 표준화 (Complete)
+- **목표:** Traffic과 Optical 트랙을 분리하여 데이터 수집 및 분석을 다원화하는 기반 마련.
+- **세부 내용:**
   - 데이터 스키마 표준화 (`ip_addr`, `cid`, `lid` 기반 식별 체계 확립).
-  - Traffic/Optical 독립 트랙 구축 및 앙상블 탐지 로직 구현.
-  - 실제 장애 패턴 분석을 위한 진단 메시지(`anomaly_reason`) 생성 로직 추가.
-- **검증 (QA):** `export_anomalies.py`를 통한 과거 장애 이력 재현 및 탐지율 검증.
+  - Traffic/Optical 분리 분석 구조 구축 및 세부 트랙 로직 구현.
+  - 탐지 시 단순 여부가 아닌 구체적 사유(`anomaly_reason`) 생성 로직 추가.
+- **검증:** 과거 실제 데이터 기반의 트랙별 추론 결과 검토.
 
-### Phase 5: 모델 최적화 및 통합 검증 파이프라인 (Complete - Operations Layer)
-- **목표:** 실제 운영 환경 데이터를 수용하는 고정밀 모델 학습 및 자동화된 검증 체계 구축.
-- **작업 내용:**
-  - **비선형 전처리**: Traffic 데이터 `log1p` 변환 및 `RobustScaler` 적용을 통한 이상치 내성 확보.
-  - **모델 고도화**: LSTM-Autoencoder 100 에포크 학습, Loss 0.003 수준의 안정적 수렴 달성.
-  - **통합 검증 엔진**: `test_inference.py`를 개편하여 [추론 + CSV 저장 + 상세 진단 리포트] 기능 통합.
-  - **시각화 자동화**: 탐지된 이상 사례의 트래픽 패턴과 점수를 매칭한 그래프 생성 도구(`visualize_results.py`) 개발.
-- **검증 (QA):**
-    - 과거 장애 이력 데이터를 활용한 실제 탐지 성능(Hit Rate) 확인 및 시각적 검증 완료.
-    - **장기 가동 테스트**: 15분 주기 스케줄러의 안정적 반복 동작 확인 및 DB/CSV 저장 무결성 검증 완료. (2026-05-11)
+### Phase 5: 모델 고도화 및 통합 검증 (Complete)
+- **목표:** 실제 현장 데이터의 편차와 노이즈를 반영한 모델 성능 및 안정성 강화.
+- **세부 내용:**
+  - **데이터 전처리 고도화**: Traffic 데이터 `log1p` 변환 및 `RobustScaler` 적용을 통한 이상치 왜곡 최소화.
+  - **모델 성능 개선**: LSTM-Autoencoder 구조 최적화 및 최적의 임계치 percentile 설정.
+  - **통합 검증기**: `test_inference.py`를 강화하여 [추론 + CSV 저장 + 탐지 사유 리포팅] 기능을 통합.
+- **검증:** 
+    - 과거 장애 시점 데이터를 활용한 실제 탐지 성능(Hit Rate) 평가 완료.
+    - **장기 가동 테스트**: 15분 주기의 실시간 운영 시 데이터 수집 및 추론 엔진 무결성 검증 완료. (2026-05-11)
 
-### Phase 6: 예지 정비 및 지능형 분석 엔진 (Complete - Intelligence Layer)
-- **목표:** 탐지된 이상을 수치화하고, 추세 분석을 통해 미래 장애를 예측하는 지능형 엔진 구현.
-- **작업 내용:**
-  - **심각도 정규화 (Severity Scoring)**: 원본 MSE 점수를 0~100 사이의 직관적 점수로 변환하는 비선형 매핑 함수 구현 완료.
-  - **다단계 경보 체계 (Alerting)**: 점수 구간별 주의(Minor), 경고(Major), 심각(Critical) 등급 부여 로직 수립 완료.
-  - **추세 분석 (Trend Analysis)**: 이상 점수의 상승 기울기(Slope) 분석을 통한 초기 단계 장애 징후 포착 및 중복 저장 방지 필터링 구현 완료.
-  - **잔여 수명 예측 (RUL Prediction)**: 현재 추세 지속 시 장애 발생 예상 시점(Time to Failure)을 산출하고, 15분 수집 주기에 맞춰 정규화(Ceil) 처리 로직 구현 완료. (2026-05-11)
-- **검증 (QA):** 실제 장애 발생 시나리오 기반의 경보 리드타임 측정 및 RUL 정확도 검증 완료.
+### Phase 6: 예지 정비 및 지능형 분석 고도화 (Complete)
+- **목표:** 단순 이상 탐지를 넘어, 추세 분석을 통한 미래 시점 예측 및 지능형 알람 구현.
+- **세부 내용:**
+  - **심각도 스코어링 (Severity Scoring)**: 원본 MSE 점수를 0~100 사이의 상대적 심각도 점수로 변환하는 로직 구현.
+  - **다단계 경보 체계 (Alerting)**: 심각도에 따른 주의(Minor), 경고(Major), 심각(Critical) 등급 부여 로직 완료.
+  - **추세 분석 및 기울기(Slope) 분석**: 연속된 추론 결과의 변화율을 통해 초기 장애 포착 및 급격한 악화 시점 감지 로직 구현.
+  - **잔여 수명 예측 (RUL Prediction)**: 현재 추세 기반 미래 시점의 임계치 도달 예상 시간을 계산, 15분 단위의 올림(Ceil) 처리 로직 구현 완료. (2026-05-11)
+- **검증:** 실제 장비 장애 패턴과의 비교를 통한 예측 시점 및 RUL 정확도 검토 완료.
 
-### Phase 7: 통합 서비스 아키텍처 및 Web UI 구현 (Complete - Service Layer)
-- **목표:** 엔진을 TSDN 컨트롤러와 연동 가능한 서비스 형태로 승격시키고, 실시간성을 보장하는 현대적인 웹 대시보드 구축.
-- **작업 내용:**
-  - **Backend API 기반 통합 (FastAPI)**: 기존 스케줄러를 내재화한 통합 API 서버 구축 및 REST 엔드포인트 제공 완료.
-  - **API 고도화 및 통합**: `/api/trend`를 `/api/anomalies`로 통합하고, 유연한 필터링(Min/Max Severity, Rising Trend) 및 가장 최신 배치 데이터 자동 조회 기능 구현 완료.
-  - **실시간 알림 엔진 (EventStream/SSE)**: Critical 경보 발생 시 웹/컨트롤러로 즉시 데이터를 푸시하는 SSE 엔드포인트 구현 완료.
-  - **통합 모니터링 Web GUI (Vue 3)**: Vue 3 기반 실시간 대시보드 구현. Watchlist(상승 추세 감시), 클라이언트 측 페이징(Pagination), 직관적인 심각도 시각화 포함.
-  - **시계열 분석 그래프 통합 (Chart.js)**: Chart.js를 이용한 포트별 24시간 시계열 추이(이상 점수, 트래픽/광파워) 시각화 완료.
-  - **수동 새로고침 및 스케줄러 제어 로직 보강**: UI 편의성 개선 및 스케줄러 정지 시 데이터 초기화 로직 구현 완료.
-  - **[Advanced] 모델 관리 시스템**: 훈련/추론 설정 분리, 날짜 기반 맞춤형 학습 파이프라인, **실시간 학습 상태(에포크, 손실률) 추적 및 학습 강제 중지 API** 구현 완료. (2026-05-12)
-  - **신뢰성 강화**: **Early Stopping** 도입으로 최적 모델 자동 선발, MySQL 데이터 정제(NaN/inf 처리) 로직 통합 완료. (2026-05-12)
-- **검증 (QA):** API-UI 연동 무결성 확인 및 실시간 이벤트 스트리밍을 통한 대시보드 자동 갱신 검증 완료. (2026-05-12)
+### Phase 7: 통합 서비스 아키텍처 및 Web UI 구현 (Complete)
+- **목표:** 개발된 엔진을 실제 운영 가시성을 확보할 수 있는 서비스 형태로 패키징하고 사용자 웹 대시보드 구축.
+- **세부 내용:**
+  - **Backend API 서버 (FastAPI)**: 기존 스케줄러 엔진을 포함한 통합 API 서버 구축 및 REST 규격 준수.
+  - **실시간 이벤트 알림 (SSE)**: Critical 경보 발생 시 프론트엔드에 즉시 푸시하는 Server-Sent Events 구현.
+  - **통합 모니터링 대시보드 (Vue 3)**: 실시간 경보 리스트, 모델별 학습 상태, 장비별 추세 차트 등을 포함한 대시보드 구축.
+  - **모델 관리 시스템**: 훈련/추론 설정 분리 및 실시간 임계치 업데이트, 학습 상태 추적 및 중지 기능 API 구현.
+  - **신뢰성 고도화**: API 버전 체계(v1.0.0) 정립, APScheduler 비동기 최적화, MySQL 데이터 무결성 처리(NaN/inf) 완료. (2026-05-12)
+- **검증:** 프론트엔드-백엔드 간 실시간 데이터 스트리밍 및 모델 제어 기능 무결성 검증 완료. (2026-05-12)
 
-## 4. Harness Checklists & Rules (하네스 체크리스트 및 원칙)
-- **(방향 제시) Target-Plan 매핑:** 작성된 모든 모듈은 본 `plan.md`의 목표와 연결되어야 함. 목적 없는 코드 작성 금지.
-- **(가이드 제공) 레이어 분리:** 데이터 접근(DB), 비즈니스 로직(전처리), 모델 로직(PyTorch)을 철저히 분리하여 의존성을 최소화할 것.
-- **(결과 분류 및 제어 루프) 단위 테스트 필수:** 각 모듈 작성 후 반드시 테스트 코드를 작성 및 실행(PASS/FAIL 확인). 
-- **(자가 학습 루프) 3-Strike 룰:** 동일한 오류(예: PyTorch Tensor 차원 불일치)가 3회 이상 발생 시, 해당 모듈 수정을 멈추고 `_lessons.md` 파일에 오류 원인과 해결 원칙을 누적 기록한 뒤 재설계 진행.
+### Phase 8: Adaptive Thresholding & Auto-Retraining (Go)
+- **Goal**: 장기 데이터 분석 기반 동적 임계치 도입 및 모델 성능 하락 시 자동 재학습 체계 구축.
+- **Task**:
+  - [ ] **계절성 분석**: 시간대별/요일별 데이터 패턴 분석을 통한 가변 임계치 엔진 개발.
+  - [ ] **성능 모니터링**: 추론 결과의 Drift(편차) 감지 로직 구현.
+  - [ ] **자동 재학습**: 성능 저하 시 백그라운드에서 자동으로 최신 데이터 수집 및 모델 갱신.
+  - [ ] **알림 채널 확장**: Slack/Email 연동 알림 연동 검토.
+
+---
+
+## 4. Harness Checklists & Rules (실행 단계별 체크리스트 및 수칙)
+- **(방향 제시) Target-Plan 매칭:** 모든 구현 코드는 `plan.md`의 단계와 연결되어야 함. 목적 없는 코드 생성 금지.
+- **(기술 표준) 레이어 분리:** 데이터 연동(DB), 비즈니스 로직(추론), 모델 로직(PyTorch)의 책임을 명확히 분리하여 이식성 최적화.
+- **(결과 분류 및 검증 루프) 유닛 테스트:** 모든 핵심 함수는 대응하는 테스트 코드를 생성 및 실행(PASS/FAIL 판정).
+- **(학습 루프) 3-Strike 룰:** 동일한 에러(예: Tensor 차원 불일치) 3회 반복 시 작업을 중단하고 `_lessons.md`에 기록 및 해결책 수립 후 재개.
 
 ## 5. Verification & Testing (검증 계획)
-- **Unit Test:** `pytest` 프레임워크 사용. 각 모듈의 기능(DB 연결, 차원 변환, 모델 연산 등)을 독립적으로 검증.
-- **Integration Test:** 전체 데이터 흐름(조회 -> 전처리 -> 모델 예측 -> DB 저장)이 끊김 없이 동작하는지 통합 테스트 진행.
-- **에러 핸들링:** DB 접속 실패, 데이터 결측 등 예외 상황 발생 시 프로세스가 죽지 않고 로그를 남기며 복구되거나 다음 스케줄을 대기하도록 방어적 코드(Try-Except) 작성.
-
-## 6. Migration & Rollback
-- 기존 운영 중인 EMS 시스템에 영향을 주지 않는 독립된 환경(컨테이너 또는 별도 프로세스)에서 동작하도록 설계.
-- 이상탐지 결과 테이블은 기존 테이블과 분리하여 생성. 오류 발생 시 추론 프로세스(Scheduler)만 종료하면 기존 시스템으로의 원복(Rollback) 완료.
+- **Unit Test:** `pytest` 기반의 모듈별 독립 검증.
+- **Integration Test:** 데이터 수집부터 DB 저장까지의 전체 파이프라인 검증.
+- **내결함성 테스트:** DB 연결 끊김, 데이터 결측 등 예외 상황에서의 시스템 안정성 및 자동 복구 로직(Try-Except) 검증.

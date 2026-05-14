@@ -1,10 +1,10 @@
-# PTN Anomaly Detection API Specification (v1.0)
+# PTN Anomaly Detection API Specification (v1.0.0)
 
 본 문서는 PTN EMS 이상탐지 엔진 연동을 위한 REST API 및 SSE 규격을 정의합니다.
 
 ## 1. Global Settings
 - **Base URL**: `http://localhost:8000`
-- **Versioning**: HTTP Response Header `X-API-Version: 1.0` 포함
+- **Versioning**: HTTP Response Header `X-API-Version: 1.0.0` 포함
 
 ## 2. REST API 엔드포인트
 
@@ -21,7 +21,7 @@
 ```json
 [
   {
-    "occur_date": "2026-05-11 10:15:00",
+    "occur_date": "2026-05-14 10:15:00",
     "ip_addr": "192.168.99.226",
     "slot_id": 1,
     "port_id": 5,
@@ -31,7 +31,7 @@
     "slope": 1.5,
     "slope_label": "RISING",
     "ttf_minutes": 30.0,
-    "expected_fatal_time": "2026-05-11 10:45:00",
+    "expected_fatal_time": "2026-05-14 10:45:00",
     "anomaly_reason": "Traffic (TX:1200, RX:0)"
   }
 ]
@@ -51,7 +51,7 @@
 ```json
 [
   {
-    "occur_date": "2026-05-11 10:00:00",
+    "occur_date": "2026-05-14 10:00:00",
     "tx_packet": 1200,
     "rx_packet": 1150,
     "error_packet": 0,
@@ -73,7 +73,7 @@
 ```json
 {
   "status": "running", // 또는 "stopped"
-  "next_run_time": "2026-05-11 10:30:00"
+  "next_run_time": "2026-05-14 10:30:00"
 }
 ```
 - **POST Body**:
@@ -88,12 +88,13 @@
 #### 2.4.1 모델 상태 조회
 - **Endpoint**: `GET /api/model/status`
 - **Description**: 현재 학습된 모델의 유무, 마지막 학습 시간, 그리고 **현재 진행 중인 학습 상태(에포크, 손실률 등)** 및 설정을 반환합니다.
+- **Note**: `inference_config` 및 `training_config`는 수정 가능한 항목들만 노출합니다.
 - **Response**:
 ```json
 {
   "traffic": {
     "exists": true,
-    "last_trained": "2026-05-12 14:30:00",
+    "last_trained": "2026-05-14 14:30:00",
     "samples_used": 15200,
     "training": {
       "is_training": true,
@@ -106,14 +107,14 @@
     },
     "inference_config": {
       "threshold": 0.1245,
-      "slope_threshold": 1.5,
-      "rul_target": 90.0
+      "slope_threshold": 1.5
     },
     "training_config": {
       "epochs": 100,
       "learning_rate": 0.001,
       "batch_size": 32,
-      "threshold_percentile": 99.9
+      "threshold_percentile": 99.9,
+      "patience": 10
     }
   }
 }
@@ -133,14 +134,23 @@
 
 #### 2.4.3 모델 학습 실행
 - **Endpoint**: `POST /api/model/train`
-- **Description**: 지정된 파라미터와 날짜 범위를 사용하여 모델을 재학습합니다. (백그라운드 실행)
+- **Description**: 사용자가 지정한 훈련 파라미터와 데이터 기간을 사용하여 모델을 재학습합니다. (백그라운드 실행)
 - **Query Params**: 
   - `ft`: 모델 타입 (traffic/optical)
-  - `train_start`: 훈련 시작일 (YYYY-MM-DD)
-  - `train_end`: 훈련 종료일 (YYYY-MM-DD)
-  - `test_start`: 검증 시작일 (YYYY-MM-DD)
-  - `test_end`: 검증 종료일 (YYYY-MM-DD)
-- **Body**: `training_config` 객체 (epochs, learning_rate 등 - 생략 시 기본값 사용)
+  - `train_start` (Optional): 훈련 데이터 시작일 (YYYY-MM-DD)
+  - `train_end` (Optional): 훈련 데이터 종료일 (YYYY-MM-DD)
+  - `test_start` (Optional): 검증 데이터 시작일 (YYYY-MM-DD)
+  - `test_end` (Optional): 검증 데이터 종료일 (YYYY-MM-DD)
+- **Body (JSON)**:
+```json
+{
+  "epochs": 150,
+  "learning_rate": 0.0005,
+  "batch_size": 64,
+  "threshold_percentile": 99.5,
+  "patience": 15
+}
+```
 
 #### 2.4.4 모델 학습 중지
 - **Endpoint**: `POST /api/model/train/stop`
@@ -163,14 +173,14 @@
 - **Data Example**:
 ```json
 {
-  "event_time": "2026-05-11 10:15:05",
+  "event_time": "2026-05-14 10:15:05",
   "ip_addr": "192.168.99.226",
   "slot_id": 1,
   "port_id": 5,
   "severity": "CRITICAL",
-  "reason": "T:Traffic (TX:24702658, RX:24702607)",
+  "reason": "Traffic (TX:24702658, RX:24702607)"
 }
 ```
 
 ---
-*최종 업데이트: 2026-05-12*
+*최종 업데이트: 2026-05-14*
