@@ -37,14 +37,16 @@ class AnomalyDetector:
             
             if os.path.exists(p['model']):
                 try:
-                    model.load_state_dict(torch.load(p['model'], map_location=self.device, weights_only=True))
+                    # [Blackwell 최적화] torch.compile로 저장된 모델의 '_orig_mod.' 접두어 제거 후 로드
+                    state_dict = torch.load(p['model'], map_location=self.device, weights_only=True)
+                    new_state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+                    model.load_state_dict(new_state_dict)
                     
                     # [Blackwell 최적화] 추론 성능 향상을 위한 컴파일 적용
                     if hasattr(torch, "compile") and self.device.type == "cuda":
                         try:
-                            # 추론 시에는 오버헤드 감소 모드가 유리
                             print(f"[*] Compiling {ft} model for inference optimization...")
-                            model = torch.compile(model, mode="reduce-overhead")
+                            model = torch.compile(model)
                         except Exception as e:
                             print(f"[!] torch.compile failed for {ft}: {e}")
                             
@@ -109,15 +111,16 @@ class AnomalyDetector:
         except (ImportError, ModuleNotFoundError):
             fp8_autocast = None
 
-        # [Blackwell 최적화] FP8 Autocast 컨텍스트 준비
-        if fp8_autocast and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9:
-            fp8_ctx = fp8_autocast(enabled=True)
-        else:
-            fp8_ctx = torch.amp.autocast('cuda', enabled=False)
-
         all_res = []
         for (ip, cid, lid), (seqs, indices) in grouped_data.items():
             inputs = torch.from_numpy(seqs).float().to(self.device)
+            
+            # [Blackwell 최적화] FP8/AMP 컨텍스트를 포트(배치)마다 새로 생성
+            if fp8_autocast and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9:
+                fp8_ctx = fp8_autocast(enabled=True)
+            else:
+                fp8_ctx = torch.amp.autocast('cuda', enabled=True if torch.cuda.is_available() else False)
+
             with torch.no_grad():
                 with fp8_ctx:
                     outputs = track['model'](inputs)

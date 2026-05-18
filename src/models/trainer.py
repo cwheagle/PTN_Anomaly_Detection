@@ -33,11 +33,10 @@ class Trainer:
         # [Blackwell 최적화] PyTorch 2.0+ 및 CUDA 환경에서 컴파일 적용 (이식성 유지)
         if hasattr(torch, "compile") and self.device.type == "cuda":
             try:
-                # 첫 실행 시 컴파일 시간이 걸리지만 이후 속도가 비약적으로 향상됨
-                print(f"[*] Optimizing model with torch.compile (mode: max-autotune)...")
-                self.model = torch.compile(self.model, mode="max-autotune")
+                print(f"[*] Compiling {feature_type} model for training optimization...")
+                self.model = torch.compile(self.model)
             except Exception as e:
-                print(f"[!] torch.compile failed, falling back to eager mode: {e}")
+                print(f"[!] torch.compile failed for {feature_type}: {e}")
 
         self.processor = DataProcessor(feature_type, config=self.config)
         self.paths = PATHS[feature_type]
@@ -55,17 +54,28 @@ class Trainer:
             print(f"    [ERROR] Data file not found: {data_path}")
             return None
             
+        print(f"    [*] Loading CSV: {data_path}")
         df = pd.read_csv(data_path)
         if self.stop_requested: return None
 
+        print(f"    [*] Preprocessing data...")
         df_clean = self.processor.preprocess(df, is_train=True)
-        if df_clean is None or self.stop_requested: return None
+        if df_clean is None or self.stop_requested: 
+            print(f"    [!] Preprocessing returned None (Insufficient data or stop requested)")
+            return None
         
+        print(f"    [*] Creating sequences...")
         sequences = self.processor.create_sequences(df_clean, is_train=True)
-        if len(sequences) == 0 or self.stop_requested: return None
+        if len(sequences) == 0 or self.stop_requested: 
+            print(f"    [!] No sequences created")
+            return None
         
-        dataset = TensorDataset(torch.from_numpy(sequences).float())
-        return DataLoader(dataset, batch_size=self.config['batch_size'], shuffle=True), sequences
+        print(f"    [*] Converting to Tensor and creating DataLoader (Size: {len(sequences)})")
+        return DataLoader(
+            TensorDataset(torch.from_numpy(sequences).float()), 
+            batch_size=self.config['batch_size'], 
+            shuffle=True
+        ), sequences
 
     def train(self, train_path=None, val_path=None):
         t_path = train_path or f"data/{self.feature_type}_train.csv"
@@ -73,9 +83,11 @@ class Trainer:
         print(f"[*] Training [{self.feature_type}] specialist model...")
         
         # 1. 데이터 로더 준비
+        print(f"    [*] Preparing training loader...")
         t_res = self._prepare_loader(t_path)
         if self.stop_requested: return False
         
+        print(f"    [*] Preparing validation loader...")
         v_res = self._prepare_loader(v_path) # 검증 데이터
         if self.stop_requested: return False
         
@@ -91,6 +103,7 @@ class Trainer:
         patience = self.config['patience']
         no_improve_count = 0
         
+        print(f"    [*] Starting epoch loop (Total: {self.config['epochs']})")
         for epoch in range(self.config['epochs']):
             epoch_start = time.time()
             
@@ -104,25 +117,29 @@ class Trainer:
             except (ImportError, ModuleNotFoundError):
                 fp8_autocast = None
 
-            # [Blackwell 최적화] FP8 Autocast 컨텍스트 준비
-            if fp8_autocast and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9:
-                fp8_ctx = fp8_autocast(enabled=True)
-            else:
-                fp8_ctx = torch.amp.autocast('cuda', enabled=False)
-
-            for batch in train_loader:
+            for batch_idx, batch in enumerate(train_loader):
                 if self.stop_requested: return False # 배치 단위 중지 체크
                 
                 inputs = batch[0].to(self.device)
                 
-                with fp8_ctx:
-                    outputs = self.model(inputs)
-                    loss = self.criterion(outputs, inputs)
-                
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                train_loss_sum += loss.item()
+                # [Blackwell 최적화] FP8/AMP 컨텍스트를 배치마다 새로 생성
+                if fp8_autocast and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 9:
+                    fp8_ctx = fp8_autocast(enabled=True)
+                else:
+                    fp8_ctx = torch.amp.autocast('cuda', enabled=True if torch.cuda.is_available() else False)
+
+                try:
+                    with fp8_ctx:
+                        outputs = self.model(inputs)
+                        loss = self.criterion(outputs, inputs)
+                    
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    train_loss_sum += loss.item()
+                except Exception as e:
+                    print(f"    [!] Error during training at epoch {epoch+1}, batch {batch_idx+1}: {e}")
+                    raise e
             
             avg_train_loss = train_loss_sum / len(train_loader)
             
@@ -181,7 +198,9 @@ class Trainer:
             self.model.load_state_dict(best_model_state)
             print(f"[*] Deploying best model (Val Loss: {best_val_loss:.6f})")
         
-        torch.save(self.model.state_dict(), self.paths['model'])
+        # [Blackwell 최적화] 저장 시 torch.compile 접두어('_orig_mod.') 제거하여 이식성 확보
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in self.model.state_dict().items()}
+        torch.save(state_dict, self.paths['model'])
         self.processor.save_scaler(self.paths['scaler'])
         
         # 4. 임계치 산출 및 통합 메타데이터 저장
@@ -194,7 +213,10 @@ class Trainer:
         """임계치와 학습 당시의 설정을 하나의 JSON으로 저장 (Inference 로드용)"""
         self.model.eval()
         mses = []
-        loader = DataLoader(TensorDataset(torch.from_numpy(sequences).float()), batch_size=32)
+        loader = DataLoader(
+            TensorDataset(torch.from_numpy(sequences).float()), 
+            batch_size=self.config['batch_size']
+            )
         with torch.no_grad():
             for batch in loader:
                 inputs = batch[0].to(self.device)

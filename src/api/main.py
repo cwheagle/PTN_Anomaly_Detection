@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import json
+import traceback
 import uvicorn
 import pandas as pd
 import numpy as np
@@ -304,9 +305,11 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
                 training_status[ft]["last_error"] = "Model training failed or was stopped."
             print(f"[!] [BG] {ft.capitalize()} model training failed.")
     except Exception as e:
+        full_error = traceback.format_exc()
         err_msg = f"Runtime Error: {str(e)}"
         training_status[ft]["last_error"] = err_msg
         print(f"[!] [BG] Training Error: {err_msg}")
+        print(full_error)
     finally:
         training_status[ft]["is_training"] = False
         if ft in active_trainers:
@@ -365,7 +368,10 @@ async def get_anomalies(
     conn = db.get_connection()
     if not conn: raise HTTPException(status_code=500, detail="DB connection failed")
     try:
-        where_clauses = ["occur_date = (SELECT MAX(occur_date) FROM anomaly_detection)"]
+        where_clauses = [
+            "occur_date = (SELECT MAX(occur_date) FROM anomaly_detection)",
+            "occur_date >= DATE_SUB(NOW(), INTERVAL 1 HOUR)"
+        ]
         where_clauses.append(f"alarm_level BETWEEN {severity_min} AND {severity_max}")
         if rising_only: where_clauses.append("slope_label = 'RISING'")
         

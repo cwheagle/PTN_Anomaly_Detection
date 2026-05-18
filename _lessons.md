@@ -42,5 +42,13 @@
 - **교훈:** 여러 트랙의 점수를 합산/평균내면 심각한 이상이 희석될 수 있음.
 - **해결:** 가장 심각한(Dominant) 점수를 가진 트랙을 기준으로 전체 심각도와 RUL을 결정함.
 
+## 11. torch.compile과 멀티스레딩 환경의 CUDA Graphs 충돌
+- **교훈:** `torch.compile`의 `reduce-overhead`나 `max-autotune` 모드에서 사용하는 CUDA Graphs는 FastAPI의 `BackgroundTasks` 같은 멀티스레딩 환경에서 `AssertionError`를 유발할 수 있음.
+- **해결:** 멀티스레딩 환경에서는 `torch.compile(model)` (Default 모드)을 사용하거나, 명시적으로 `options={"triton.cudagraphs": False}`를 설정하여 스레드 안전성을 확보해야 함.
+
+## 12. 고성능 GPU(Blackwell)에서의 배치 사이즈 최적화
+- **교훈:** 대용량 시계열 데이터(23만건) 학습 시, 무조건 큰 배치(256)보다 적절한 배치(128)가 검증 손실(Validation Loss) 측면에서 약 28% 이상의 정확도 향상을 보임.
+- **원칙:** 학습 속도와 정확도의 균형을 고려하여, 성능 개선폭이 유의미한 수준(10% 이상)일 때까지 하향 조정을 검토함.
+
 ---
-*최종 업데이트: 2026-05-14*
+*최종 업데이트: 2026-05-18*
