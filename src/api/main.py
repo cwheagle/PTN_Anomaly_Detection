@@ -38,10 +38,10 @@ active_trainers = {} # 현재 실행 중인 Trainer 인스턴스 (중지용)
 async def broadcast_alarm(alarm_data: dict):
     """모든 연결된 SSE 클라이언트에게 알람 전송 (전송 성공 여부 반환)"""
     if not event_queues:
-        print(f"    [SSE] No active clients connected. Skipping broadcast.")
+        print(f"[SSE] No active clients connected. Skipping broadcast.")
         return False
     
-    print(f"    [SSE] Broadcasting to {len(event_queues)} clients...")
+    print(f"[SSE] Broadcasting to {len(event_queues)} clients...")
     message = json.dumps(alarm_data)
     for queue in event_queues:
         await queue.put(message)
@@ -80,9 +80,9 @@ async def alarm_callback(anomalies_df):
         # 실제 전송에 성공했을 때만 상태 업데이트
         if await broadcast_alarm(alarm_info):
             active_alarms_state[key] = str(row['occur_date'])
-            print(f"    [SSE] Successfully broadcasted ALARM: {key}")
+            print(f"[SSE] Successfully broadcasted ALARM: {key}")
         else:
-            print(f"    [SSE] Retrying ALARM later (No clients): {key}")
+            print(f"[SSE] Retrying ALARM later (No clients): {key}")
 
     # 2. 자동 해제(Recovery) 처리
     # 이전에 Critical이었으나 현재 목록에 없는 경우 해제 이벤트 전송
@@ -100,7 +100,7 @@ async def alarm_callback(anomalies_df):
         }
         await broadcast_alarm(clear_info)
         del active_alarms_state[key]
-        print(f"    [SSE] Broadcasted CLEAR: {key}")
+        print(f"[SSE] Broadcasted CLEAR: {key}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -298,6 +298,12 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
             msg = "Model training complete."
             if trainer.early_stopped:
                 msg = f"Training finished early at epoch {training_status[ft]['current_epoch']} (Optimal weights saved)."
+            
+            # [Auto-Reload] 실시간 엔진에 새 모델 즉시 반영
+            if scheduler_instance and hasattr(scheduler_instance, 'detector'):
+                scheduler_instance.detector.reload_model(ft)
+                msg += " (In-memory model updated)"
+                
             training_status[ft]["success_msg"] = msg
             print(f"[*] [BG] {ft.capitalize()} {msg}")
         else:

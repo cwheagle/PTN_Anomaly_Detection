@@ -1,5 +1,6 @@
 import os
 import json
+import traceback
 import math
 import torch
 import numpy as np
@@ -14,58 +15,9 @@ class AnomalyDetector:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tracks = {} # {f_type: {'model': m, 'proc': p, 'th': t, 'config': c}}
 
+        # 초기 구동 시 저장된 모델이 있으면 로드
         for ft in ['traffic', 'optical']:
-            p = PATHS[ft]
-            # 모델 파일명과 동일한 설정 파일 (예: traffic_ae.json)
-            meta_path = p['model'].replace('.pth', '.json')
-            
-            # 1. 설정 파일이 있으면 거기서 모델 구성을 로드, 없으면 기본 config.py 사용
-            cfg = MODEL_CONFIG.copy()
-            th = None
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f:
-                        meta = json.load(f)
-                        cfg.update(meta.get('config', {}))
-                        th = meta.get('threshold')
-                        print(f"[*] Loaded metadata for {ft} model (Trained at: {meta.get('trained_at')})")
-                except Exception as e:
-                    print(f"[!] Error reading meta for {ft}: {e}")
-
-            cfg['input_dim'] = len(FEATURE_GROUPS[ft])
-            model = LSTMAutoencoder(cfg).to(self.device)
-            
-            if os.path.exists(p['model']):
-                try:
-                    # [Blackwell 최적화] torch.compile로 저장된 모델의 '_orig_mod.' 접두어 제거 후 로드
-                    state_dict = torch.load(p['model'], map_location=self.device, weights_only=True)
-                    new_state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-                    model.load_state_dict(new_state_dict)
-                    
-                    # [Blackwell 최적화] 추론 성능 향상을 위한 컴파일 적용
-                    if hasattr(torch, "compile") and self.device.type == "cuda":
-                        try:
-                            print(f"[*] Compiling {ft} model for inference optimization...")
-                            model = torch.compile(model)
-                        except Exception as e:
-                            print(f"[!] torch.compile failed for {ft}: {e}")
-                            
-                    model.eval()
-                    
-                    # 2. 로드된 cfg를 DataProcessor에도 전달 (window_size 정합성 확보)
-                    proc = DataProcessor(ft, config=cfg)
-                    if proc.load_scaler(p['scaler']):
-                        if th is not None:
-                            self.tracks[ft] = {'model': model, 'proc': proc, 'th': th, 'config': cfg}
-                            print(f"[*] Loaded {ft} model track successfully.")
-                        else:
-                            print(f"[!] No threshold found for {ft}")
-                    else:
-                        print(f" [!] Failed to load scaler for {ft}")
-                except Exception as e:
-                    print(f"[!] Error loading {ft} model weight: {e}")
-            else:
-                print(f"[!] {ft.capitalize()} model file not found: {p['model']}")
+            self.reload_model(ft)
 
     def reload_config(self, ft):
         """저장된 메타데이터 파일(.json)에서 설정을 다시 읽어 메모리에 반영"""
@@ -86,6 +38,58 @@ class AnomalyDetector:
             except Exception as e:
                 print(f"[!] Error reloading config for {ft}: {e}")
         return False
+
+    def reload_model(self, ft):
+        """학습 완료 후 또는 초기화 시 파일로부터 모델 가중치, 스케일러, 설정을 모두 로드"""
+        p = PATHS[ft]
+        if not os.path.exists(p['model']):
+            print(f"[*] {ft.capitalize()} model file not found, skipping load.")
+            return False
+
+        print(f"[*] (Re)loading {ft} model from disk...")
+        try:
+            # 설정 파일(.json) 로드
+            meta_path = p['model'].replace('.pth', '.json')
+            cfg = MODEL_CONFIG.copy()
+            th = None
+            
+            if os.path.exists(meta_path):
+                with open(meta_path, 'r') as f:
+                    meta = json.load(f)
+                    cfg.update(meta.get('config', {}))
+                    th = meta.get('threshold', cfg.get('threshold'))
+                    print(f"[*] Loaded metadata for {ft} model (Trained at: {meta.get('trained_at')})")
+
+            # 모델 인스턴스 생성 및 가중치 로드
+            cfg['input_dim'] = len(FEATURE_GROUPS[ft])
+            model = LSTMAutoencoder(cfg).to(self.device)
+            state_dict = torch.load(p['model'], map_location=self.device, weights_only=True)
+            new_state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+            model.load_state_dict(new_state_dict)
+            
+            # 추론 최적화 (torch.compile)
+            if hasattr(torch, "compile") and self.device.type == "cuda":
+                try:
+                    print(f"[*] Compiling {ft} model for inference optimization...")
+                    model = torch.compile(model)
+                except: pass
+            
+            model.eval()
+            
+            # 프로세서 및 스케일러 리로드
+            proc = DataProcessor(ft, config=cfg)
+            if not proc.load_scaler(p['scaler']): 
+                print(f"[!] Failed to load scaler for {ft}")
+                return False
+            
+            # 메모리 교체
+            self.tracks[ft] = {'model': model, 'proc': proc, 'th': th if th is not None else 0.1, 'config': cfg}
+            print(f"[SUCCESS] {ft.capitalize()} model track (re)loaded. (Threshold: {self.tracks[ft]['th']:.6f})")
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to reload {ft} model: {e}")
+            print(traceback.format_exc())
+            return False
 
     def _get_alarm_info(self, severity):
         """심각도 점수에 따른 경보 등급 및 라벨 반환"""

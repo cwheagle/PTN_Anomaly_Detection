@@ -27,7 +27,7 @@ class DataProcessor:
                 self.scaler = joblib.load(path)
                 return True
             except Exception as e:
-                print(f" [!] Error loading scaler: {e}")
+                print(f"[!] Error loading scaler: {e}")
                 return False
         return False
 

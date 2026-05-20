@@ -51,26 +51,26 @@ class Trainer:
 
     def _prepare_loader(self, data_path):
         if not os.path.exists(data_path):
-            print(f"    [ERROR] Data file not found: {data_path}")
+            print(f"[ERROR] Data file not found: {data_path}")
             return None
             
-        print(f"    [*] Loading CSV: {data_path}")
+        print(f"[*] Loading CSV: {data_path}")
         df = pd.read_csv(data_path)
         if self.stop_requested: return None
 
-        print(f"    [*] Preprocessing data...")
+        print(f"[*] Preprocessing data...")
         df_clean = self.processor.preprocess(df, is_train=True)
         if df_clean is None or self.stop_requested: 
-            print(f"    [!] Preprocessing returned None (Insufficient data or stop requested)")
+            print(f"[!] Preprocessing returned None (Insufficient data or stop requested)")
             return None
         
-        print(f"    [*] Creating sequences...")
+        print(f"[*] Creating sequences...")
         sequences = self.processor.create_sequences(df_clean, is_train=True)
         if len(sequences) == 0 or self.stop_requested: 
-            print(f"    [!] No sequences created")
+            print(f"[!] No sequences created")
             return None
         
-        print(f"    [*] Converting to Tensor and creating DataLoader (Size: {len(sequences)})")
+        print(f"[*] Converting to Tensor and creating DataLoader (Size: {len(sequences)})")
         return DataLoader(
             TensorDataset(torch.from_numpy(sequences).float()), 
             batch_size=self.config['batch_size'], 
@@ -83,16 +83,16 @@ class Trainer:
         print(f"[*] Training [{self.feature_type}] specialist model...")
         
         # 1. 데이터 로더 준비
-        print(f"    [*] Preparing training loader...")
+        print(f"[*] Preparing training loader...")
         t_res = self._prepare_loader(t_path)
         if self.stop_requested: return False
         
-        print(f"    [*] Preparing validation loader...")
+        print(f"[*] Preparing validation loader...")
         v_res = self._prepare_loader(v_path) # 검증 데이터
         if self.stop_requested: return False
         
         if not t_res:
-            print(f"    [SKIP] Insufficient training data for {self.feature_type}")
+            print(f"[SKIP] Insufficient training data for {self.feature_type}")
             return False
             
         train_loader, train_sequences = t_res
@@ -103,7 +103,7 @@ class Trainer:
         patience = self.config['patience']
         no_improve_count = 0
         
-        print(f"    [*] Starting epoch loop (Total: {self.config['epochs']})")
+        print(f"[*] Starting epoch loop (Total: {self.config['epochs']})")
         for epoch in range(self.config['epochs']):
             epoch_start = time.time()
             
@@ -138,7 +138,7 @@ class Trainer:
                     self.optimizer.step()
                     train_loss_sum += loss.item()
                 except Exception as e:
-                    print(f"    [!] Error during training at epoch {epoch+1}, batch {batch_idx+1}: {e}")
+                    print(f"[!] Error during training at epoch {epoch+1}, batch {batch_idx+1}: {e}")
                     raise e
             
             avg_train_loss = train_loss_sum / len(train_loader)
@@ -163,11 +163,11 @@ class Trainer:
                     best_val_loss = avg_val_loss
                     best_model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
                     no_improve_count = 0
-                    print(f"    [SAVE] Best model updated at epoch {epoch+1} (Val Loss: {best_val_loss:.6f})")
+                    print(f"[SAVE] Best model updated at epoch {epoch+1} (Val Loss: {best_val_loss:.6f})")
                 else:
                     no_improve_count += 1
                     if no_improve_count >= patience:
-                        print(f"    [EARLY STOP] No improvement for {patience} epochs. Stopping at epoch {epoch+1}")
+                        print(f"[EARLY STOP] No improvement for {patience} epochs. Stopping at epoch {epoch+1}")
                         self.early_stopped = True # 플래그 설정
                         break
 
@@ -187,7 +187,7 @@ class Trainer:
 
             # 중지 요청 확인 (Early Exit)
             if self.stop_requested:
-                print(f"    [STOP] Training interrupted by user at epoch {epoch+1}")
+                print(f"[STOP] Training interrupted by user at epoch {epoch+1}")
                 return False
         
         # 3. 모델 및 스케일러 저장
@@ -206,7 +206,7 @@ class Trainer:
         # 4. 임계치 산출 및 통합 메타데이터 저장
         # 훈련 데이터 기반으로 임계치 결정
         self._save_metadata(train_sequences, best_val_loss if val_loader else None)
-        print(f"    [SUCCESS] {self.feature_type.capitalize()} model deployed.")
+        print(f"[SUCCESS] {self.feature_type.capitalize()} model deployed.")
         return True
 
     def _save_metadata(self, sequences, val_loss=None):

@@ -35,7 +35,7 @@ def run_collection(days=37):
         test = df_t[df_t['occur_date'] >= split_str]
         train.to_csv("data/traffic_train.csv", index=False)
         test.to_csv("data/traffic_test.csv", index=False)
-        print(f"    [OK] Traffic: {len(train)} train / {len(test)} test")
+        print(f"[OK] Traffic: {len(train)} train / {len(test)} test")
 
     # 2. 광파워 수집
     print(f"\n[*] Collecting Optical data...")
@@ -48,7 +48,7 @@ def run_collection(days=37):
         test = df_o[df_o['occur_date'] >= split_str]
         train.to_csv("data/optical_train.csv", index=False)
         test.to_csv("data/optical_test.csv", index=False)
-        print(f"    [OK] Optical: {len(train)} train / {len(test)} test")
+        print(f"[OK] Optical: {len(train)} train / {len(test)} test")
     
     print("\n" + "="*60)
     print("COLLECTION COMPLETE")

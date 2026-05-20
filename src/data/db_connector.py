@@ -213,9 +213,9 @@ class DBConnector:
                 
             cursor.executemany(query, data)
             conn.commit()
-            print(f"    [DB] Successfully saved {len(data)} results.")
+            print(f"[DB] Successfully saved {len(data)} results.")
         except Error as e:
-            print(f"    [DB] Save error: {e}")
+            print(f"[DB] Save error: {e}")
             conn.rollback()
         finally:
             cursor.close()

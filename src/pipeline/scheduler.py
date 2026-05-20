@@ -65,7 +65,7 @@ class PTNAnomalyScheduler:
                 print("    - No valid data to analyze in this cycle.")
                 
         except Exception as e:
-            print(f"    [ERROR] Job failed: {e}")
+            print(f"[ERROR] Job failed: {e}")
 
     def start(self):
         """스케줄러 가동"""
