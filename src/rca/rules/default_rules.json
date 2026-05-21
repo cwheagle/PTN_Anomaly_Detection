@@ -1,0 +1,96 @@
+[
+  {
+    "id": "TR-001",
+    "track": "traffic",
+    "priority": 10,
+    "contributions": {
+      "error_packet": 60
+    },
+    "diagnosis": "CRC/비트 오류 의심 (에러 패킷 급증)",
+    "action": "광 커넥터 청소 또는 케이블 점검 권고"
+  },
+  {
+    "id": "TR-002",
+    "track": "traffic",
+    "priority": 9,
+    "contributions": {
+      "error_packet": 30,
+      "rx_packet": 30
+    },
+    "diagnosis": "수신 오류 및 트래픽 이상 (CRC + 패킷 손실)",
+    "action": "수신 측 연결 상태 및 에러 카운터 점검"
+  },
+  {
+    "id": "TR-003",
+    "track": "traffic",
+    "priority": 8,
+    "contributions": {
+      "tx_packet": 40,
+      "rx_packet": 30
+    },
+    "diagnosis": "양방향 트래픽 급변 (라인 이상 의심)",
+    "action": "업스트림/다운스트림 포트 상태 확인"
+  },
+  {
+    "id": "TR-004",
+    "track": "traffic",
+    "priority": 5,
+    "contributions": {
+      "tx_packet": 70
+    },
+    "diagnosis": "송신 트래픽 이상 (TX 패턴 급변)",
+    "action": "송신 버퍼 및 업스트림 장비 상태 확인"
+  },
+  {
+    "id": "TR-005",
+    "track": "traffic",
+    "priority": 5,
+    "contributions": {
+      "rx_packet": 70
+    },
+    "diagnosis": "수신 트래픽 이상 (RX 패킷 손실 의심)",
+    "action": "수신 포트 및 다운스트림 연결 상태 확인"
+  },
+  {
+    "id": "OP-001",
+    "track": "optical",
+    "priority": 10,
+    "contributions": {
+      "rx_avg_power": 60
+    },
+    "diagnosis": "광 수신 열화 의심 (RX 전력 저하)",
+    "action": "광섬유 커넥터 청소 또는 수신 광 모듈 점검"
+  },
+  {
+    "id": "OP-002",
+    "track": "optical",
+    "priority": 10,
+    "contributions": {
+      "tx_avg_power": 60
+    },
+    "diagnosis": "광 송신 열화 의심 (TX 전력 저하)",
+    "action": "송신 광 모듈(SFP/QSFP) 교체 검토"
+  },
+  {
+    "id": "OP-003",
+    "track": "optical",
+    "priority": 9,
+    "contributions": {
+      "rx_avg_power": 30,
+      "tx_avg_power": 30
+    },
+    "diagnosis": "광 모듈 전체 열화 의심 (교체 권고)",
+    "action": "광 모듈(SFP/QSFP) 교체 및 광섬유 점검"
+  },
+  {
+    "id": "IN-001",
+    "track": "integrated",
+    "priority": 20,
+    "raw_conditions": {
+      "max_rx_avg_power": -20,
+      "min_error_packet": 100
+    },
+    "diagnosis": "물리 계층 심각한 장애 (광전력 손실 및 대량 에러 동시 발생)",
+    "action": "즉각적인 광 선로 단선 및 커넥터 파손 여부 점검"
+  }
+]

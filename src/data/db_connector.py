@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pandas as pd
 import warnings
@@ -76,6 +77,10 @@ class DBConnector:
                 expected_fatal_time DATETIME DEFAULT NULL,
                 -- 상세 정보
                 anomaly_reason TEXT,
+                -- [Phase 8] RCA 진단 결과
+                rca_diagnosis TEXT DEFAULT NULL,
+                rca_action TEXT DEFAULT NULL,
+                feature_contribution JSON DEFAULT NULL,
                 detect_time DATETIME,
                 UNIQUE KEY uk_anomaly (occur_date, ip_addr, cid, lid),
                 INDEX idx_occur_date (occur_date),
@@ -86,6 +91,28 @@ class DBConnector:
         try:
             cursor.execute(create_query)
             conn.commit()
+
+            # [Phase 8, 9.1] 기존 테이블에 RCA 컬럼이 없으면 안전하게 추가
+            rca_columns = [
+                ("rca_diagnosis", "TEXT DEFAULT NULL AFTER anomaly_reason"),
+                ("rca_action", "TEXT DEFAULT NULL AFTER rca_diagnosis"),
+                ("feature_contribution", "JSON DEFAULT NULL AFTER rca_action"),
+            ]
+            for col_name, col_def in rca_columns:
+                try:
+                    cursor.execute(f"""
+                        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = '{self.config['database']}'
+                          AND TABLE_NAME = 'anomaly_detection'
+                          AND COLUMN_NAME = '{col_name}'
+                    """)
+                    if cursor.fetchone()[0] == 0:
+                        cursor.execute(f"ALTER TABLE anomaly_detection ADD COLUMN {col_name} {col_def}")
+                        conn.commit()
+                        print(f"[DB] Column '{col_name}' added to anomaly_detection.")
+                except Error as e:
+                    print(f"[DB] ALTER TABLE error for {col_name}: {e}")
+
         except Error as e:
             print(f"[DB] Table creation error: {e}")
         finally:
@@ -173,7 +200,7 @@ class DBConnector:
             'optical_score', 'optical_severity', 'optical_slope', 'optical_threshold', 'is_optical_anomaly',
             'anomaly_score', 'severity', 'slope', 'slope_label', 'threshold', 'is_anomaly', 
             'alarm_level', 'alarm_label', 'ttf_minutes', 'expected_fatal_time', 
-            'anomaly_reason', 'detect_time'
+            'anomaly_reason', 'rca_diagnosis', 'rca_action', 'feature_contribution', 'detect_time'
         ]
         
         placeholders = ", ".join(["%s"] * len(cols))
@@ -199,12 +226,19 @@ class DBConnector:
                     # 타입별 정밀 처리
                     if col == 'ttf_minutes':
                         row_data.append(float(val) if pd.notna(val) else None)
-                    elif col in ['occur_date', 'expected_fatal_time']:
+                    elif col in ['occur_date', 'expected_fatal_time', 'rca_action']:
                         row_data.append(val if pd.notna(val) else None)
-                    elif col in ['ip_addr', 'slope_label', 'alarm_label', 'anomaly_reason']:
+                    elif col in ['ip_addr', 'slope_label', 'alarm_label', 'anomaly_reason', 'rca_diagnosis']:
                         row_data.append(str(val) if pd.notna(val) else "")
+                    elif col == 'feature_contribution':
+                        # dict 또는 JSON 문자열 모두 처리
+                        if pd.notna(val):
+                            row_data.append(val if isinstance(val, str) else json.dumps(val, ensure_ascii=False))
+                        else:
+                            row_data.append(None)
                     elif col in ['tx_packet', 'rx_packet', 'error_packet', 'is_anomaly', 
                                'is_traffic_anomaly', 'is_optical_anomaly', 'cid', 'lid', 'alarm_level']:
+
                         row_data.append(int(self._clean_value(val, 0)))
                     else: # 점수, 임계치 등 나머지 실수형
                         row_data.append(float(self._clean_value(val, 0.0)))

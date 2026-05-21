@@ -66,31 +66,40 @@
   - **잔여 수명 예측 (RUL Prediction)**: 현재 추세 기반 미래 시점의 임계치 도달 예상 시간을 계산, 15분 단위의 올림(Ceil) 처리 로직 구현 완료. (2026-05-11)
 - **검증:** 실제 장비 장애 패턴과의 비교를 통한 예측 시점 및 RUL 정확도 검토 완료.
 
-### Phase 7: 지능형 엔진 코어 완성 (Go)
+### Phase 7: 지능형 엔진 코어 완성 (Complete)
 - **목표:** 동적 임계치 및 MLOps 기반의 자동 재학습 체계를 구축하여 사람의 개입 없이 진화하는 AI 엔진 코어 완성.
 - **세부 내용:**
-  - **Backend API & 인프라 (Complete)**: FastAPI 서버, 실시간 SSE, 무중단 모델 갱신(Hot-Reload), Blackwell(GB10) 최적화 및 DB 동기화 로직 구축 완료.
-  - **동적 임계치 (Dynamic Thresholding)**: 시간대별/요일별 데이터 패턴(Seasonality) 분석을 통한 가변 임계치 적용으로 오탐(False Positive) 최소화.
-  - **성능 모니터링 및 자동 재학습 (Auto-Retraining)**: 
-    - 추론 결과의 성능 저하(Drift) 감지 시 자동으로 최신 데이터를 수집하여 백그라운드 모델 학습 수행.
-    - 학습 완료 시 기존 구축된 Hot-Reload 로직과 연계하여 즉각적인 추론 엔진 배포 체계(MLOps) 구축.
+  - **Backend API & 인프라**: FastAPI 서버, 실시간 SSE, 무중단 모델 갱신(Hot-Reload), Blackwell(GB10) 최적화 및 DB 동기화 로직 구축 완료.
 - **검증:** 
-  - 동적 임계치 적용 전후의 탐지 정확도(F1-Score) 비교.
-  - 백그라운드 재학습부터 운영 배포까지의 파이프라인 자동화 무결성 테스트.
+  - FastAPI 서버 통합 테스트 완료.
+  - 실시간 SSE 이벤트 스트리밍 및 Hot-Reload 무중단 배포 확인 완료.
 
-### Phase 8: 분석 고도화 및 UI/UX 상용화 (Pending)
-- **목표:** 완성된 AI 엔진의 결과를 운영자가 직관적으로 이해할 수 있도록 원인 분석을 고도화하고, 상용 수준의 대시보드 UI 구현.
+### Phase 8: RCA 엔진 코어 구현 및 관리자 UI 구축 (Complete)
+- **목표:** '이상이 탐지됐다'를 넘어, '어떤 장애가 의심된다'는 구체적 진단명과 조치 방법을 출력하는 RCA(Root Cause Analysis) 엔진 코어와 이를 관리할 프론트엔드 UI를 구축.
+- **배경:** 화웨이 iMaster NCE, 노키아 WaveSuite 등 선도 솔루션의 핵심 차별화 포인트가 단순 이상 감지가 아닌 **장애 원인 진단 + Feature 기여도 분석**임을 확인. 운용자가 실질적으로 필요한 정보는 '수치가 이상하다'가 아닌 '이 장비의 이 포트에서 이런 장애가 의심된다'는 진단 및 조치 방법임.
 - **세부 내용:**
-  - **이상감지 원인분석(RCA) 고도화**: 
-    - 단순 수치 이상을 넘어, 도메인 지식 기반 Heuristics(예: 광파워 저하 + 에러 증가 = 모듈 불량 의심)를 적용한 직접적인 장애 원인 도출.
-    - 각 Feature(In Packet, Error 등)가 모델의 MSE 상승에 기여한 정도를 분석(Feature Contribution).
-  - **RUL(잔여 수명) 예측 정교화**: 선형 회귀의 노이즈를 줄이고 심각도 스코어링 함수 보정.
-  - **UI 고도화 (UI Advancement)**: 
-    - 디자인 폴리싱(글래스모피즘, 글로우 효과, 애니메이션 강화).
-    - 도출된 '직접적 원인'과 Feature 기여도를 직관적으로 보여주는 분석 차트 및 패널 구현.
-- **검증:** 
-  - 실제 장애 시나리오 주입 시 도출된 '장애 원인' 텍스트의 정확성 검토.
-  - UI 전문성 및 사용자 경험(UX) 테스트.
+  - **Feature Contribution 분석기**: 이상 시점에서 각 Feature(tx_packet, rx_packet, error_packet, tx_avg_power, rx_avg_power)가 MSE 상승에 기여한 비율(%)을 계산하여, 주요 원인 Feature를 식별.
+  - **도메인 룰 인터페이스 설계 (Fully Structured JSON)**: 도메인 전문가(네트워크 엔지니어)가 룰을 정의하여 주입할 수 있는 안전한 인터페이스 구축.
+    - 예: `{"contributions": {"error_packet": 60}, "diagnosis": "CRC/비트 오류 의심", "action": "광 커넥터 청소"}`
+  - **장애명 진단 출력**: 룰이 없어도 Feature Contribution 기반의 일반 진단이 동작하도록 기본(Default) 룰 세트를 함께 제공. (예: `RX 전력 기여도 1위 → 광 수신 열화 의심`).
+  - **DB 스키마 확장 및 파이프라인 연동**: `rca_diagnosis`, `feature_contribution`, `rca_action` 컬럼을 동적으로 추가하고 파이프라인(DB-API-UI) 전체를 연동.
+  - **UI/UX 개선 및 룰 관리 프론트엔드**:
+    - 대시보드 UI의 Recent Anomalies 표에 툴팁을 활용한 추천 조치(Action) 렌더링 추가.
+    - Rule Management UI 전면 개편: 구조화된 JSON 기반의 동적 입력 폼(Min/Max, 기여도) 프론트엔드 연동 완성.
+- **검증:**
+  - 모의 이상 데이터 주입 시 Feature Contribution 비율 정확성 검토.
+  - 기본 룰 세트 적용 후 도출된 진단명의 직관적 타당성 검토.
+
+### Phase 9: 지능형 MLOps 및 시스템 안정화 (Go)
+- **목표:** 도메인 전문가 룰을 주입하여 RCA 정확도를 고도화하고, 동적 임계치·자동 재학습을 완성하며, 상용 수준의 대시보드를 구현.
+- **세부 내용:**
+  - **도메인 룰 주입 (Rule Injection)**: 네트워크 엔지니어가 정의한 룰을 Phase 8의 인터페이스에 등록 및 검증 (디테일한 룰셋 구축 작업).
+  - **동적 임계치 (Dynamic Thresholding)**: 시간대/요일별 계절성(Seasonality)을 반영한 가변 임계치로 오탐(False Positive) 최소화.
+  - **자동 재학습 파이프라인 (Auto-Retraining MLOps)**: 성능 저하(Drift) 감지 시 백그라운드 학습 트리거 → Hot-Reload 무중단 배포.
+- **검증:**
+  - 실제 장애 시나리오 데이터 기반 RCA 정확도(Precision) 평가.
+  - 동적 임계치 적용 전후 F1-Score 비교.
+  - 백그라운드 재학습 → 무중단 배포 파이프라인 자동화 무결성 테스트.
 
 ---
 

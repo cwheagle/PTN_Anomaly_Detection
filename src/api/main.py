@@ -385,7 +385,7 @@ async def get_anomalies(
             SELECT occur_date, ip_addr, cid as slot_id, lid as port_id, 
                    severity, alarm_level, alarm_label, slope, slope_label, 
                    ttf_minutes, expected_fatal_time, anomaly_reason,
-                   is_traffic_anomaly, is_optical_anomaly
+                   is_traffic_anomaly, is_optical_anomaly, rca_diagnosis, rca_action, feature_contribution
             FROM anomaly_detection
             WHERE {" AND ".join(where_clauses)}
             ORDER BY severity DESC, slope DESC
@@ -408,7 +408,8 @@ async def get_anomaly_history(ip_addr: str, slot_id: int, port_id: int, days: in
                     anomaly_score, threshold, severity, alarm_level, alarm_label, anomaly_reason,
                     traffic_score, traffic_threshold, traffic_severity,
                     optical_score, optical_threshold, optical_severity,
-                    is_traffic_anomaly, is_optical_anomaly
+                    is_traffic_anomaly, is_optical_anomaly,
+                    rca_diagnosis, rca_action, feature_contribution
             FROM anomaly_detection
             WHERE ip_addr = %s AND cid = %s AND lid = %s
               AND occur_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
@@ -466,6 +467,75 @@ async def control_scheduler(data: dict = Body(...)):
         scheduler_instance.restart()
         if scheduler_instance.scheduler.state == 2: scheduler_instance.scheduler.resume()
     return await get_scheduler_status()
+
+# --- [Phase 8] RCA Rules API ---
+
+@app.get("/api/rca/rules")
+async def get_rca_rules():
+    """현재 등록된 RCA 도메인 룰 테이블 반환"""
+    try:
+        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
+            rules = scheduler_instance.detector.rca_engine.get_rules()
+            return {"count": len(rules), "rules": rules}
+        # scheduler 미기동 시 직접 로드
+        from src.rca.rule_engine import RCAEngine
+        engine = RCAEngine()
+        rules = engine.get_rules()
+        return {"count": len(rules), "rules": rules}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/rca/rules")
+async def add_rca_rule(rule: dict = Body(...)):
+    """새 RCA 룰 추가"""
+    required = {"id", "track", "priority", "diagnosis", "action"}
+    missing = required - rule.keys()
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required fields: {missing}")
+    
+    if rule.get("track") not in ("traffic", "optical", "integrated"):
+        raise HTTPException(status_code=400, detail="Invalid track. Must be 'traffic', 'optical' or 'integrated'.")
+    
+    try:
+        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
+            success = scheduler_instance.detector.rca_engine.add_rule(rule)
+        else:
+            from src.rca.rule_engine import RCAEngine
+            engine = RCAEngine()
+            success = engine.add_rule(rule)
+        
+        if success:
+            return {"status": "success", "message": f"Rule '{rule['id']}' added.", "rule": rule}
+        else:
+            raise HTTPException(status_code=409, detail=f"Rule ID '{rule.get('id')}' already exists or save failed.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/rca/rules/{rule_id}")
+async def delete_rca_rule(rule_id: str):
+    """특정 RCA 룰 삭제"""
+    import json, os
+    from src.rca.rule_engine import DEFAULT_RULES_PATH
+    try:
+        if not os.path.exists(DEFAULT_RULES_PATH):
+            raise HTTPException(status_code=404, detail="Rules file not found.")
+        with open(DEFAULT_RULES_PATH, "r", encoding="utf-8") as f:
+            rules = json.load(f)
+        new_rules = [r for r in rules if r.get("id") != rule_id]
+        if len(new_rules) == len(rules):
+            raise HTTPException(status_code=404, detail=f"Rule ID '{rule_id}' not found.")
+        with open(DEFAULT_RULES_PATH, "w", encoding="utf-8") as f:
+            json.dump(new_rules, f, ensure_ascii=False, indent=2)
+        # 실시간 반영
+        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
+            scheduler_instance.detector.rca_engine.reload_rules()
+        return {"status": "success", "message": f"Rule '{rule_id}' deleted."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

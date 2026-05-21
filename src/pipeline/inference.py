@@ -9,11 +9,16 @@ from datetime import timedelta
 from src.models.model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS, SEVERITY_CONFIG
+from src.rca.feature_contribution import FeatureContributionAnalyzer
+from src.rca.rule_engine import RCAEngine
 
 class AnomalyDetector:
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tracks = {} # {f_type: {'model': m, 'proc': p, 'th': t, 'config': c}}
+
+        # [Phase 8] RCA 엔진 초기화 (Feature Contribution + 도메인 룰 기반 진단)
+        self.rca_engine = RCAEngine()
 
         # 초기 구동 시 저장된 모델이 있으면 로드
         for ft in ['traffic', 'optical']:
@@ -128,14 +133,26 @@ class AnomalyDetector:
             with torch.no_grad():
                 with fp8_ctx:
                     outputs = track['model'](inputs)
-                # 마지막 시점의 오차만 계산
+                # 마지막 시점의 통합 오차 계산 (기존 로직 유지)
                 diff = (inputs[:, -1, :] - outputs[:, -1, :]) ** 2
                 mse = np.mean(diff.cpu().numpy(), axis=1)
-            
+
+                # [Phase 8] Feature별 기여도 계산용 NumPy 변환
+                inputs_np = inputs.cpu().numpy()
+                outputs_np = outputs.cpu().numpy()
+
             res = df_clean.loc[indices].copy()
             res[f'{ft}_score'] = mse
             res[f'is_{ft}_anomaly'] = mse > track['th']
             res[f'{ft}_threshold'] = track['th']
+
+            # [Phase 8] Feature Contribution 계산 (포트 단위 배치 전체에 대해 평균)
+            feature_names = FEATURE_GROUPS[ft]
+            fc_analyzer = FeatureContributionAnalyzer(feature_names)
+            # 포트 배치(seqs) 전체 평균 기여도 산출
+            contributions = fc_analyzer.compute(inputs_np, outputs_np)
+            # JSON 직렬화 가능한 문자열로 저장
+            contributions_json = json.dumps(contributions, ensure_ascii=False)
             
             # 심각도 점수 산출 로직 (0~100 정규화)
             def calculate_severity(mse, threshold):
@@ -183,10 +200,15 @@ class AnomalyDetector:
                 return "Anomaly"
             
             res[f'{ft}_reason'] = res.apply(get_detailed_reason, axis=1)
-            
+
+            # [Phase 9] RCA 진단명 생성은 통합 단계(detect)로 연기하고 기여도만 저장
+            res['feature_contribution'] = contributions_json
+
             # 3. 최종 컬럼 정리 (DB 저장용)
             cols_to_keep = ['occur_date', 'ip_addr', 'cid', 'lid', 
-                           f'{ft}_score', f'{ft}_severity', f'{ft}_slope', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason']
+                           f'{ft}_score', f'{ft}_severity', f'{ft}_slope', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason',
+                           'feature_contribution']
+
             
             if ft == 'traffic':
                 cols_to_keep.extend(['tx_packet', 'rx_packet', 'error_packet'])
@@ -233,6 +255,62 @@ class AnomalyDetector:
             return " + ".join(reasons) if reasons else "NORMAL"
             
         final['anomaly_reason'] = final.apply(merge_reasons, axis=1)
+
+        # [Phase 9] 통합 RCA 진단 (Cross-Track) 및 원시 데이터 연동
+        def evaluate_rca(row):
+            is_t = row.get('is_traffic_anomaly', False)
+            is_o = row.get('is_optical_anomaly', False)
+            is_any_anomaly = row.get('is_anomaly', False)
+            
+            # 1. 원시 데이터(Raw Data) 추출
+            raw_data = {}
+            for col in ['tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power']:
+                if col in row.index:
+                    raw_data[col] = row[col]
+
+            # 2. 기여도(Contribution) 파싱 및 병합
+            fc_t = {}
+            fc_o = {}
+            fc_t_str = row.get('feature_contribution_x') if 'feature_contribution_x' in row.index else row.get('feature_contribution')
+            if fc_t_str and isinstance(fc_t_str, str):
+                try: fc_t = json.loads(fc_t_str)
+                except: pass
+                
+            fc_o_str = row.get('feature_contribution_y') if 'feature_contribution_y' in row.index else row.get('feature_contribution')
+            if fc_o_str and isinstance(fc_o_str, str):
+                try: fc_o = json.loads(fc_o_str)
+                except: pass
+
+            # 점수 기반 가중치 정규화 (총합 100%)
+            score_t = row.get('traffic_score', 0)
+            score_o = row.get('optical_score', 0)
+            total_score = score_t + score_o
+            
+            w_t = score_t / total_score if total_score > 0 else 0.5
+            w_o = score_o / total_score if total_score > 0 else 0.5
+            
+            normalized_fc = {}
+            for k, v in fc_t.items(): normalized_fc[k] = round(v * w_t, 2)
+            for k, v in fc_o.items(): normalized_fc[k] = round(v * w_o, 2)
+
+            if not is_any_anomaly:
+                return pd.Series(["NORMAL", None, None])
+
+            # 3. 진단 트랙 결정 및 수행
+            if is_t and is_o:
+                diagnosis, action = self.rca_engine.diagnose("integrated", normalized_fc, True, raw_data)
+                return pd.Series([diagnosis, action, json.dumps(normalized_fc)])
+            elif is_t:
+                diagnosis, action = self.rca_engine.diagnose("traffic", fc_t, True, raw_data)
+                return pd.Series([diagnosis, action, json.dumps(fc_t)])
+            elif is_o:
+                diagnosis, action = self.rca_engine.diagnose("optical", fc_o, True, raw_data)
+                return pd.Series([diagnosis, action, json.dumps(fc_o)])
+            
+            return pd.Series(["NORMAL", None, None])
+
+        final[['rca_diagnosis', 'rca_action', 'feature_contribution']] = final.apply(evaluate_rca, axis=1)
+
         
         # 통합 지표 결정: 가장 심각도가 높은(dominant) 트랙의 값을 선택
         # 점수, 임계치, 기울기, RUL(장애 예측)까지 해당 트랙의 전문 설정으로 일괄 계산
@@ -291,7 +369,8 @@ class AnomalyDetector:
             'traffic_score', 'traffic_severity', 'traffic_slope', 'traffic_threshold', 'is_traffic_anomaly',
             'optical_score', 'optical_severity', 'optical_slope', 'optical_threshold', 'is_optical_anomaly',
             'anomaly_score', 'severity', 'slope', 'slope_label', 'threshold', 'is_anomaly', 
-            'alarm_level', 'alarm_label', 'ttf_minutes', 'expected_fatal_time', 'anomaly_reason'
+            'alarm_level', 'alarm_label', 'ttf_minutes', 'expected_fatal_time',
+            'anomaly_reason', 'rca_diagnosis', 'rca_action', 'feature_contribution'  # [Phase 8, 9.1]
         ]
         
         final_cols = [c for c in standard_cols if c in final.columns]

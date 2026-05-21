@@ -8,6 +8,7 @@ export const store = reactive({
   alarms: [] as any[],
   anomalies: [] as any[],
   watchlist: [] as any[],
+  rcaRules: [] as any[],
   modelStatus: {} as Record<string, any>,
   isRefreshingAnomalies: false,
   isRefreshingWatchlist: false,
@@ -170,6 +171,38 @@ export const store = reactive({
       return res.data
     } catch (err) {
       console.error('Failed to stop training', err)
+      throw err
+    }
+  },
+
+  // --- RCA Rules Management ---
+  async fetchRcaRules() {
+    try {
+      const res = await axios.get('/api/rca/rules')
+      this.rcaRules = res.data.rules || []
+    } catch (err) {
+      console.error('Failed to fetch RCA rules', err)
+    }
+  },
+
+  async addRcaRule(rule: any) {
+    try {
+      const res = await axios.post('/api/rca/rules', rule)
+      await this.fetchRcaRules()
+      return res.data
+    } catch (err) {
+      console.error('Failed to add RCA rule', err)
+      throw err
+    }
+  },
+
+  async deleteRcaRule(ruleId: string) {
+    try {
+      const res = await axios.delete(`/api/rca/rules/${ruleId}`)
+      await this.fetchRcaRules()
+      return res.data
+    } catch (err) {
+      console.error('Failed to delete RCA rule', err)
       throw err
     }
   }

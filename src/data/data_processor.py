@@ -59,9 +59,9 @@ class DataProcessor:
 
             # 3. 트래픽 오염 데이터 체크 (원본 수치 기준)
             if self.feature_type == 'traffic':
-                # 에러 패킷 1,000개 초과 또는 트래픽 10억(1e9) 초과 시 포트 폐기
-                if (group['error_packet'] > 1000).any() or \
-                   (group[['tx_packet', 'rx_packet']] > 1e9).any().any():
+                # 에러 패킷이 절반 이상 지속되거나 트래픽 10억(1e9) 초과 시 포트 폐기 (너무 엄격한 단건 필터링 완화)
+                if (group['error_packet'] > 1000).mean() > 0.5 or \
+                   (group[['tx_packet', 'rx_packet']] > 1e9).mean().any() > 0.5:
                     continue
 
             valid_indices.extend(group.index)

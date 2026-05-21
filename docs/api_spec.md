@@ -34,7 +34,10 @@
     "expected_fatal_time": "2026-05-14 10:45:00",
     "anomaly_reason": "Traffic (TX:1200, RX:0)",
     "is_traffic_anomaly": 1,
-    "is_optical_anomaly": 0
+    "is_optical_anomaly": 0,
+    "rca_diagnosis": "물리 계층 심각한 장애",
+    "rca_action": "즉각적인 광 선로 단선 및 커넥터 파손 여부 점검",
+    "feature_contribution": "{\"rx_avg_power\": 60.0, \"error_packet\": 40.0}"
   }
 ]
 ```
@@ -177,6 +180,54 @@
 }
 ```
 
+### 2.5. RCA 도메인 룰 관리 (Rule Engine)
+
+#### 2.5.1. 등록된 도메인 룰 조회
+- **Endpoint**: `GET /api/rca/rules`
+- **Description**: 현재 등록된 RCA 룰 목록을 우선순위(Priority) 정렬 상태로 반환합니다.
+- **Response**:
+```json
+{
+  "count": 1,
+  "rules": [
+    {
+      "id": "IN-001",
+      "track": "integrated",
+      "priority": 20,
+      "contributions": {
+        "error_packet": 60
+      },
+      "raw_conditions": {
+        "max_rx_avg_power": -20
+      },
+      "diagnosis": "물리 계층 심각한 장애",
+      "action": "즉각적인 광 선로 단선 점검"
+    }
+  ]
+}
+```
+
+#### 2.5.2. 신규 도메인 룰 추가
+- **Endpoint**: `POST /api/rca/rules`
+- **Description**: Fully Structured JSON(기여도 및 원시 데이터 조건) 기반의 새 도메인 룰을 주입합니다. 즉시 평가 엔진에 반영됩니다.
+- **Body Example**:
+```json
+{
+  "id": "TR-001",
+  "track": "traffic",
+  "priority": 10,
+  "contributions": {
+    "error_packet": 60
+  },
+  "diagnosis": "CRC/비트 오류 의심 (에러 패킷 급증)",
+  "action": "광 커넥터 청소 또는 케이블 점검 권고"
+}
+```
+
+#### 2.5.3. 도메인 룰 삭제
+- **Endpoint**: `DELETE /api/rca/rules/{rule_id}`
+- **Description**: 지정된 ID의 룰을 메모리 및 파일에서 삭제합니다.
+
 ## 3. 실시간 알림 스트림 (SSE)
 이상 발생 시 서버에서 클라이언트로 즉시 푸시 알림을 전달합니다.
 
@@ -197,4 +248,4 @@
 ```
 
 ---
-*최종 업데이트: 2026-05-14*
+*최종 업데이트: 2026-05-21*

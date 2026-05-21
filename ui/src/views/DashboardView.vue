@@ -88,7 +88,7 @@
           </div>
         </div>
         <div class="overflow-x-auto flex-1">
-          <table class="w-full text-left text-sm">
+          <table class="w-full min-w-[900px] text-left text-sm">
             <thead class="bg-slate-700/30 text-slate-400 uppercase text-[11px] tracking-wider">
               <tr>
                 <th class="px-4 py-3">Time</th>
@@ -124,8 +124,26 @@
                     </div>
                   </div>
                 </td>
-                <td class="px-4 py-3 text-xs text-slate-400 truncate max-w-[200px]" :title="item.anomaly_reason">
-                  {{ item.anomaly_reason }}
+                <td class="px-4 py-3 text-xs min-w-[250px] max-w-[350px] whitespace-normal">
+                  <div class="flex flex-col gap-1 group relative cursor-help">
+                    <span v-if="item.rca_diagnosis && item.rca_diagnosis !== 'NORMAL'" class="font-bold text-blue-300 leading-snug">
+                      {{ item.rca_diagnosis }}
+                    </span>
+                    <span class="text-slate-400 leading-snug" :class="{'text-[11px]': item.rca_diagnosis && item.rca_diagnosis !== 'NORMAL'}">
+                      {{ item.anomaly_reason }}
+                    </span>
+                    <!-- Action Tooltip -->
+                    <div v-if="item.rca_action" class="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[250px] opacity-0 transition-opacity group-hover:opacity-100 z-50">
+                      <div class="bg-emerald-950/95 border border-emerald-500/50 text-emerald-200 text-[11px] p-2.5 rounded shadow-xl whitespace-normal relative">
+                        <div class="font-bold text-emerald-400 mb-0.5 flex items-center gap-1">
+                          <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                          Recommended Action
+                        </div>
+                        {{ item.rca_action }}
+                        <div class="absolute w-2 h-2 bg-emerald-950/95 border-b border-r border-emerald-500/50 -bottom-1.5 left-1/2 -translate-x-1/2 rotate-45"></div>
+                      </div>
+                    </div>
+                  </div>
                 </td>
                 <td class="px-4 py-3 text-right">
                   <button @click="openGraph(item)" class="text-blue-400 hover:text-blue-300 text-xs font-bold flex items-center gap-1 ml-auto">
@@ -235,8 +253,18 @@
       <div class="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-6xl max-h-[95vh] overflow-hidden flex flex-col shadow-2xl animate-in fade-in zoom-in duration-200">
         <div class="p-6 border-b border-slate-700 flex justify-between items-center">
           <div>
-            <h3 class="text-xl font-bold text-blue-400">{{ selectedPort.ip_addr }} (S{{ selectedPort.slot_id }}/P{{ selectedPort.port_id }})</h3>
-            <p class="text-sm text-slate-400">Diagnostic Time-series Analysis (Last 24h)</p>
+            <div class="flex items-center gap-3">
+              <h3 class="text-xl font-bold text-blue-400">{{ selectedPort.ip_addr }} (S{{ selectedPort.slot_id }}/P{{ selectedPort.port_id }})</h3>
+              <span v-if="selectedPort.rca_diagnosis && selectedPort.rca_diagnosis !== 'NORMAL'" 
+                    class="px-2.5 py-1 bg-blue-500/20 text-blue-300 text-xs font-bold rounded-lg border border-blue-500/30">
+                {{ selectedPort.rca_diagnosis }}
+              </span>
+            </div>
+            <p class="text-sm text-slate-400 mt-1 mb-2">Diagnostic Time-series Analysis (Last 24h)</p>
+            <div v-if="selectedPort.rca_action" class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/10 text-emerald-400 text-xs font-bold rounded border border-emerald-500/20">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+              Action: {{ selectedPort.rca_action }}
+            </div>
           </div>
           <button @click="closeGraph" class="p-2 hover:bg-slate-700 rounded-full transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
@@ -250,23 +278,48 @@
           </div>
           
           <template v-else-if="historyData.length > 0">
-            <!-- 1. Integrated Severity (Summary) -->
-            <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-              <div class="flex justify-between items-center mb-4">
-                <h4 class="text-xs font-bold uppercase tracking-widest text-slate-400">Severity Summary</h4>
-                <div class="flex gap-4">
-                  <div v-if="showTrafficSection" class="flex items-center gap-1.5">
-                    <div class="w-2 h-2 rounded-full bg-blue-500"></div>
-                    <span class="text-[10px] text-slate-400 uppercase font-bold">Traffic</span>
-                  </div>
-                  <div v-if="showOpticalSection" class="flex items-center gap-1.5">
-                    <div class="w-2 h-2 rounded-full bg-purple-500"></div>
-                    <span class="text-[10px] text-slate-400 uppercase font-bold">Optical</span>
+            <!-- 1. Integrated Severity & Feature Contribution -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <!-- Severity Summary Chart -->
+              <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 lg:col-span-2">
+                <div class="flex justify-between items-center mb-4">
+                  <h4 class="text-xs font-bold uppercase tracking-widest text-slate-400">Severity Summary</h4>
+                  <div class="flex gap-4">
+                    <div v-if="showTrafficSection" class="flex items-center gap-1.5">
+                      <div class="w-2 h-2 rounded-full bg-blue-500"></div>
+                      <span class="text-[10px] text-slate-400 uppercase font-bold">Traffic</span>
+                    </div>
+                    <div v-if="showOpticalSection" class="flex items-center gap-1.5">
+                      <div class="w-2 h-2 rounded-full bg-purple-500"></div>
+                      <span class="text-[10px] text-slate-400 uppercase font-bold">Optical</span>
+                    </div>
                   </div>
                 </div>
+                <div class="h-[240px]">
+                  <Line :data="severitySummaryChartData" :options="severityChartOptions" :plugins="[backgroundZones]" />
+                </div>
               </div>
-              <div class="h-[240px]">
-                <Line :data="severitySummaryChartData" :options="severityChartOptions" :plugins="[backgroundZones]" />
+
+              <!-- Feature Contribution Breakdown -->
+              <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex flex-col">
+                <h4 class="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4">Feature Contribution</h4>
+                <div class="flex-1 flex flex-col justify-center gap-3">
+                  <template v-if="parsedFeatureContribution">
+                    <div v-for="[feature, pct] in parsedFeatureContribution" :key="feature" class="flex flex-col gap-1.5">
+                      <div class="flex justify-between items-center">
+                        <span class="text-xs font-mono text-slate-300">{{ formatFeatureName(feature) }}</span>
+                        <span class="text-xs font-bold text-blue-400">{{ Number(pct).toFixed(1) }}%</span>
+                      </div>
+                      <div class="w-full bg-slate-700/50 rounded-full h-2">
+                        <div class="h-2 rounded-full bg-blue-500 transition-all duration-1000"
+                             :style="{ width: pct + '%' }"></div>
+                      </div>
+                    </div>
+                  </template>
+                  <div v-else class="text-center py-6 text-slate-500 text-sm italic">
+                    Contribution data not available.
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -398,6 +451,30 @@ const handleRunNow = async () => {
 // Dynamic Visibility Helpers
 const showTrafficSection = computed(() => selectedPort.value?.is_traffic_anomaly === 1 || selectedPort.value?.is_traffic_anomaly === true)
 const showOpticalSection = computed(() => selectedPort.value?.is_optical_anomaly === 1 || selectedPort.value?.is_optical_anomaly === true)
+
+// Feature Contribution Parsing
+const parsedFeatureContribution = computed(() => {
+  if (!selectedPort.value?.feature_contribution) return null
+  try {
+    const raw = selectedPort.value.feature_contribution
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw
+    // Value 내림차순 정렬하여 반환
+    return Object.entries(data).sort((a: any, b: any) => b[1] - a[1])
+  } catch (e) {
+    return null
+  }
+})
+
+const formatFeatureName = (name: string) => {
+  const map: Record<string, string> = {
+    'tx_packet': 'TX Packets',
+    'rx_packet': 'RX Packets',
+    'error_packet': 'Error Packets',
+    'tx_avg_power': 'TX Power',
+    'rx_avg_power': 'RX Power'
+  }
+  return map[name] || name
+}
 
 // --- Chart Data Computations ---
 
