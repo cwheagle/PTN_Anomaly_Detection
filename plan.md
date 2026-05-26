@@ -101,14 +101,62 @@
   - 백그라운드 재학습 → 무중단 배포 파이프라인 자동화 무결성 테스트.
 
 ### Phase 10: 오프라인 모델 검증 및 성능 평가 (Pending)
-- **목표:** 정답지(Ground Truth)가 라벨링된 과거 장애 이력 데이터를 활용하여, 동적 임계치 및 LSTM-AE 모델의 실제 이상탐지 성능(Precision, Recall, F1-Score)을 수치화하고 정량적으로 검증.
+- **목표:** 예지 정비(Predictive Maintenance)의 특수성을 고려하여, 전통적인 고정 타임 윈도우(Fixed Window) 평가를 넘어 **모델이 스스로 예측한 잔여 수명(TTF)을 활용한 동적 평가 지표(TTF-Aware F1-Score)**를 도입.
 - **세부 내용:**
-  - **정답지 데이터 구축**: 현업 엔지니어의 장애 조치 이력과 매핑된 라벨링 데이터셋(`eval_dataset.csv`) 준비.
-  - **평가 스크립트 작성**: `scikit-learn`을 활용하여 추론 엔진의 예측 결과(0/1)와 실제 정답지(0/1) 간의 Confusion Matrix를 계산하는 오프라인 평가 모듈(`tools/evaluate_model.py`) 개발.
-  - **튜닝 리포트 생성**: 정적 임계치 vs 동적 임계치 적용 전후의 F1-Score 비교 리포트 생성 로직.
+  - **정답지 데이터 구축 및 개입의 역설(Intervention Paradox) 해결**: 
+    - **데이터 오염 방지(Data Sanitization)**: 평가용이 아닌 LSTM 재학습용 훈련셋 구성 시, 과거 알람/조치 이력이 있는 '장애 구간'의 데이터를 철저히 도려내어 모델이 비정상을 정상으로 착각하는(콜드 스타트 오염) 현상 원천 차단.
+    - AI의 조기 경보 덕분에 관리자가 선제 조치하여 '장애'가 아예 발생하지 않은 경우, 억울하게 오탐(False Positive)으로 감점되는 것을 방지.
+    - 실제 하드웨어 알람 외에도 아래 3가지 '예방 조치' 내역을 정답지(True Positive)로 인정하는 데이터셋(`eval_dataset.csv`) 구축:
+      1. **수동 입력**: NMS UI나 ITSM 티켓팅 시스템에 기록된 작업 지시서(Trouble Ticket) 완료 시간
+      2. **로그 추적**: 물리적 교체를 암시하는 Link Down ➡️ Up, Port Admin 상태 변경 로그
+      3. **데이터 추론**: 죽어가던 수치(예: RX Power)가 자연 상태에선 불가능한 속도로 비정상에서 정상으로 급격히 회복된 지점(Change-point Detection)
+  - **TTF 기반 예지 정비 특화 평가 로직**: 
+    - AI가 '이상'을 감지했을 때 예측한 `TTF(장애까지 남은 시간)`를 해당 알람의 **동적 타임 윈도우(Dynamic Time Window)**로 설정.
+    - 예: 모델이 "3시간 뒤 Severity 90 도달"로 예측(TTF=180m)했다면, 실제 장애가 3시간(±오차범위) 뒤에 발생했을 때만 완벽한 True Positive로 인정.
+  - **평가 지표 리포트 생성**: 
+    1. TTF-Aware F1-Score 도출 (예측 타이밍의 정확성 평가)
+    2. 예측 TTF와 실제 장애까지 걸린 시간 간의 오차율(MAE/RMSE) 계산
 - **검증:**
-  - 평가 스크립트 정상 동작 여부 테스트.
-  - Precision / Recall Trade-off를 고려한 최적의 `threshold_percentile` 도출 튜닝 반복.
+  - 너무 이르거나(설레발), 너무 늦은 알람을 오탐(False Positive)으로 정확히 걸러내는지 검증.
+  - 실제 장애 발생 시점과 예측된 TTF 간의 상관관계(Correlation) 및 신뢰도 분석.
+
+### Phase 11: 딥러닝 아키텍처 및 MLOps 심화 고도화 (Future Scope)
+- **목표:** Phase 10의 평가 프레임워크(Baseline)를 바탕으로, 엔터프라이즈 상용망 수준의 예측 정확도 및 모델 생명주기 관리(MLOps) 안정성을 확보.
+- **세부 내용 (4대 핵심 과제):**
+  1. **시계열 파생 변수(Feature Engineering) 고도화**:
+     - 원본 15분 단위 메트릭에 이동 평균(Rolling Mean, 1h/4h), 이동 변동성(Rolling Volatility), 시차 데이터(Lag Features)를 자동 생성하는 전처리 로직 추가.
+  2. **모델 레지스트리 및 자동 롤백 (Advanced MLOps)**:
+     - MLflow 등 모델 버저닝(Versioning) 관리 체계 도입.
+     - 신규 학습된 모델의 섀도우 배포(Shadow Deployment) 및 성능 하락(Overfitting) 감지 시 이전 버전으로 즉시 복구(Rollback)하는 안전장치 구현.
+  3. **TTF 예측 방식의 딥러닝화 (Multi-Step Forecasting)**:
+     - 기존의 'Severity 수학적 선형 외삽(Trend Slope)' 방식을 탈피.
+     - LSTM 모델 아키텍처에 예측 헤드(Forecasting Head)를 결합하여 미래 시계열 값을 직접 예측(Seq2Seq)하도록 RUL(잔여 수명) 도출 로직 전면 개편.
+  4. **트래픽/장비 군집화 기반 개인화 모델 (Clustered/Federated Models)**:
+     - Core/Edge 등 트래픽 스케일 패턴이 유사한 장비들을 비지도 학습(K-Means 등)으로 묶어 클러스터링.
+     - 단일 Global 모델이 아닌, 각 클러스터 특성에 최적화된 복수의 Local Model 아키텍처로 분리 운영.
+  5. **섀도우 모드 배포 (Shadow Mode Deployment / Canary Release)**:
+     - 오프라인 평가를 통과한 새 모델을 곧바로 실서비스에 투입하지 않고 백그라운드에 숨겨서 라이브망 데이터로 추론(알람 미발송).
+     - 실제 운영자의 조치 이력과 모델의 은밀한 알람이 일치하는지 최소 2~4주간 온라인으로 섀도우 검증 후 Active 전환.
+  6. **알람 피로도 억제 및 중복 제거 (Alert Dampening & Deduplication)**:
+     - 단순 임계치 초과 시 즉각 알람을 쏘는 구조를 탈피하여, 추론 엔진 단에 '쿨다운(Cooldown)' 방파제 추가.
+     - "3회 연속(45분간) 임계치 초과 시에만 최초 알람 발생", "동일 포트 알람은 조치 전까지 추가 갱신 무시" 등의 상태 기반 알람 통제 로직 구현.
+  7. **재앙적 망각 방지 (Context-Aware Drift Detection)**:
+     - 단순 MSE 점수 증가에 따른 무조건적인 재학습으로 인해 모델이 과거의 정상 패턴을 잊어버리는(Catastrophic Forgetting) 현상 방지.
+     - 휴일 트래픽 폭주, 정기 점검 등 외부 이벤트를 컨텍스트로 인지하여 재학습 트리거를 똑똑하게 차단(Smart Filter)하는 로직 적용.
+- **검증:**
+  - Phase 10의 `evaluate_model.py`를 활용하여 4가지 기능 적용 전/후의 **TTF-Aware F1-Score 향상폭 수학적 증명**.
+
+### Phase 12: 대용량 분산 처리 및 고가용성 아키텍처 (Scalability & HA)
+- **목표:** 전국망 단위(10만 대 이상)의 노드를 지연 없이 실시간으로 분석할 수 있는 상용 엔터프라이즈 인프라 구축.
+- **세부 내용:**
+  1. **스트림 프로세싱(Stream Processing) 도입**: 기존 DB 스케줄러 폴링(Polling) 방식을 탈피하여, Apache Kafka 기반의 실시간 데이터 파이프라인으로 마이그레이션.
+  2. **오토스케일링 및 이중화(HA)**: Kubernetes(K8s)를 도입하여 부하에 따라 추론(Inference) 서버 파드를 동적으로 늘리고, 서버 장애 시 즉각 페일오버(Failover)하는 클라우드 네이티브 구조 전환.
+
+### Phase 13: XAI(설명 가능한 AI) 및 능동 학습 (Active Learning)
+- **목표:** 현업 엔지니어의 신뢰도를 높이고, 인간의 피드백을 통해 AI가 스스로 진화하는 플라이휠(Flywheel) 완성.
+- **세부 내용:**
+  1. **XAI 폭포수 차트 (SHAP / LIME 적용)**: RCA 결과 도출 시, 각 메트릭이 최종 Severity(95점)에 기여한 비중을 시각적인 폭포수 차트로 대시보드에 제공.
+  2. **Human-in-the-loop (피드백 기반 RLHF)**: 관리자가 알람에 대해 [👍도움됨 / 👎오탐임]을 클릭하면, 해당 라벨링 데이터를 즉시 수집하여 다음 재학습 시 모델의 가중치를 교정하는 능동 학습(Active Learning) 파이프라인 구축.
 
 ---
 
