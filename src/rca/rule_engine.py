@@ -161,12 +161,12 @@ class RCAEngine:
                 for key, val in rule_raw.items():
                     if key.startswith("min_"):
                         feature = key[4:]
-                        if raw_data.get(feature, 0) < val:
+                        if feature not in raw_data or raw_data[feature] < val:
                             match = False
                             break
                     elif key.startswith("max_"):
                         feature = key[4:]
-                        if raw_data.get(feature, 0) > val:
+                        if feature not in raw_data or raw_data[feature] > val:
                             match = False
                             break
                             

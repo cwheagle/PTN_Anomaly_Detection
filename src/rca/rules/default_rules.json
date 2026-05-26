@@ -2,95 +2,224 @@
   {
     "id": "TR-001",
     "track": "traffic",
-    "priority": 10,
+    "priority": 100,
     "contributions": {
-      "error_packet": 60
+      "rx_packet": 35,
+      "tx_packet": 35
     },
-    "diagnosis": "CRC/비트 오류 의심 (에러 패킷 급증)",
-    "action": "광 커넥터 청소 또는 케이블 점검 권고"
+    "raw_conditions": {
+      "min_rx_packet_ratio": 1.5,
+      "min_tx_packet_ratio": 1.5
+    },
+    "diagnosis": "양방향 트래픽 동시 급증 (L2 브로드캐스트 스톰 전조 증상 또는 루핑 발생 의심)",
+    "action": "하위 스위치 루프(Loop) 구성 및 MAC Address 플래핑 이력 긴급 확인"
   },
   {
     "id": "TR-002",
     "track": "traffic",
-    "priority": 9,
+    "priority": 80,
     "contributions": {
-      "error_packet": 30,
-      "rx_packet": 30
+      "rx_packet": 80
     },
-    "diagnosis": "수신 오류 및 트래픽 이상 (CRC + 패킷 손실)",
-    "action": "수신 측 연결 상태 및 에러 카운터 점검"
+    "raw_conditions": {
+      "min_rx_packet_ratio": 2.0
+    },
+    "diagnosis": "단방향 수신 트래픽 비정상 폭주. 과다 트래픽 유입(DDoS/플러딩) 공격 의심.",
+    "action": "유입 트래픽 NetFlow 분석(출발지 IP 추적) 및 대역폭 제한(QoS) 적용"
   },
   {
     "id": "TR-003",
     "track": "traffic",
-    "priority": 8,
+    "priority": 70,
     "contributions": {
-      "tx_packet": 40,
-      "rx_packet": 30
+      "rx_packet": 70
     },
-    "diagnosis": "양방향 트래픽 급변 (라인 이상 의심)",
-    "action": "업스트림/다운스트림 포트 상태 확인"
+    "raw_conditions": {
+      "max_rx_packet": 0
+    },
+    "diagnosis": "물리 연결은 정상이나 논리적 수신 트래픽 100% 단절 (블랙홀 발생)",
+    "action": "상위 라우터 논리적 포트 셧다운 여부 및 방화벽/ACL 차단 정책 즉시 확인"
   },
   {
     "id": "TR-004",
     "track": "traffic",
-    "priority": 5,
+    "priority": 60,
     "contributions": {
-      "tx_packet": 70
+      "error_packet": 60
     },
-    "diagnosis": "송신 트래픽 이상 (TX 패턴 급변)",
-    "action": "송신 버퍼 및 업스트림 장비 상태 확인"
+    "raw_conditions": {
+      "min_error_packet_ratio": 2.0
+    },
+    "diagnosis": "대량의 비트 에러 폭주 (심각한 패킷 로스 및 통신 품질 저하 발생 중)",
+    "action": "양단 포트 Speed/Duplex 미스매치 확인 또는 SFP 모듈 불량으로 인한 긴급 교체 요망"
   },
   {
     "id": "TR-005",
     "track": "traffic",
-    "priority": 5,
+    "priority": 50,
     "contributions": {
       "rx_packet": 70
     },
-    "diagnosis": "수신 트래픽 이상 (RX 패킷 손실 의심)",
-    "action": "수신 포트 및 다운스트림 연결 상태 확인"
+    "raw_conditions": {
+      "max_rx_packet_ratio": 0.5,
+      "min_rx_packet": 1
+    },
+    "diagnosis": "수신 트래픽 비정상적 급감 추세 (상위 네트워크 병목 또는 라우팅 플래핑 의심)",
+    "action": "업스트림(상위) 노드의 라우팅 테이블 및 네이버(Neighbor) 세션 안정성 예방 점검"
+  },
+  {
+    "id": "TR-006",
+    "track": "traffic",
+    "priority": 40,
+    "contributions": {
+      "error_packet": 60
+    },
+    "raw_conditions": {
+      "min_error_packet_trend_slope": 0.1
+    },
+    "diagnosis": "이더넷 프레임 에러(FCS/CRC) 점진적 증가 징후 포착",
+    "action": "케이블 차폐 상태 점검 및 SFP 전기 포트 이물질 예방 점검 요망"
   },
   {
     "id": "OP-001",
     "track": "optical",
-    "priority": 10,
+    "priority": 100,
     "contributions": {
-      "rx_avg_power": 60
+      "rx_avg_power": 40
     },
-    "diagnosis": "광 수신 열화 의심 (RX 전력 저하)",
-    "action": "광섬유 커넥터 청소 또는 수신 광 모듈 점검"
+    "raw_conditions": {
+      "max_rx_avg_power": -24
+    },
+    "diagnosis": "수신 광전력 한계치 미달 (LOS 발생 확정 - 선로 완전 단선)",
+    "action": "현장 선로 복구반 즉시 출동 및 우회(Protection) 경로 절체 상태 확인"
   },
   {
     "id": "OP-002",
     "track": "optical",
-    "priority": 10,
+    "priority": 80,
     "contributions": {
-      "tx_avg_power": 60
+      "rx_avg_power": 40,
+      "tx_avg_power": 40
     },
-    "diagnosis": "광 송신 열화 의심 (TX 전력 저하)",
-    "action": "송신 광 모듈(SFP/QSFP) 교체 검토"
+    "raw_conditions": {
+      "max_rx_avg_power": -24,
+      "max_tx_avg_power": -10
+    },
+    "diagnosis": "송수신 광 전력 동시 급감 (광 모듈 자체 하드웨어 Fault 또는 슬롯 전원 이상)",
+    "action": "광 모듈 재장착(Re-seat) 및 교체, 슬롯 불량 여부 점검"
   },
   {
     "id": "OP-003",
     "track": "optical",
-    "priority": 9,
+    "priority": 60,
     "contributions": {
-      "rx_avg_power": 30,
-      "tx_avg_power": 30
+      "rx_avg_power": 60
     },
-    "diagnosis": "광 모듈 전체 열화 의심 (교체 권고)",
-    "action": "광 모듈(SFP/QSFP) 교체 및 광섬유 점검"
+    "raw_conditions": {
+      "max_rx_power_trend_slope": -1.0
+    },
+    "diagnosis": "광 수신 전력 급격한 저하 (패치코드 꺾임, 무거운 물체에 눌림 등 단기 내 LOS 위험)",
+    "action": "통신실 내 광 패치코드 결선 상태 및 굴곡(Macrobending) 즉시 확인"
+  },
+  {
+    "id": "OP-004",
+    "track": "optical",
+    "priority": 60,
+    "contributions": {
+      "tx_avg_power": 60
+    },
+    "raw_conditions": {
+      "max_tx_power_trend_slope": -1.0
+    },
+    "diagnosis": "광 송신 전력 급격한 저하 (송신 레이저 다이오드 불량 또는 과열 의심)",
+    "action": "광 모듈 즉시 교체 준비 및 라인카드 온도 점검"
+  },
+  {
+    "id": "OP-005",
+    "track": "optical",
+    "priority": 50,
+    "contributions": {
+      "tx_avg_power": 60
+    },
+    "raw_conditions": {
+      "max_tx_power_trend_slope": -0.1
+    },
+    "diagnosis": "광 송신 전력 점진적 저하 (레이저 바이어스 전류 노후화 진행 중)",
+    "action": "다음 계획 예방 정비(PM) 시 커넥터 클리닝 및 모듈 교체 스케줄 수립"
+  },
+  {
+    "id": "OP-006",
+    "track": "optical",
+    "priority": 50,
+    "contributions": {
+      "rx_avg_power": 60
+    },
+    "raw_conditions": {
+      "max_rx_power_trend_slope": -0.1
+    },
+    "diagnosis": "광 수신 전력 점진적 저하 (커넥터 오염 등 징후)",
+    "action": "다음 계획 예방 정비(PM) 시 커넥터 클리닝 수립"
   },
   {
     "id": "IN-001",
     "track": "integrated",
-    "priority": 20,
-    "raw_conditions": {
-      "max_rx_avg_power": -20,
-      "min_error_packet": 100
+    "priority": 100,
+    "contributions": {
+      "rx_packet": 15,
+      "tx_packet": 15,
+      "rx_avg_power": 15,
+      "tx_avg_power": 15
     },
-    "diagnosis": "물리 계층 심각한 장애 (광전력 손실 및 대량 에러 동시 발생)",
-    "action": "즉각적인 광 선로 단선 및 커넥터 파손 여부 점검"
+    "raw_conditions": {
+      "min_traffic_severity": 80,
+      "min_optical_severity": 80
+    },
+    "diagnosis": "물리 및 데이터 계층 전 지표 동시 치명적 붕괴 (포트/라인카드 패닉 임박)",
+    "action": "해당 라인카드 상태 및 듀얼 전원(Redundancy) 긴급 점검. 즉각적인 시스템 백업 준비"
+  },
+  {
+    "id": "IN-002",
+    "track": "integrated",
+    "priority": 90,
+    "contributions": {
+      "rx_avg_power": 25,
+      "rx_packet": 25
+    },
+    "raw_conditions": {
+      "max_rx_avg_power": -24,
+      "max_rx_packet": 0
+    },
+    "diagnosis": "광 선로 완전 단선으로 인한 수신 트래픽 100% 단절 (원인: 물리 선로)",
+    "action": "상위 라우팅 점검 불필요. 즉시 현장 선로 복구반 출동"
+  },
+  {
+    "id": "IN-003",
+    "track": "integrated",
+    "priority": 80,
+    "contributions": {
+      "rx_avg_power": 25,
+      "error_packet": 25
+    },
+    "raw_conditions": {
+      "max_rx_power_trend_slope": -0.1,
+      "min_error_packet_trend_slope": 0.1
+    },
+    "diagnosis": "수신 광전력 저하로 인한 비트 오류(BER) 급증 진행 중",
+    "action": "단순 트래픽 장애 아님. 광 선로 로스(OTDR) 측정 및 커넥터 클리닝 실시"
+  },
+  {
+    "id": "IN-004",
+    "track": "integrated",
+    "priority": 70,
+    "contributions": {
+      "tx_avg_power": 25,
+      "tx_packet": 25
+    },
+    "raw_conditions": {
+      "max_tx_power_trend_slope": -0.1,
+      "max_tx_packet_ratio": 0.5
+    },
+    "diagnosis": "송신 광전력 저하로 인한 송신 트래픽 병목/드랍 발생",
+    "action": "내 장비 송신 모듈 상태 점검 및 대향국(Remote) 수신 에러 상태 크로스 체크"
   }
 ]

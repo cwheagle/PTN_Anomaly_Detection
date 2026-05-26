@@ -2,6 +2,7 @@ import os
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
+import httpx
 from src.data.db_connector import DBConnector
 from src.pipeline.inference import AnomalyDetector
 from src.config import INTERVAL_MINUTES, RETENTION_DAYS, MODEL_CONFIG
@@ -67,11 +68,30 @@ class PTNAnomalyScheduler:
         except Exception as e:
             print(f"[ERROR] Job failed: {e}")
 
+    async def run_drift_check(self):
+        """매일 새벽에 Data Drift 검사 수행"""
+        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Executing scheduled Data Drift check...")
+        try:
+            async with httpx.AsyncClient() as client:
+                # API를 호출하여 드리프트 검사 및 필요시 재학습 트리거 (Background 처리됨)
+                response = await client.post("http://127.0.0.1:8000/api/drift/check", timeout=30.0)
+                if response.status_code == 200:
+                    res = response.json()
+                    print(f"[*] Drift Check Result: Detected={res.get('drift_detected')}, Auto-Retrain={res.get('auto_retrain_triggered')}")
+                else:
+                    print(f"[!] Drift Check API Error: {response.text}")
+        except Exception as e:
+            print(f"[!] Scheduled Drift Check failed: {e}")
+
     def start(self):
         """스케줄러 가동"""
         print(f"[*] PTN Scheduler initialized. Interval: {INTERVAL_MINUTES}m")
         first_run = datetime.now() + timedelta(seconds=1)
         self.scheduler.add_job(self.run_job, 'interval', minutes=INTERVAL_MINUTES, next_run_time=first_run)
+        
+        # Drift 감지 작업 (매일 새벽 3시)
+        self.scheduler.add_job(self.run_drift_check, 'cron', hour=3, minute=0)
+        
         try:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):

@@ -90,16 +90,25 @@
   - 모의 이상 데이터 주입 시 Feature Contribution 비율 정확성 검토.
   - 기본 룰 세트 적용 후 도출된 진단명의 직관적 타당성 검토.
 
-### Phase 9: 지능형 MLOps 및 시스템 안정화 (Go)
+### Phase 9: 지능형 MLOps 및 시스템 안정화 (Complete)
 - **목표:** 도메인 전문가 룰을 주입하여 RCA 정확도를 고도화하고, 동적 임계치·자동 재학습을 완성하며, 상용 수준의 대시보드를 구현.
 - **세부 내용:**
   - **도메인 룰 주입 (Rule Injection)**: 네트워크 엔지니어가 정의한 룰을 Phase 8의 인터페이스에 등록 및 검증 (디테일한 룰셋 구축 작업).
   - **동적 임계치 (Dynamic Thresholding)**: 시간대/요일별 계절성(Seasonality)을 반영한 가변 임계치로 오탐(False Positive) 최소화.
   - **자동 재학습 파이프라인 (Auto-Retraining MLOps)**: 성능 저하(Drift) 감지 시 백그라운드 학습 트리거 → Hot-Reload 무중단 배포.
 - **검증:**
-  - 실제 장애 시나리오 데이터 기반 RCA 정확도(Precision) 평가.
-  - 동적 임계치 적용 전후 F1-Score 비교.
+  - 3-Sigma 기반 동적 임계치(Dynamic Threshold) 파이프라인 검증.
   - 백그라운드 재학습 → 무중단 배포 파이프라인 자동화 무결성 테스트.
+
+### Phase 10: 오프라인 모델 검증 및 성능 평가 (Pending)
+- **목표:** 정답지(Ground Truth)가 라벨링된 과거 장애 이력 데이터를 활용하여, 동적 임계치 및 LSTM-AE 모델의 실제 이상탐지 성능(Precision, Recall, F1-Score)을 수치화하고 정량적으로 검증.
+- **세부 내용:**
+  - **정답지 데이터 구축**: 현업 엔지니어의 장애 조치 이력과 매핑된 라벨링 데이터셋(`eval_dataset.csv`) 준비.
+  - **평가 스크립트 작성**: `scikit-learn`을 활용하여 추론 엔진의 예측 결과(0/1)와 실제 정답지(0/1) 간의 Confusion Matrix를 계산하는 오프라인 평가 모듈(`tools/evaluate_model.py`) 개발.
+  - **튜닝 리포트 생성**: 정적 임계치 vs 동적 임계치 적용 전후의 F1-Score 비교 리포트 생성 로직.
+- **검증:**
+  - 평가 스크립트 정상 동작 여부 테스트.
+  - Precision / Recall Trade-off를 고려한 최적의 `threshold_percentile` 도출 튜닝 반복.
 
 ---
 

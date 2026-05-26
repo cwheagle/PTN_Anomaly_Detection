@@ -54,8 +54,8 @@
                   </span>
                   <span v-for="(v, k) in rule.raw_conditions" :key="'r_'+k" 
                         class="px-1.5 py-0.5 bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] rounded">
-                    [원시] {{ k.replace('min_', '').replace('max_', '') }} 
-                    {{ k.startsWith('min_') ? '≥' : '≤' }} {{ v }}
+                    [원시] {{ String(k).replace('min_', '').replace('max_', '') }} 
+                    {{ String(k).startsWith('min_') ? '≥' : '≤' }} {{ v }}
                   </span>
                   <span v-if="!rule.contributions && !rule.raw_conditions" class="text-xs text-slate-500 italic">No conditions</span>
                 </div>
@@ -126,18 +126,75 @@
                   </label>
                 </div>
 
-                <div v-if="cfg.enabled" class="grid grid-cols-3 gap-4 animate-in fade-in slide-in-from-top-2">
+                <div v-if="cfg.enabled" class="flex flex-col gap-4 animate-in fade-in slide-in-from-top-2">
+                  <!-- Row 1: Contrib & Raw -->
+                  <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div class="space-y-1">
+                      <span class="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">Contrib (%) Min</span>
+                      <input v-model="cfg.min_contrib" type="number" step="0.1" placeholder="e.g. 50" class="w-full bg-slate-900 border border-indigo-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 transition-all">
+                    </div>
+                    <div class="space-y-1">
+                      <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Raw Min</span>
+                      <input v-model="cfg.min_raw" type="number" step="any" placeholder="e.g. 100" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
+                    </div>
+                    <div class="space-y-1">
+                      <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Raw Max</span>
+                      <input v-model="cfg.max_raw" type="number" step="any" placeholder="e.g. 1000" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
+                    </div>
+                  </div>
+                  <!-- Row 2: Ratio & Slope (Phase 9) -->
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2 border-t border-slate-700/50">
+                    <div class="space-y-1">
+                      <span class="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">Ratio Min</span>
+                      <input v-model="cfg.min_ratio" :disabled="feat.includes('power')" type="number" step="any" placeholder="e.g. 0.5" class="w-full bg-slate-900 border border-emerald-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 disabled:opacity-30 transition-all" title="Ratio to moving avg (Not applicable for dBm power)">
+                    </div>
+                    <div class="space-y-1">
+                      <span class="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">Ratio Max</span>
+                      <input v-model="cfg.max_ratio" :disabled="feat.includes('power')" type="number" step="any" placeholder="e.g. 1.5" class="w-full bg-slate-900 border border-emerald-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 disabled:opacity-30 transition-all">
+                    </div>
+                    <div class="space-y-1">
+                      <span class="text-[10px] text-purple-400 font-bold uppercase tracking-wider">Trend Slope Min</span>
+                      <input v-model="cfg.min_slope" type="number" step="any" placeholder="e.g. -0.5" class="w-full bg-slate-900 border border-purple-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-purple-500 transition-all">
+                    </div>
+                    <div class="space-y-1">
+                      <span class="text-[10px] text-purple-400 font-bold uppercase tracking-wider">Trend Slope Max</span>
+                      <input v-model="cfg.max_slope" type="number" step="any" placeholder="e.g. 0.5" class="w-full bg-slate-900 border border-purple-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-purple-500 transition-all">
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Track Severity Conditions -->
+          <div class="space-y-3">
+            <label class="text-xs font-bold text-slate-400 uppercase tracking-wide border-b border-slate-700 pb-2 block">
+              Track Severity Conditions (Optional)
+            </label>
+            <div class="grid grid-cols-2 gap-5 p-4 rounded-lg bg-slate-800/50 border border-slate-700">
+              <div v-if="form.track === 'traffic' || form.track === 'integrated'" class="space-y-3">
+                <span class="text-sm font-bold text-blue-300">Traffic Severity (0-100)</span>
+                <div class="grid grid-cols-2 gap-4">
                   <div class="space-y-1">
-                    <span class="text-[10px] text-indigo-400 font-bold uppercase tracking-wider">Contribution (%) Min</span>
-                    <input v-model="cfg.min_contrib" type="number" step="0.1" placeholder="e.g. 50" class="w-full bg-slate-900 border border-indigo-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 transition-all">
+                    <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Min</span>
+                    <input v-model="form.min_traffic_severity" type="number" step="any" placeholder="e.g. 70" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
                   </div>
                   <div class="space-y-1">
-                    <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Raw Value Min</span>
-                    <input v-model="cfg.min_raw" type="number" step="any" placeholder="e.g. 100" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
+                    <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Max</span>
+                    <input v-model="form.max_traffic_severity" type="number" step="any" placeholder="e.g. 100" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
+                  </div>
+                </div>
+              </div>
+              <div v-if="form.track === 'optical' || form.track === 'integrated'" class="space-y-3">
+                <span class="text-sm font-bold text-purple-300">Optical Severity (0-100)</span>
+                <div class="grid grid-cols-2 gap-4">
+                  <div class="space-y-1">
+                    <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Min</span>
+                    <input v-model="form.min_optical_severity" type="number" step="any" placeholder="e.g. 70" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
                   </div>
                   <div class="space-y-1">
-                    <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Raw Value Max</span>
-                    <input v-model="cfg.max_raw" type="number" step="any" placeholder="e.g. -20" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
+                    <span class="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Max</span>
+                    <input v-model="form.max_optical_severity" type="number" step="any" placeholder="e.g. 100" class="w-full bg-slate-900 border border-amber-500/30 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-amber-500 transition-all">
                   </div>
                 </div>
               </div>
@@ -192,7 +249,11 @@ const defaultForm = {
   track: 'traffic',
   priority: 10,
   diagnosis: '',
-  action: ''
+  action: '',
+  min_traffic_severity: null as number | null,
+  max_traffic_severity: null as number | null,
+  min_optical_severity: null as number | null,
+  max_optical_severity: null as number | null
 }
 
 const form = ref({ ...defaultForm })
@@ -205,7 +266,11 @@ const onTrackChange = () => {
       enabled: false,
       min_contrib: null,
       min_raw: null,
-      max_raw: null
+      max_raw: null,
+      min_ratio: null,
+      max_ratio: null,
+      min_slope: null,
+      max_slope: null
     }
   })
 }
@@ -261,7 +326,41 @@ const submitRule = async () => {
           payload.raw_conditions[`max_${feat}`] = Number(cfg.max_raw)
           hasCondition = true
         }
+        if (cfg.min_ratio !== null && cfg.min_ratio !== '') {
+          payload.raw_conditions[`min_${feat}_ratio`] = Number(cfg.min_ratio)
+          hasCondition = true
+        }
+        if (cfg.max_ratio !== null && cfg.max_ratio !== '') {
+          payload.raw_conditions[`max_${feat}_ratio`] = Number(cfg.max_ratio)
+          hasCondition = true
+        }
+        if (cfg.min_slope !== null && cfg.min_slope !== '') {
+          payload.raw_conditions[`min_${feat}_trend_slope`] = Number(cfg.min_slope)
+          hasCondition = true
+        }
+        if (cfg.max_slope !== null && cfg.max_slope !== '') {
+          payload.raw_conditions[`max_${feat}_trend_slope`] = Number(cfg.max_slope)
+          hasCondition = true
+        }
       }
+    }
+
+    // Append Track Severity Conditions
+    if (form.value.min_traffic_severity !== null && (form.value.min_traffic_severity as any) !== '') {
+      payload.raw_conditions['min_traffic_severity'] = Number(form.value.min_traffic_severity)
+      hasCondition = true
+    }
+    if (form.value.max_traffic_severity !== null && (form.value.max_traffic_severity as any) !== '') {
+      payload.raw_conditions['max_traffic_severity'] = Number(form.value.max_traffic_severity)
+      hasCondition = true
+    }
+    if (form.value.min_optical_severity !== null && (form.value.min_optical_severity as any) !== '') {
+      payload.raw_conditions['min_optical_severity'] = Number(form.value.min_optical_severity)
+      hasCondition = true
+    }
+    if (form.value.max_optical_severity !== null && (form.value.max_optical_severity as any) !== '') {
+      payload.raw_conditions['max_optical_severity'] = Number(form.value.max_optical_severity)
+      hasCondition = true
     }
 
     if (!hasCondition) {

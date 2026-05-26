@@ -137,14 +137,30 @@ class AnomalyDetector:
                 diff = (inputs[:, -1, :] - outputs[:, -1, :]) ** 2
                 mse = np.mean(diff.cpu().numpy(), axis=1)
 
+                # [Phase 9] 동적 임계치 (Dynamic Threshold) 3-Sigma 산출
+                diff_all = (inputs - outputs) ** 2
+                mse_all = np.mean(diff_all.cpu().numpy(), axis=2) # (batch, seq_len)
+                
+                # 과거 시점(마지막 제외) 평균/표준편차
+                past_mse = mse_all[:, :-1]
+                past_mean = np.mean(past_mse, axis=1)
+                past_std = np.std(past_mse, axis=1)
+                
+                # 동적 임계치 밴드 (mu + 3 sigma)
+                dyn_th = past_mean + 3 * past_std
+                
+                # 노이즈 방지용 글로벌 하한선 (학습된 전역 임계치의 20%)
+                min_th = track['th'] * 0.2
+                final_threshold = np.maximum(dyn_th, min_th)
+
                 # [Phase 8] Feature별 기여도 계산용 NumPy 변환
                 inputs_np = inputs.cpu().numpy()
                 outputs_np = outputs.cpu().numpy()
 
             res = df_clean.loc[indices].copy()
             res[f'{ft}_score'] = mse
-            res[f'is_{ft}_anomaly'] = mse > track['th']
-            res[f'{ft}_threshold'] = track['th']
+            res[f'is_{ft}_anomaly'] = mse > final_threshold
+            res[f'{ft}_threshold'] = final_threshold
 
             # [Phase 8] Feature Contribution 계산 (포트 단위 배치 전체에 대해 평균)
             feature_names = FEATURE_GROUPS[ft]
@@ -154,17 +170,18 @@ class AnomalyDetector:
             # JSON 직렬화 가능한 문자열로 저장
             contributions_json = json.dumps(contributions, ensure_ascii=False)
             
-            # 심각도 점수 산출 로직 (0~100 정규화)
-            def calculate_severity(mse, threshold):
-                if threshold <= 0: return 0.0
-                ratio = mse / threshold
-                if ratio <= 1.0:
-                    return ratio * 50.0 # 정상 구간 (0~50)
-                else:
-                    # 이상 구간 (50~100 수렴): 50 + 50 * (1 - exp(-0.5 * (ratio-1)))
-                    return 50.0 + 50.0 * (1 - np.exp(-0.5 * (ratio - 1.0)))
+            # 심각도 점수 산출 로직 (0~100 정규화) - Vectorized 적용 (Phase 9)
+            def calculate_severity(mse_arr, threshold_arr):
+                # 0 나누기 방지
+                th_safe = np.where(threshold_arr <= 0, 1e-9, threshold_arr)
+                ratio = mse_arr / th_safe
+                sev = np.where(ratio <= 1.0,
+                               ratio * 50.0, # 정상 구간
+                               50.0 + 50.0 * (1 - np.exp(-0.5 * (ratio - 1.0)))) # 이상 구간
+                # threshold가 0 이하인 예외 케이스 처리
+                return np.where(threshold_arr <= 0, 0.0, sev)
 
-            res[f'{ft}_severity'] = res[f'{ft}_score'].apply(lambda x: calculate_severity(x, track['th']))
+            res[f'{ft}_severity'] = calculate_severity(res[f'{ft}_score'].values, res[f'{ft}_threshold'].values)
             
             # [Phase 6] 추세 분석 (Slope): 포트별 점수 변화율 산출
             # 여러 시점의 결과가 있을 경우 선형 회귀 기울기 계산
@@ -215,12 +232,48 @@ class AnomalyDetector:
             elif ft == 'optical':
                 cols_to_keep.extend(['tx_avg_power', 'rx_avg_power'])
                 
+            # [Phase 9] 추가된 RCA 컨텍스트 지표(Ratio, Slope) 유지
+            extra_cols = [c for c in res.columns if c.endswith('_ratio') or c.endswith('_trend_slope')]
+            cols_to_keep.extend(extra_cols)
+                
             all_res.append(res[cols_to_keep])
         
         return pd.concat(all_res) if all_res else None
 
     def detect(self, df_traffic=None, df_optical=None, latest_only=True):
         """앙상블 분석 통합 인터페이스"""
+        
+        # [Phase 9] 실시간 인메모리 RCA 컨텍스트 지표(Ratio, Trend Slope) 산출
+        def append_rca_metrics(df_in, ft):
+            if df_in is None or df_in.empty: return df_in
+            df_out = df_in.copy().sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+            
+            def slope_calc(s):
+                s_clean = s.dropna()
+                if len(s_clean) < 2: return 0.0
+                x = np.arange(len(s_clean))
+                return np.polyfit(x, s_clean.values, 1)[0]
+                
+            grouped = df_out.groupby(['ip_addr', 'cid', 'lid'])
+            
+            if ft == 'traffic':
+                for col in ['tx_packet', 'rx_packet', 'error_packet']:
+                    if col in df_out.columns:
+                        # 4시점 이동평균 (자신 미포함 과거 4시점)
+                        past_mean = grouped[col].transform(lambda x: x.rolling(4, min_periods=1).mean().shift(1))
+                        # 0으로 나누기 방지
+                        df_out[f'{col}_ratio'] = df_out[col] / (past_mean.replace(0, 1e-9))
+                        df_out[f'{col}_ratio'] = df_out[f'{col}_ratio'].fillna(1.0)
+                        df_out[f'{col}_trend_slope'] = grouped[col].transform(lambda x: x.rolling(4, min_periods=2).apply(slope_calc, raw=False))
+            elif ft == 'optical':
+                for col in ['tx_avg_power', 'rx_avg_power']:
+                    if col in df_out.columns:
+                        df_out[f'{col}_trend_slope'] = grouped[col].transform(lambda x: x.rolling(4, min_periods=2).apply(slope_calc, raw=False))
+            return df_out
+
+        df_traffic = append_rca_metrics(df_traffic, 'traffic')
+        df_optical = append_rca_metrics(df_optical, 'optical')
+
         res_t = self._analyze_track(df_traffic, 'traffic') if df_traffic is not None else None
         res_o = self._analyze_track(df_optical, 'optical') if df_optical is not None else None
         
@@ -262,11 +315,19 @@ class AnomalyDetector:
             is_o = row.get('is_optical_anomaly', False)
             is_any_anomaly = row.get('is_anomaly', False)
             
-            # 1. 원시 데이터(Raw Data) 추출
+            # 1. 원시 데이터(Raw Data) 추출 및 RCA 컨텍스트 스냅샷
             raw_data = {}
-            for col in ['tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power']:
+            for col in ['tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power',
+                        'traffic_severity', 'optical_severity']:
                 if col in row.index:
                     raw_data[col] = row[col]
+                    
+            for col in row.index:
+                if isinstance(col, str) and (col.endswith('_ratio') or col.endswith('_trend_slope')):
+                    # Float64 등 JSON 변환 에러 방지를 위한 처리
+                    val = row[col]
+                    if pd.isna(val): raw_data[col] = 0.0
+                    else: raw_data[col] = float(val)
 
             # 2. 기여도(Contribution) 파싱 및 병합
             fc_t = {}
@@ -296,15 +357,18 @@ class AnomalyDetector:
             if not is_any_anomaly:
                 return pd.Series(["NORMAL", None, None])
 
-            # 3. 진단 트랙 결정 및 수행
+            # 3. 진단 트랙 결정 및 수행 (DB 저장용 rca_context 스냅샷 포함)
             if is_t and is_o:
                 diagnosis, action = self.rca_engine.diagnose("integrated", normalized_fc, True, raw_data)
+                normalized_fc['rca_context'] = raw_data
                 return pd.Series([diagnosis, action, json.dumps(normalized_fc)])
             elif is_t:
                 diagnosis, action = self.rca_engine.diagnose("traffic", fc_t, True, raw_data)
+                fc_t['rca_context'] = raw_data
                 return pd.Series([diagnosis, action, json.dumps(fc_t)])
             elif is_o:
                 diagnosis, action = self.rca_engine.diagnose("optical", fc_o, True, raw_data)
+                fc_o['rca_context'] = raw_data
                 return pd.Series([diagnosis, action, json.dumps(fc_o)])
             
             return pd.Series(["NORMAL", None, None])

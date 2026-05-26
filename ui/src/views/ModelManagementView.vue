@@ -18,6 +18,64 @@
         </button>
       </div>
 
+      <!-- Data Drift Monitor -->
+      <div class="mb-10 p-6 bg-slate-900/50 rounded-2xl border border-slate-700/50 shadow-inner">
+        <div class="flex justify-between items-center mb-6">
+          <div class="flex items-center gap-3">
+            <div class="p-2 bg-purple-500/10 rounded-lg">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-purple-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+            </div>
+            <div>
+              <h3 class="text-lg font-bold text-slate-200">Data Drift Monitor</h3>
+              <p class="text-xs text-slate-400">Detects baseline distribution shift (24H Average MSE vs Validation Loss) and automatically triggers retraining.</p>
+            </div>
+          </div>
+          <button @click="handleCheckDrift"
+                  :disabled="store.isCheckingDrift"
+                  class="px-5 py-2.5 bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/30 text-purple-400 rounded-xl text-sm font-bold transition-all flex items-center gap-2">
+            <svg v-if="store.isCheckingDrift" class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+            Check Drift Now
+          </button>
+        </div>
+        
+        <div class="grid grid-cols-2 gap-6" v-if="store.driftStatus && !store.driftStatus.message">
+          <div v-for="ft in ['traffic', 'optical']" :key="ft" class="p-4 bg-slate-800 rounded-xl border border-slate-700">
+            <div class="flex justify-between items-center mb-4">
+              <span class="uppercase font-bold text-xs tracking-wider text-slate-400">{{ ft }} Track</span>
+              <span :class="['px-2 py-0.5 rounded text-[10px] font-bold uppercase', 
+                            store.driftStatus[ft]?.status === 'drifted' ? 'bg-rose-500/20 text-rose-400' : 'bg-emerald-500/20 text-emerald-400']">
+                {{ store.driftStatus[ft]?.status === 'drifted' ? 'Drift Detected' : 'Normal' }}
+              </span>
+            </div>
+            <div class="flex justify-between items-end">
+              <div>
+                <div class="text-xs text-slate-500 mb-1">Drift Ratio</div>
+                <div class="text-2xl font-mono text-slate-200 font-bold">
+                  {{ store.driftStatus[ft]?.drift_ratio?.toFixed(2) }}<span class="text-sm text-slate-500">x</span>
+                </div>
+              </div>
+              <div class="text-right">
+                <div class="text-[10px] text-slate-500 mb-1">Baseline Val Loss</div>
+                <div class="font-mono text-xs text-slate-400">{{ store.driftStatus[ft]?.baseline_mse?.toFixed(5) }}</div>
+                <div class="text-[10px] text-slate-500 mb-1 mt-1">24H Average MSE</div>
+                <div class="font-mono text-xs text-slate-400">{{ store.driftStatus[ft]?.mean_mse?.toFixed(5) }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="store.driftStatus && store.driftStatus.message" class="text-center p-6 text-sm text-slate-400 italic bg-slate-800 rounded-xl border border-slate-700">
+          {{ store.driftStatus.message }}
+        </div>
+        <div v-else class="text-center p-6 text-sm text-slate-500 italic bg-slate-800 rounded-xl border border-slate-700">
+          No drift data available. Click "Check Drift Now" or wait for the scheduled check.
+        </div>
+        
+        <div v-if="store.driftStatus?.auto_retrain_triggered" class="mt-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-center gap-3">
+          <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+          <span class="text-sm text-amber-400 font-bold">Auto-Retraining triggered due to drift detection! Models are retraining in the background.</span>
+        </div>
+      </div>
+
       <!-- Main Layout: 2 Columns (Traffic | Optical) -->
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-10">
         <div v-for="(info, ft) in store.modelStatus" :key="ft" 
@@ -214,7 +272,7 @@
 
                 <div class="space-y-3">
                   <div class="flex justify-between items-center">
-                    <label class="text-xs text-slate-400 uppercase font-bold tracking-wider">Trend Sensitivity (Slope)</label>
+                    <label class="text-xs text-slate-400 uppercase font-bold tracking-wider">Anomaly Trend Sensitivity (Slope)</label>
                     <span class="text-sm font-mono text-emerald-400 font-bold bg-emerald-500/10 px-2 py-1 rounded">{{ infConfigs[ft]?.slope_threshold?.toFixed(1) }}</span>
                   </div>
                   <input type="range" v-model.number="infConfigs[ft].slope_threshold" min="0.1" max="10.0" step="0.1"
@@ -288,18 +346,39 @@ const notification = reactive({
   type: 'success'
 })
 
-const showNotice = (msg: string, type = 'success') => {
+let notifTimeout: ReturnType<typeof setTimeout> | null = null
+
+const showNotification = (msg: string, type: 'success' | 'error' = 'success') => {
   notification.message = msg
   notification.type = type
   notification.show = true
-  setTimeout(() => notification.show = false, 3000)
+  if (notifTimeout) clearTimeout(notifTimeout)
+  notifTimeout = setTimeout(() => {
+    notification.show = false
+  }, 3000)
+}
+
+const handleCheckDrift = async () => {
+  try {
+    const data = await store.checkDrift()
+    showNotification('Drift check completed.', 'success')
+    if (data.auto_retrain_triggered) {
+      showNotification('Auto-Retraining triggered!', 'success')
+      setTimeout(async () => {
+        await store.fetchModelStatus()
+        startPolling()
+      }, 1000)
+    }
+  } catch (err: any) {
+    const errMsg = err.response?.data?.detail || err.message || 'Failed to check drift'
+    showNotification(errMsg, 'error')
+  }
 }
 
 watch(() => store.modelStatus, (newVal) => {
   if (newVal.traffic) {
     infConfigs.value.traffic = { ...newVal.traffic.inference_config }
     trainConfigs.value.traffic = { ...newVal.traffic.training_config }
-    // 서버 응답의 경로를 정확히 참조 (info.training.is_training)
     isTraining.traffic = newVal.traffic.training?.is_training || false
     infDirty.traffic = false
   }
@@ -317,15 +396,14 @@ watch(() => infConfigs.value.optical, () => { infDirty.optical = true }, { deep:
 const handleSaveInference = async (ft: string) => {
   try {
     await store.updateInferenceConfig(ft, infConfigs.value[ft])
-    showNotice(`${ft.toUpperCase()} inference configuration applied.`)
+    showNotification(`${ft.toUpperCase()} inference configuration applied.`)
     infDirty[ft] = false
   } catch (err: any) {
     const errMsg = err.response?.data?.detail || err.message || `Failed to update ${ft} configuration.`
-    showNotice(errMsg, 'error')
+    showNotification(errMsg, 'error')
   }
 }
-
-let statusTimer: any = null
+let statusTimer: ReturnType<typeof setInterval> | null = null
 
 const stopPolling = () => {
   if (statusTimer) {
@@ -356,12 +434,12 @@ const handleTrain = async (ft: string) => {
   isTraining[ft] = true 
   try {
     await store.trainModel(ft, trainConfigs.value[ft], dates)
-    showNotice(`${ft.toUpperCase()} training task started.`)
+    showNotification(`${ft.toUpperCase()} training task started.`, 'success')
     await store.fetchModelStatus()
     startPolling() // 학습 시작 시 폴링 시작
   } catch (err: any) {
     const errMsg = err.response?.data?.detail || err.message || `Failed to start ${ft} training.`
-    showNotice(errMsg, 'error')
+    showNotification(errMsg, 'error')
     isTraining[ft] = false
   }
 }
@@ -370,17 +448,18 @@ const handleStop = async (ft: string) => {
   if (!confirm(`훈련을 중지하시겠습니까?`)) return
   try {
     await store.stopTraining(ft)
-    showNotice(`${ft.toUpperCase()} training stop requested.`)
+    showNotification(`${ft.toUpperCase()} training stop requested.`, 'success')
     await store.fetchModelStatus()
     // handleStop 후에도 폴링은 계속됨 (서버에서 완전히 멈출 때까지 기다림)
   } catch (err: any) {
     const errMsg = err.response?.data?.detail || err.message || `Failed to stop ${ft} training.`
-    showNotice(errMsg, 'error')
+    showNotification(errMsg, 'error')
   }
 }
 
 onMounted(async () => {
   await store.fetchModelStatus()
+  await store.fetchDriftStatus()
   
   // 진입 시 이미 학습 중인 모델이 있다면 폴링 시작
   const isAnyTraining = Object.values(store.modelStatus).some((m: any) => m.training?.is_training)
@@ -390,6 +469,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (notifTimeout) clearTimeout(notifTimeout)
   stopPolling()
 })
 </script>

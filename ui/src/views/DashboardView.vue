@@ -304,7 +304,7 @@
               <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex flex-col">
                 <h4 class="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4">Feature Contribution</h4>
                 <div class="flex-1 flex flex-col justify-center gap-3">
-                  <template v-if="parsedFeatureContribution">
+                  <template v-if="parsedFeatureContribution && parsedFeatureContribution.length > 0">
                     <div v-for="[feature, pct] in parsedFeatureContribution" :key="feature" class="flex flex-col gap-1.5">
                       <div class="flex justify-between items-center">
                         <span class="text-xs font-mono text-slate-300">{{ formatFeatureName(feature) }}</span>
@@ -319,6 +319,24 @@
                   <div v-else class="text-center py-6 text-slate-500 text-sm italic">
                     Contribution data not available.
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 1.5 RCA Context Snapshot (Dedicated Card) -->
+            <div v-if="rcaContextData" class="bg-slate-800 p-5 rounded-xl border border-slate-700 mb-4 shadow-lg">
+              <h4 class="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-4 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                Diagnostic Snapshot (RCA Context)
+              </h4>
+              <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                <div v-for="(val, key) in rcaContextData" :key="key" class="bg-slate-900/80 p-3 rounded-lg border border-slate-700/80 flex flex-col justify-center shadow-inner">
+                  <span class="text-[10px] text-slate-400 uppercase font-bold tracking-wider truncate mb-1" :title="String(key)">
+                    {{ String(key).replace('_ratio', ' (Ratio)').replace('_trend_slope', ' (Slope)').replace('tx_', 'TX ').replace('rx_', 'RX ') }}
+                  </span>
+                  <span class="text-base font-mono text-slate-200">
+                    {{ typeof val === 'number' && !Number.isInteger(val) ? val.toFixed(3) : val }}
+                  </span>
                 </div>
               </div>
             </div>
@@ -458,8 +476,21 @@ const parsedFeatureContribution = computed(() => {
   try {
     const raw = selectedPort.value.feature_contribution
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw
+    // Filter out rca_context and non-numeric values
+    const filtered = Object.entries(data).filter(([k, v]) => k !== 'rca_context' && typeof v === 'number')
     // Value 내림차순 정렬하여 반환
-    return Object.entries(data).sort((a: any, b: any) => b[1] - a[1])
+    return filtered.sort((a: any, b: any) => b[1] - a[1])
+  } catch (e) {
+    return null
+  }
+})
+
+const rcaContextData = computed(() => {
+  if (!selectedPort.value?.feature_contribution) return null
+  try {
+    const raw = selectedPort.value.feature_contribution
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw
+    return data.rca_context && Object.keys(data.rca_context).length > 0 ? data.rca_context : null
   } catch (e) {
     return null
   }

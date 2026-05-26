@@ -228,6 +228,59 @@
 - **Endpoint**: `DELETE /api/rca/rules/{rule_id}`
 - **Description**: 지정된 ID의 룰을 메모리 및 파일에서 삭제합니다.
 
+### 2.6. MLOps Data Drift & Auto-Retraining
+
+#### 2.6.1. 드리프트 상태 조회
+- **Endpoint**: `GET /api/drift/status`
+- **Description**: 최근 수행된 데이터 드리프트(Data Drift) 감지 결과를 반환합니다. 24시간 단위의 평균 MSE와 베이스라인 비교값을 포함합니다.
+- **Response**:
+```json
+{
+  "status": "success",
+  "last_result": {
+    "traffic": {
+      "mean_mse": 0.0035,
+      "baseline_mse": 0.0024,
+      "drift_ratio": 1.45,
+      "status": "normal"
+    },
+    "optical": {
+      "mean_mse": 0.0042,
+      "baseline_mse": 0.0020,
+      "drift_ratio": 2.10,
+      "status": "drifted"
+    },
+    "drift_detected": true,
+    "drifted_tracks": ["optical"],
+    "auto_retrain_triggered": true
+  }
+}
+```
+
+#### 2.6.2. 수동 드리프트 검사 및 재학습 트리거
+- **Endpoint**: `POST /api/drift/check`
+- **Description**: 즉시 데이터 드리프트를 검사하고, 임계치 초과 시 백그라운드 재학습 파이프라인을 가동합니다.
+- **Response**:
+```json
+{
+  "traffic": {
+    "mean_mse": 0.0035,
+    "baseline_mse": 0.0024,
+    "drift_ratio": 1.45,
+    "status": "normal"
+  },
+  "optical": {
+    "mean_mse": 0.0042,
+    "baseline_mse": 0.0020,
+    "drift_ratio": 2.10,
+    "status": "drifted"
+  },
+  "drift_detected": true,
+  "drifted_tracks": ["optical"],
+  "auto_retrain_triggered": true
+}
+```
+
 ## 3. 실시간 알림 스트림 (SSE)
 이상 발생 시 서버에서 클라이언트로 즉시 푸시 알림을 전달합니다.
 
@@ -248,4 +301,4 @@
 ```
 
 ---
-*최종 업데이트: 2026-05-21*
+*최종 업데이트: 2026-05-26*

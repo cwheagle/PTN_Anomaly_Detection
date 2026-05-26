@@ -21,6 +21,7 @@ from src.pipeline.scheduler import PTNAnomalyScheduler
 from src.data.db_connector import DBConnector
 from src.data.data_collector import DataCollector
 from src.models.trainer import Trainer
+from src.pipeline.drift_monitor import DriftMonitor
 from src.config import PATHS, MODEL_CONFIG, API_VERSION
 
 # 글로벌 객체
@@ -34,6 +35,8 @@ training_status = {
     "optical": {"is_training": False, "current_epoch": 0, "total_epochs": 0, "loss": 0, "val_loss": None, "last_error": None, "success_msg": None}
 } 
 active_trainers = {} # 현재 실행 중인 Trainer 인스턴스 (중지용)
+drift_monitor = DriftMonitor(drift_factor=1.5)
+last_drift_result = None # 가장 최근의 Drift Check 결과 캐싱
 
 async def broadcast_alarm(alarm_data: dict):
     """모든 연결된 SSE 클라이언트에게 알람 전송 (전송 성공 여부 반환)"""
@@ -467,6 +470,70 @@ async def control_scheduler(data: dict = Body(...)):
         scheduler_instance.restart()
         if scheduler_instance.scheduler.state == 2: scheduler_instance.scheduler.resume()
     return await get_scheduler_status()
+
+# --- [Phase 9] Data Drift & Auto-Retraining API ---
+
+@app.get("/api/drift/status")
+async def get_drift_status():
+    """최근 수행된 Data Drift 감지 결과를 반환"""
+    return {
+        "status": "success",
+        "last_result": last_drift_result
+    }
+
+@app.post("/api/drift/check")
+async def check_drift_and_retrain(background_tasks: BackgroundTasks):
+    """수동으로 Drift 감지를 즉시 실행하고, 필요시 자동 재학습을 트리거"""
+    global last_drift_result
+    
+    print("[*] [Drift] Running Data Drift check...")
+    result = drift_monitor.check_drift()
+    
+    if "status" in result and result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["message"])
+        
+    last_drift_result = result
+    
+    # Drift가 감지된 트랙이 있다면 자동 재학습 파이프라인 트리거
+    if result.get("drift_detected"):
+        now = datetime.now()
+        # 최근 30일을 훈련셋으로(37일 전 ~ 7일 전), 마지막 7일을 검증/테스트셋으로 분할
+        train_start = (now - timedelta(days=37)).strftime('%Y-%m-%d')
+        train_end = (now - timedelta(days=7)).strftime('%Y-%m-%d')
+        test_start = (now - timedelta(days=7)).strftime('%Y-%m-%d')
+        test_end = now.strftime('%Y-%m-%d')
+        
+        date_params = {
+            'train_start': train_start,
+            'train_end': train_end,
+            'test_start': test_start,
+            'test_end': test_end
+        }
+        
+        for ft in result.get("drifted_tracks", []):
+            if training_status.get(ft, {}).get("is_training"):
+                print(f"[*] [Drift] {ft} is already training. Skipping auto-retrain.")
+                continue
+                
+            # 기존에 저장된 모델 설정(epochs, lr 등)을 불러옴
+            saved_config = {}
+            meta_path = PATHS[ft]['model'].replace('.pth', '.json')
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, 'r') as f:
+                        meta = json.load(f)
+                        saved_config = meta.get("config", {})
+                except Exception as e:
+                    print(f"[*] [Drift] Failed to load previous config for {ft}: {e}")
+                    
+            print(f"[*] [Drift] Triggering Auto-Retraining for {ft} due to Data Drift.")
+            background_tasks.add_task(run_training_pipeline, ft, saved_config, date_params)
+            
+        result["auto_retrain_triggered"] = True
+    else:
+        result["auto_retrain_triggered"] = False
+        
+    return result
 
 # --- [Phase 8] RCA Rules API ---
 

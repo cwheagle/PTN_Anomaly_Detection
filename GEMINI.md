@@ -20,16 +20,20 @@
 - **검증**: `tests/` 디렉토리에 대응하는 테스트 케이스가 없는 코드는 완료된 것으로 간주하지 않습니다.
 
 ## 3. 현재 작업 상태 (Status)
-- **현재 단계**: Phase 8 RCA 엔진 코어 구현 진행 중 - **Feature Contribution 분석기 및 도메인 룰 인터페이스 설계**
-- **완료 항목**:
+- **현재 단계**: Phase 9 지능형 MLOps 및 시스템 안정화 진행 중 - **자동 재학습(MLOps) 파이프라인 연동 대기**
+- **완료 항목 (Phase 9까지)**:
     - RCA 엔진 코어 구현 및 룰 관리 프론트엔드 연동 완료. 
     - Feature Contribution 산출기, 구조화된 도메인 룰 JSON(Min/Max/기여도), 조치 방법(Action) 연동 완료.
     - Rule Management 동적 폼 및 대시보드 툴팁 UI 구축 완벽 적용.
-- **진행 중 (Phase 9)**:
-    - **동적 임계치**: 시간/계절성 기반 가변 임계치 적용 준비 중.
-    - **자동 재학습 MLOps**: Data Drift 감지 및 백그라운드 모델 재학습 파이프라인.
+    - **16종의 PTN 도메인 RCA 룰셋 주입 (Ratio, Trend Slope 적용 완료)**
+    - **3-Sigma 기반 동적 임계치(Dynamic Threshold) 파이프라인 통합 완료**
+    - **자동 재학습 MLOps**: Data Drift 감지 및 백그라운드 모델 재학습 파이프라인 (완료)
+    - 24시간 주기 MSE 평가, 저장된 기존 학습 파라미터(Epochs 등) 재사용 로직, UI 연동 완료.
 
-- **최종 업데이트**: 2026-05-21
+- **대기 중 (Phase 10)**:
+    - **오프라인 모델 검증 및 성능 평가**: 정답지(Ground Truth) 데이터셋 기반 Confusion Matrix 생성 및 F1-Score 수치화 스크립트(`evaluate_model.py`) 개발 대기 중.
+
+- **최종 업데이트**: 2026-05-26
 
 ## 4. 워크플로우
 - `plan.md`를 구현 단계의 유일한 진실 공급원(Single Source of Truth)으로 참조합니다.

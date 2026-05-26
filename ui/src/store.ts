@@ -10,6 +10,8 @@ export const store = reactive({
   watchlist: [] as any[],
   rcaRules: [] as any[],
   modelStatus: {} as Record<string, any>,
+  driftStatus: null as any,
+  isCheckingDrift: false,
   isRefreshingAnomalies: false,
   isRefreshingWatchlist: false,
   isRefreshingModelStatus: false,
@@ -86,11 +88,11 @@ export const store = reactive({
         this.schedulerStatus = 'stopped'
         this.alarms = []
       }
-      
+
       const res = await axios.post('/api/scheduler/status', { action })
       this.schedulerStatus = res.data.status
       this.nextRunTime = res.data.next_run_time
-      
+
       if (this.schedulerStatus !== 'running') {
         this.alarms = []
       }
@@ -149,7 +151,7 @@ export const store = reactive({
   async trainModel(ft: string, training_config: any = {}, date_params: any = {}) {
     try {
       const res = await axios.post(`/api/model/train`, training_config, {
-        params: { 
+        params: {
           ft,
           train_start: date_params.train_start,
           train_end: date_params.train_end,
@@ -204,6 +206,30 @@ export const store = reactive({
     } catch (err) {
       console.error('Failed to delete RCA rule', err)
       throw err
+    }
+  },
+
+  // --- Data Drift ---
+  async fetchDriftStatus() {
+    try {
+      const res = await axios.get('/api/drift/status')
+      this.driftStatus = res.data.last_result
+    } catch (err) {
+      console.error('Failed to fetch drift status', err)
+    }
+  },
+
+  async checkDrift() {
+    this.isCheckingDrift = true
+    try {
+      const res = await axios.post('/api/drift/check')
+      this.driftStatus = res.data
+      return res.data
+    } catch (err) {
+      console.error('Failed to check drift', err)
+      throw err
+    } finally {
+      this.isCheckingDrift = false
     }
   }
 })
