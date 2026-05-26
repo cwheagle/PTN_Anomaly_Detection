@@ -228,7 +228,7 @@
 - **Endpoint**: `DELETE /api/rca/rules/{rule_id}`
 - **Description**: 지정된 ID의 룰을 메모리 및 파일에서 삭제합니다.
 
-### 2.6. MLOps Data Drift & Auto-Retraining
+### 2.6. Data Drift & Auto-Retraining
 
 #### 2.6.1. 드리프트 상태 조회
 - **Endpoint**: `GET /api/drift/status`
