@@ -1,0 +1,264 @@
+# PTN EMS 이상탐지 솔루션 (PTN Anomaly Detection)
+
+> **PTN(Packet Transport Network) EMS 장비의 시계열 성능 데이터를 기반으로, LSTM-Autoencoder 딥러닝 모델을 활용한 실시간 이상 탐지 및 근본 원인 분석(RCA) 솔루션**
+
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](https://pytorch.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0+-4479A1?style=flat-square&logo=mysql&logoColor=white)](https://www.mysql.com)
+[![Vue](https://img.shields.io/badge/Vue_3-Vite-42B883?style=flat-square&logo=vuedotjs&logoColor=white)](https://vitejs.dev)
+
+---
+
+## 📌 프로젝트 개요
+
+통신 장비 운용 환경에서 **15분 단위**로 수집되는 성능 지표(트래픽, 광 모듈 상태)를 분산된 MySQL DB로부터 수집·분석하여 장애를 **사전에 탐지**하고 **예지 정비(Predictive Maintenance)**를 가능하게 하는 AI 엔진 및 대시보드입니다.
+
+단순한 임계치 경보 수준을 넘어, **어떤 장비의 어떤 포트에서 어떤 장애가 의심되는지**를 진단하고 구체적인 조치 방법을 운용자에게 제시합니다.
+
+---
+
+## ✨ 핵심 기능
+
+| 기능 | 설명 |
+|------|------|
+| 🔍 **실시간 이상 탐지** | LSTM-Autoencoder 기반 Reconstruction Error로 15분마다 자동 추론 |
+| 📊 **심각도 스코어링** | MSE 기반 0~100점 상대 심각도 + 3단계 경보(Minor/Major/Critical) |
+| 🔗 **RCA 진단 엔진** | Feature Contribution 분석 + 도메인 룰 기반 장애명 및 조치 방법 출력 |
+| ⏱️ **RUL 예측** | 현재 추세 기반 장애까지 남은 예상 시간(Remaining Useful Life) 계산 |
+| 🌡️ **동적 임계치** | 3-Sigma 기반 시간대/요일별 가변 임계치로 오탐(False Positive) 최소화 |
+| 🔄 **자동 재학습** | Data Drift 감지 시 백그라운드 재학습 → Hot-Reload 무중단 배포 |
+| 🛠️ **Rule Management UI** | 네트워크 엔지니어가 직접 RCA 룰을 등록·수정하는 관리 인터페이스 |
+| 📡 **실시간 대시보드** | FastAPI SSE 기반 실시간 이벤트 스트리밍 + Vue 3/Vite 프론트엔드 |
+
+---
+
+## 🏗️ 시스템 아키텍처
+
+```
+MySQL DB (분산)          FastAPI 백엔드              Vue 3 프론트엔드
+┌─────────────┐         ┌──────────────────────┐    ┌───────────────────┐
+│ Traffic DB  │──15min──▶  DataFetcher           │    │  실시간 대시보드   │
+│ Optical DB  │         │  Preprocessor          │◀──▶│  RCA 진단 뷰      │
+└─────────────┘         │  InferenceEngine        │    │  Rule Management  │
+                        │  RCA Engine             │    │  Model Management │
+                        │  Dynamic Threshold      │───▶│  알람/이벤트 패널 │
+                        │  Auto-Retraining MLOps  │    └───────────────────┘
+                        └──────────────────────┘
+```
+
+### 분석 트랙
+
+| 트랙 | 모니터링 피처 (3종 / 2종) |
+|------|---------------------------|
+| **Traffic** | In Packet, Out Packet, Error Packet (3종) |
+| **Optical** | Tx 평균 광 파워, Rx 평균 광 파워 (2종) |
+
+---
+
+## 📁 프로젝트 구조
+
+```
+PTN_Anomaly_Detection/
+├── src/
+│   ├── api/                # FastAPI 라우터 및 SSE 엔드포인트
+│   ├── data/               # DataFetcher, Preprocessor, DB Connector
+│   ├── models/             # LSTM-Autoencoder (model.py, trainer.py)
+│   ├── pipeline/           # InferenceEngine, Scheduler, Dynamic Threshold
+│   ├── rca/                # RCA 엔진, Feature Contribution, Rule Engine
+│   │   └── rules/          # 도메인 룰셋 JSON (16종 PTN 룰)
+│   └── config.py           # 중앙화된 설정 관리
+├── ui/                     # Vue + Vite 프론트엔드
+│   └── src/views/
+│       ├── DashboardView.vue       # 실시간 이상탐지 대시보드
+│       ├── ModelManagementView.vue # 모델 파라미터 설정 및 훈련 관리
+│       └── RuleManagementView.vue  # RCA 도메인 룰 등록·수정
+├── tools/
+│   └── simulator/          # 테스트용 데이터 시뮬레이터 (이상 주입, 이력 생성)
+├── tests/
+│   ├── module/                 # 모듈별 단위 동작 검증 (pytest)
+│   │   ├── test_data.py        # 데이터 수집·전처리 모듈
+│   │   ├── test_model.py       # LSTM-AE 모델 아키텍처
+│   │   ├── test_trainer.py     # 학습 루프
+│   │   └── test_scheduler.py  # 스케줄러
+│   ├── test_train.py           # 모델 훈련 실행 (Traffic/Optical 전체)
+│   ├── test_inference.py       # 추론 엔진 실행 테스트
+│   ├── test_rca.py             # RCA 엔진 진단 테스트
+│   └── test_run.py             # 전체 파이프라인 통합 실행
+├── scripts/
+│   ├── collect_data.py         # 데이터 수집 단독 실행
+│   └── main_scheduler.py       # 스케줄러 테스트 가동
+├── docs/                   # 설계 문서 및 참고 자료
+├── models/                 # ⚡ 동적 생성 — 학습된 모델 가중치 저장소 (git 제외)
+├── data/                   # ⚡ 동적 생성 — 추론 결과 및 평가용 CSV (git 제외)
+├── plan.md                 # 단계별 구현 계획 (Single Source of Truth)
+├── lessons.md              # 시행착오 및 교훈 기록
+└── requirements.txt        # Python 의존성
+```
+
+---
+
+## 🚀 빠른 시작
+
+### 사전 요구사항
+
+- Python 3.10+
+- Node.js 18+ (프론트엔드)
+- MySQL 8.0+
+- PyTorch 2.x (CUDA 권장)
+
+### 1. 백엔드 설치 및 설정
+
+```bash
+# 의존성 설치
+pip install -r requirements.txt
+pip install torch  # PyTorch는 공식 사이트에서 CUDA 버전에 맞게 설치 권장
+
+# 설정 파일 복사 후 DB 접속 정보 입력
+cp src/config.py.example src/config.py
+# config.py 편집: DB 호스트, 포트, 계정, 대상 장비 정보 입력
+```
+
+### 2. 백엔드 서버 실행 및 모델 학습
+
+```bash
+# FastAPI 서버 시작 (15분 주기 자동 추론 포함)
+uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+서버 기동 후 **Model Management UI** 또는 API로 초기 모델 학습을 시작합니다.
+
+```bash
+# Traffic 모델 학습
+curl -X POST "http://localhost:8000/api/model/train?feature_type=traffic"
+
+# Optical 모델 학습
+curl -X POST "http://localhost:8000/api/model/train?feature_type=optical"
+```
+
+> 학습 진행 상태 및 파라미터 설정은 **Model Management** 뷰에서 실시간으로 확인할 수 있습니다.
+
+### 3. 프론트엔드 실행
+
+```bash
+cd ui
+npm install
+npm run dev
+# http://localhost:5173 접속
+```
+
+---
+
+## 🤖 RCA 엔진 — 도메인 룰 구조
+
+이상 탐지 후 각 Feature의 MSE 기여도를 분석하여 장애 원인을 진단합니다.
+
+```json
+{
+  "id": "TR-001",
+  "track": "traffic",
+  "priority": 100,
+  "contributions": {
+    "rx_packet": 35,
+    "tx_packet": 35
+  },
+  "raw_conditions": {
+    "min_rx_packet_ratio": 1.5,
+    "min_tx_packet_ratio": 1.5
+  },
+  "diagnosis": "양방향 트래픽 동시 급증 (L2 브로드캐스트 스톰 또는 루핑 의심)",
+  "action": "하위 스위치 루프(Loop) 구성 및 MAC Address 플래핑 이력 확인"
+}
+```
+
+- **`track`**: 적용 대상 트랙 (`traffic` / `optical`)
+- **`priority`**: 룰 매칭 우선순위 (높을수록 먼저 적용)
+- **`contributions`**: 이상 판정에 기여해야 할 Feature와 기여도 기준(%)
+- **`raw_conditions`**: 원시 값 기반 추가 조건 (비율, 절댓값 등)
+- **`diagnosis`**: 출력할 장애 진단명
+- **`action`**: 운용자에게 제시할 조치 방법
+
+현재 **16종의 PTN 도메인 룰셋**이 주입되어 있으며, Rule Management UI를 통해 추가·수정이 가능합니다.
+
+
+---
+
+## 📈 개발 단계 현황
+
+| Phase | 내용 | 상태 |
+|-------|------|------|
+| Phase 1 | 기반 설정 및 MySQL 데이터 연동 | ✅ 완료 |
+| Phase 2 | LSTM-Autoencoder 모델 개발 및 학습 | ✅ 완료 |
+| Phase 3 | 추론 엔진 및 15분 주기 스케줄러 | ✅ 완료 |
+| Phase 4 | Traffic/Optical 트랙 분리 아키텍처 | ✅ 완료 |
+| Phase 5 | 데이터 전처리 고도화 및 통합 검증 | ✅ 완료 |
+| Phase 6 | 심각도 스코어링, RUL 예측, 추세 분석 | ✅ 완료 |
+| Phase 7 | FastAPI 서버, SSE, Hot-Reload MLOps | ✅ 완료 |
+| Phase 8 | RCA 엔진 코어 및 Rule Management UI | ✅ 완료 |
+| Phase 9 | 3-Sigma 동적 임계치 + 자동 재학습 파이프라인 | ✅ 완료 |
+| **Phase 10** | **오프라인 모델 검증 및 TTF-Aware F1-Score 평가** | 🔜 진행 예정 |
+| Phase 11 | 딥러닝 아키텍처 고도화 (Feature Engineering, MLflow) | 📋 계획 |
+| Phase 12 | 대용량 분산 처리 (Kafka, Kubernetes) | 📋 계획 |
+| Phase 13 | XAI (SHAP/LIME) 및 Human-in-the-loop | 📋 계획 |
+
+---
+
+## 🧪 테스트 실행
+
+```bash
+# 모듈별 단위 동작 검증
+pytest tests/module/ -v
+
+# 모델 훈련
+python tests/test_train.py
+
+# 추론 엔진 테스트
+python tests/test_inference.py
+
+# RCA 엔진 테스트
+python tests/test_rca.py
+
+# 전체 파이프라인 통합 실행
+python tests/test_run.py
+
+# 데이터 수집 단독 실행
+python scripts/collect_data.py
+
+# 스케줄러 테스트 가동
+python scripts/main_scheduler.py
+```
+
+---
+
+## 🛠️ 기술 스택
+
+**백엔드**
+- Python, PyTorch (LSTM-Autoencoder)
+- FastAPI, Uvicorn (ASGI 서버)
+- APScheduler (15분 주기 스케줄링)
+- MySQL, mysql-connector-python
+- scikit-learn (RobustScaler), Pandas, joblib
+
+**프론트엔드**
+- Vue 3 + Vite + TypeScript
+- TailwindCSS
+- Server-Sent Events (SSE) 실시간 스트리밍
+
+**개발 도구**
+- `tools/simulator` — 이상 데이터 주입, 과거 이력 생성, 실시간 주입기 (테스트 환경 구축용)
+
+---
+
+## 📄 참고 문서
+
+- [`plan.md`](./plan.md) — 단계별 구현 계획 (프로젝트 유일한 진실 공급원)
+- [`lessons.md`](./lessons.md) — 개발 중 겪은 시행착오 및 교훈 기록
+- [`GEMINI.md`](./GEMINI.md) — AI 에이전트 기반 개발(Harness Coding) 지침
+
+---
+
+## 🔒 보안 참고
+
+`src/config.py`에는 DB 접속 정보 등 민감한 값이 포함되어 있습니다.  
+이 파일은 `.gitignore`에 의해 저장소에서 제외됩니다.  
+`src/config.py.example`을 참고하여 로컬 환경에서 직접 생성하세요.
