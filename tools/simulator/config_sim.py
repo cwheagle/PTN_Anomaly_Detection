@@ -2,7 +2,7 @@ import os
 
 # 시뮬레이터 구동용 DB 설정 (기본적으로 localhost에 cowptn_test 데이터베이스 사용 권장)
 DB_CONFIG_SIM = {
-    "host": "127.0.0.1",
+    "host": "localhost",
     "user": "root",
     "password": "root",
     "database": "cowptn_test",  # 테스트용 독립 스키마
@@ -14,7 +14,7 @@ SIM_CONFIG = {
     "nodes": 10,          # 가상 PTN 장비 개수
     "ports_per_node": 10, # 장비당 포트(CID, LID) 개수 -> 총 100개 링크
     "interval_minutes": 15,
-    "history_days": 30,   # 과거 데이터 생성 일수
+    "history_days": 37,   # 과거 데이터 생성 일수
     
     # 이상치 발생 확률 (15분 단위 1건 생성 시 해당 확률로 이상치 부여)
     "anomaly_probabilities": {

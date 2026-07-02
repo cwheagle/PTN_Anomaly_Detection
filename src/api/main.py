@@ -166,7 +166,7 @@ async def get_model_status():
             # 추론 설정 (실시간 수정 가능 항목만 노출)
             "inference_config": {
                 "threshold": MODEL_CONFIG.get('threshold', 0.1),
-                "slope_threshold": MODEL_CONFIG.get('slope_threshold', 1.0)
+                "slope_threshold": MODEL_CONFIG.get('slope_threshold', 3.0)
             },
             # 훈련 설정 (학습 시 수정 가능 항목만 노출)
             "training_config": {

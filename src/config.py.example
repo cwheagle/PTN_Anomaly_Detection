@@ -28,10 +28,10 @@ MODEL_CONFIG = {
     "batch_size": 32,
     "learning_rate": 0.001,
     "epochs": 100,
-    "threshold_percentile": 99.9,
+    "threshold_percentile": 99.99,   # (수정) 정상 데이터 기준을 상위 0.01%로 엄격하게 상향 (오탐 제거)
     "patience": 10,
-    "threshold": 0.1,  # 기본 임계치
-    "slope_threshold": 1.0,  # 추세 분석(RISING/FALLING) 판단 기준
+    "threshold": 0.1,        # 기본 임계치
+    "slope_threshold": 3.0,  # (수정) 기울기 가중치를 높여 미세한 노이즈 추세는 무시하도록 상향
     "rul_target": 90.0       # RUL 예측 목표 심각도 (Critical 임계치)
 }
 

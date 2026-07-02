@@ -8,6 +8,7 @@ venv/
 
 # Data & Models (보통 크기가 커서 제외하지만, 필요시 추가 가능)
 data/*.csv
+tools/simulator/data/*.csv
 models/*.pth
 models/*.joblib
 models/*.json

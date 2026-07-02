@@ -87,7 +87,8 @@ PTN_Anomaly_Detection/
 │   └── test_run.py             # 전체 파이프라인 통합 실행
 ├── scripts/
 │   ├── collect_data.py         # 데이터 수집 단독 실행
-│   └── main_scheduler.py       # 스케줄러 테스트 가동
+│   ├── main_scheduler.py       # 스케줄러 테스트 가동
+│   └── evaluate_model.py       # 오프라인 모델 검증 및 F1-Score 평가
 ├── docs/                   # 설계 문서 및 참고 자료
 ├── models/                 # ⚡ 동적 생성 — 학습된 모델 가중치 저장소 (git 제외)
 ├── data/                   # ⚡ 동적 생성 — 추론 결과 및 평가용 CSV (git 제외)
@@ -196,8 +197,8 @@ npm run dev
 | Phase 7 | FastAPI 서버, SSE, Hot-Reload MLOps | ✅ 완료 |
 | Phase 8 | RCA 엔진 코어 및 Rule Management UI | ✅ 완료 |
 | Phase 9 | 3-Sigma 동적 임계치 + 자동 재학습 파이프라인 | ✅ 완료 |
-| **Phase 10** | **오프라인 모델 검증 및 TTF-Aware F1-Score 평가** | 🔜 진행 예정 |
-| Phase 11 | 딥러닝 아키텍처 고도화 (Feature Engineering, MLflow) | 📋 계획 |
+| Phase 10 | 오프라인 모델 검증 및 TTF-Aware F1-Score 평가 | ✅ 완료 |
+| **Phase 11** | **MLOps 고도화 (정답지 자동화, Feature Engineering, MLflow)** | 🔜 진행 예정 |
 | Phase 12 | 대용량 분산 처리 (Kafka, Kubernetes) | 📋 계획 |
 | Phase 13 | XAI (SHAP/LIME) 및 Human-in-the-loop | 📋 계획 |
 
@@ -226,6 +227,9 @@ python scripts/collect_data.py
 
 # 스케줄러 테스트 가동
 python scripts/main_scheduler.py
+
+# 모델 오프라인 평가 및 F1-Score 산출
+python scripts/evaluate_model.py
 ```
 
 ---

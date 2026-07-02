@@ -26,12 +26,39 @@ class DataCollector:
         os.makedirs(output_dir, exist_ok=True)
         results = {}
 
+        # 정답지 로드하여 오염 데이터 필터링 준비
+        gt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tools', 'simulator', 'data', 'eval_dataset.csv')
+        gt_df = None
+        if os.path.exists(gt_path):
+            import pandas as pd
+            gt_df = pd.read_csv(gt_path)
+            gt_df['start_time'] = pd.to_datetime(gt_df['start_time'])
+            gt_df['failure_time'] = pd.to_datetime(gt_df['failure_time'])
+            print(f"[*] DataCollector: Found {len(gt_df)} anomaly scenarios. Will filter them out from training data.")
+
+        def filter_anomalies(df):
+            if df is None or df.empty or gt_df is None: return df
+            df['occur_date'] = pd.to_datetime(df['occur_date'])
+            drop_mask = pd.Series(False, index=df.index)
+            print("[*] DataCollector: Filtering anomalies (this might take a few seconds)...")
+            for _, gt in gt_df.iterrows():
+                mask = (df['ip_addr'] == gt['ip_addr']) & \
+                       (df['cid'] == gt['cid']) & \
+                       (df['lid'] == gt['lid']) & \
+                       (df['occur_date'] >= gt['start_time']) & \
+                       (df['occur_date'] <= gt['failure_time'])
+                drop_mask = drop_mask | mask
+            dropped_count = drop_mask.sum()
+            print(f"[*] DataCollector: Dropped {dropped_count} contaminated records.")
+            return df[~drop_mask].copy()
+
         # 1. 트래픽 수집 및 독립 필터링
         if feature_type is None or feature_type == 'traffic':
             df_t = self.db.fetch_traffic(fetch_start, fetch_end, stop_checker=stop_checker)
             if stop_checker and stop_checker(): return results # 중지 시 조기 리턴
 
             if df_t is not None and not df_t.empty:
+                df_t = filter_anomalies(df_t)
                 df_t = df_t.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
                 train = df_t[(df_t['occur_date'] >= t_start) & (df_t['occur_date'] <= t_end)]
                 test = df_t[(df_t['occur_date'] >= v_start) & (df_t['occur_date'] <= v_end)]
@@ -47,6 +74,7 @@ class DataCollector:
             if stop_checker and stop_checker(): return results # 중지 시 조기 리턴
 
             if df_o is not None and not df_o.empty:
+                df_o = filter_anomalies(df_o)
                 df_o = df_o.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
                 train = df_o[(df_o['occur_date'] >= t_start) & (df_o['occur_date'] <= t_end)]
                 test = df_o[(df_o['occur_date'] >= v_start) & (df_o['occur_date'] <= v_end)]

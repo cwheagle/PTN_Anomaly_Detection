@@ -315,13 +315,13 @@ const isTraining = reactive<Record<string, boolean>>({
 })
 
 const infConfigs = ref<Record<string, any>>({
-  traffic: { threshold: 0.1, slope_threshold: 1.0 },
-  optical: { threshold: 0.1, slope_threshold: 1.0 }
+  traffic: { threshold: 0.1, slope_threshold: 3.0 },
+  optical: { threshold: 0.1, slope_threshold: 3.0 }
 })
 
 const trainConfigs = ref<Record<string, any>>({
-  traffic: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.9, patience: 10 },
-  optical: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.9, patience: 10 }
+  traffic: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.99, patience: 10 },
+  optical: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.99, patience: 10 }
 })
 
 const getPastDate = (days: number) => {

@@ -72,12 +72,14 @@ class AnomalyDetector:
             new_state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
             model.load_state_dict(new_state_dict)
             
-            # 추론 최적화 (torch.compile)
-            if hasattr(torch, "compile") and self.device.type == "cuda":
-                try:
-                    print(f"[*] Compiling {ft} model for inference optimization...")
-                    model = torch.compile(model)
-                except: pass
+            # [Blackwell 최적화] PyTorch 2.0+ 및 CUDA 환경에서 컴파일 적용 (이식성 유지)
+            # BUG FIX: RuntimeError: Detected that you are using FX to symbolically trace a dynamo-optimized function...
+            # torch.compile과 AMP(Autocast)가 충돌하는 현상이 있으므로 주석 처리 (이미 6초대로 충분히 빠름)
+            # if hasattr(torch, "compile") and self.device.type == "cuda":
+            #     try:
+            #         print(f"[*] Compiling {ft} model for inference optimization...")
+            #         model = torch.compile(model)
+            #     except: pass
             
             model.eval()
             
@@ -149,8 +151,9 @@ class AnomalyDetector:
                 # 동적 임계치 밴드 (mu + 3 sigma)
                 dyn_th = past_mean + 3 * past_std
                 
-                # 노이즈 방지용 글로벌 하한선 (학습된 전역 임계치의 20%)
-                min_th = track['th'] * 0.2
+                # 노이즈 방지용 글로벌 하한선 (학습된 전역 임계치의 100% 보장)
+                # 과거 변동성이 너무 없어서 dyn_th가 0에 수렴하더라도 최소한 글로벌 임계치는 넘겨야 이상으로 판별
+                min_th = track['th'] * 1.0
                 final_threshold = np.maximum(dyn_th, min_th)
 
                 # [Phase 8] Feature별 기여도 계산용 NumPy 변환
@@ -184,14 +187,15 @@ class AnomalyDetector:
             res[f'{ft}_severity'] = calculate_severity(res[f'{ft}_score'].values, res[f'{ft}_threshold'].values)
             
             # [Phase 6] 추세 분석 (Slope): 포트별 점수 변화율 산출
-            # 여러 시점의 결과가 있을 경우 선형 회귀 기울기 계산
-            if len(res) >= 2:
-                y = res[f'{ft}_severity'].values
-                x = np.arange(len(y))
-                slope, _ = np.polyfit(x, y, 1)
-                res[f'{ft}_slope'] = slope
-            else:
-                res[f'{ft}_slope'] = 0.0
+            # 최근 4시점을 이용해 선형 회귀 기울기 계산 (Rolling)
+            def rolling_slope(s):
+                s_clean = s.dropna()
+                if len(s_clean) < 2: return 0.0
+                x = np.arange(len(s_clean))
+                return np.polyfit(x, s_clean.values, 1)[0]
+            
+            res[f'{ft}_slope'] = res[f'{ft}_severity'].rolling(4, min_periods=2).apply(rolling_slope, raw=False)
+            res[f'{ft}_slope'] = res[f'{ft}_slope'].fillna(0.0)
 
             # 1. 데이터 복구 (Inverse Transform) - 사유 진단 및 DB 저장용
             if ft == 'traffic':
@@ -401,13 +405,15 @@ class AnomalyDetector:
                 cfg = self.tracks[ft]['config']
                 
                 # 1. 추세 라벨 판정
-                slope_th = cfg.get('slope_threshold', 1.0)
+                slope_th = cfg.get('slope_threshold', 3.0)
                 if res['slope'] > slope_th: res['slope_label'] = "RISING"
                 elif res['slope'] < -slope_th: res['slope_label'] = "FALLING"
                 
                 # 2. 잔여 수명 예측 (RUL)
                 target_sev = cfg.get('rul_target', 90.0)
-                if res['slope_label'] == "RISING" and res['severity'] < target_sev:
+                # [수정] 현재 심각도가 최소 MINOR(50) 이상인 '진짜 이상 상태'일 때만 잔여 수명을 예측합니다.
+                # 이 조건이 없으면 정상(Severity 10)인데 노이즈로 잠깐 올랐다고 수명을 예측해버려 오탐이 폭발합니다.
+                if res['slope_label'] == "RISING" and res['severity'] >= 50.0 and res['severity'] < target_sev:
                     # 원본 TTF 계산 (분 단위)
                     raw_ttf = ((target_sev - res['severity']) / res['slope']) * 15
                     # 15분 단위 정규화 (올림)

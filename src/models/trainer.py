@@ -31,12 +31,14 @@ class Trainer:
         self.model = LSTMAutoencoder(self.config).to(self.device)
         
         # [Blackwell 최적화] PyTorch 2.0+ 및 CUDA 환경에서 컴파일 적용 (이식성 유지)
-        if hasattr(torch, "compile") and self.device.type == "cuda":
-            try:
-                print(f"[*] Compiling {feature_type} model for training optimization...")
-                self.model = torch.compile(self.model)
-            except Exception as e:
-                print(f"[!] torch.compile failed for {feature_type}: {e}")
+        # BUG FIX: RuntimeError: Detected that you are using FX to symbolically trace a dynamo-optimized function...
+        # torch.compile과 AMP(Autocast)가 충돌하는 현상이 있으므로 주석 처리 (이미 6초대로 충분히 빠름)
+        # if hasattr(torch, "compile") and self.device.type == "cuda":
+        #     try:
+        #         print(f"[*] Compiling {feature_type} model for training optimization...")
+        #         self.model = torch.compile(self.model)
+        #     except Exception as e:
+        #         print(f"[!] torch.compile failed for {feature_type}: {e}")
 
         self.processor = DataProcessor(feature_type, config=self.config)
         self.paths = PATHS[feature_type]

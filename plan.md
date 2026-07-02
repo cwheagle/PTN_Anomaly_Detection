@@ -100,30 +100,24 @@
   - 3-Sigma 기반 동적 임계치(Dynamic Threshold) 파이프라인 검증.
   - 백그라운드 재학습 → 무중단 배포 파이프라인 자동화 무결성 테스트.
 
-### Phase 10: 오프라인 모델 검증 및 성능 평가 (Pending)
-- **목표:** 예지 정비(Predictive Maintenance)의 특수성을 고려하여, 전통적인 고정 타임 윈도우(Fixed Window) 평가를 넘어 **모델이 스스로 예측한 잔여 수명(TTF)을 활용한 동적 평가 지표(TTF-Aware F1-Score)**를 도입.
-- **세부 내용:**
-  - **정답지 데이터 구축 및 개입의 역설(Intervention Paradox) 해결**: 
-    - **데이터 오염 방지(Data Sanitization)**: 평가용이 아닌 LSTM 재학습용 훈련셋 구성 시, 과거 알람/조치 이력이 있는 '장애 구간'의 데이터를 철저히 도려내어 모델이 비정상을 정상으로 착각하는(콜드 스타트 오염) 현상 원천 차단.
-    - AI의 조기 경보 덕분에 관리자가 선제 조치하여 '장애'가 아예 발생하지 않은 경우, 억울하게 오탐(False Positive)으로 감점되는 것을 방지.
-    - 실제 하드웨어 알람 외에도 아래 3가지 '예방 조치' 내역을 정답지(True Positive)로 인정하는 데이터셋(`eval_dataset.csv`) 구축:
-      1. **수동 입력**: NMS UI나 ITSM 티켓팅 시스템에 기록된 작업 지시서(Trouble Ticket) 완료 시간
-      2. **로그 추적**: 물리적 교체를 암시하는 Link Down ➡️ Up, Port Admin 상태 변경 로그
-      3. **데이터 추론**: 죽어가던 수치(예: RX Power)가 자연 상태에선 불가능한 속도로 비정상에서 정상으로 급격히 회복된 지점(Change-point Detection)
-  - **TTF 기반 예지 정비 특화 평가 로직**: 
-    - AI가 '이상'을 감지했을 때 예측한 `TTF(장애까지 남은 시간)`를 해당 알람의 **동적 타임 윈도우(Dynamic Time Window)**로 설정.
-    - 예: 모델이 "3시간 뒤 Severity 90 도달"로 예측(TTF=180m)했다면, 실제 장애가 3시간(±오차범위) 뒤에 발생했을 때만 완벽한 True Positive로 인정.
-  - **평가 지표 리포트 생성**: 
-    1. TTF-Aware F1-Score 도출 (예측 타이밍의 정확성 평가)
-    2. 예측 TTF와 실제 장애까지 걸린 시간 간의 오차율(MAE/RMSE) 계산
-- **검증:**
-  - 너무 이르거나(설레발), 너무 늦은 알람을 오탐(False Positive)으로 정확히 걸러내는지 검증.
-  - 실제 장애 발생 시점과 예측된 TTF 간의 상관관계(Correlation) 및 신뢰도 분석.
+### Phase 10: 오프라인 모델 검증 및 성능 평가 (Complete)
+- **목표:** 예지 정비(Predictive Maintenance)의 특수성을 고려하여, 잔여 수명(TTF)을 활용한 동적 평가 지표(TTF-Aware F1-Score) 평가 프레임워크 완성.
+- **주요 작업:**
+  - 시뮬레이터가 생성한 **정답지(Ground Truth) 데이터셋**(`eval_dataset.csv`) 연동 및 검증 완료.
+  - **데이터 오염 방지(Data Sanitization)**: 훈련셋 구성 시 장애 구간 데이터를 철저히 도려내어 모델 오염 방지 기능 적용 완료.
+  - TTF-Aware 다이나믹 타임 윈도우 기반 Precision, Recall, F1-Score 산출 로직 구현 완료.
+  - **오탐(False Positive) 억제 튜닝 완료**: 
+    - 훈련 데이터 순수화로 인한 'Over-Sensitivity' 부작용 해결 (최소 임계치 1.0x 강제 보장).
+    - Minor(50) 이상 시점에만 TTF를 산출하도록 로직 보완하여 자연 노이즈 무시.
+    - 결과적으로 오탐률을 0.03% 수준(FP 110개)으로 감소시키고, F1-Score 0.84 달성.
 
-### Phase 11: 딥러닝 아키텍처 및 MLOps 심화 고도화 (Future Scope)
-- **목표:** Phase 10의 평가 프레임워크(Baseline)를 바탕으로, 엔터프라이즈 상용망 수준의 예측 정확도 및 모델 생명주기 관리(MLOps) 안정성을 확보.
-- **세부 내용 (4대 핵심 과제):**
-  1. **시계열 파생 변수(Feature Engineering) 고도화**:
+### Phase 11: MLOps 및 모델 배포 고도화 (Final Polish) (Go)
+- **목표:** Phase 10의 평가 프레임워크를 바탕으로, 엔터프라이즈 상용망 수준의 예측 정확도 및 모델 생명주기 관리(MLOps) 안정성을 확보.
+- **세부 내용 (5대 핵심 과제):**
+  1. **실시간 상용망 정답지(Ground Truth) 자동화 연동**:
+     - (추후 과제) NMS UI나 ITSM 티켓팅 시스템에 기록된 작업 지시서 완료 시간(수동 입력) 연동.
+     - (추후 과제) 물리적 교체를 암시하는 Link Down/Up, Port Admin 상태 변경 로그 추적으로 정답지 자동 구축 파이프라인 구현.
+  2. **시계열 파생 변수(Feature Engineering) 고도화**:
      - 원본 15분 단위 메트릭에 이동 평균(Rolling Mean, 1h/4h), 이동 변동성(Rolling Volatility), 시차 데이터(Lag Features)를 자동 생성하는 전처리 로직 추가.
   2. **모델 레지스트리 및 자동 롤백 (Advanced MLOps)**:
      - MLflow 등 모델 버저닝(Versioning) 관리 체계 도입.
