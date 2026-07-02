@@ -113,32 +113,24 @@
 
 ### Phase 11: MLOps 및 모델 배포 고도화 (Final Polish) (Go)
 - **목표:** Phase 10의 평가 프레임워크를 바탕으로, 엔터프라이즈 상용망 수준의 예측 정확도 및 모델 생명주기 관리(MLOps) 안정성을 확보.
-- **세부 내용 (5대 핵심 과제):**
-  1. **실시간 상용망 정답지(Ground Truth) 자동화 연동**:
-     - (추후 과제) NMS UI나 ITSM 티켓팅 시스템에 기록된 작업 지시서 완료 시간(수동 입력) 연동.
-     - (추후 과제) 물리적 교체를 암시하는 Link Down/Up, Port Admin 상태 변경 로그 추적으로 정답지 자동 구축 파이프라인 구현.
-  2. **시계열 파생 변수(Feature Engineering) 고도화**:
-     - 원본 15분 단위 메트릭에 이동 평균(Rolling Mean, 1h/4h), 이동 변동성(Rolling Volatility), 시차 데이터(Lag Features)를 자동 생성하는 전처리 로직 추가.
-  2. **모델 레지스트리 및 자동 롤백 (Advanced MLOps)**:
-     - MLflow 등 모델 버저닝(Versioning) 관리 체계 도입.
-     - 신규 학습된 모델의 섀도우 배포(Shadow Deployment) 및 성능 하락(Overfitting) 감지 시 이전 버전으로 즉시 복구(Rollback)하는 안전장치 구현.
-  3. **TTF 예측 방식의 딥러닝화 (Multi-Step Forecasting)**:
-     - 기존의 'Severity 수학적 선형 외삽(Trend Slope)' 방식을 탈피.
-     - LSTM 모델 아키텍처에 예측 헤드(Forecasting Head)를 결합하여 미래 시계열 값을 직접 예측(Seq2Seq)하도록 RUL(잔여 수명) 도출 로직 전면 개편.
-  4. **트래픽/장비 군집화 기반 개인화 모델 (Clustered/Federated Models)**:
-     - Core/Edge 등 트래픽 스케일 패턴이 유사한 장비들을 비지도 학습(K-Means 등)으로 묶어 클러스터링.
-     - 단일 Global 모델이 아닌, 각 클러스터 특성에 최적화된 복수의 Local Model 아키텍처로 분리 운영.
-  5. **섀도우 모드 배포 (Shadow Mode Deployment / Canary Release)**:
-     - 오프라인 평가를 통과한 새 모델을 곧바로 실서비스에 투입하지 않고 백그라운드에 숨겨서 라이브망 데이터로 추론(알람 미발송).
-     - 실제 운영자의 조치 이력과 모델의 은밀한 알람이 일치하는지 최소 2~4주간 온라인으로 섀도우 검증 후 Active 전환.
-  6. **알람 피로도 억제 및 중복 제거 (Alert Dampening & Deduplication)**:
-     - 단순 임계치 초과 시 즉각 알람을 쏘는 구조를 탈피하여, 추론 엔진 단에 '쿨다운(Cooldown)' 방파제 추가.
-     - "3회 연속(45분간) 임계치 초과 시에만 최초 알람 발생", "동일 포트 알람은 조치 전까지 추가 갱신 무시" 등의 상태 기반 알람 통제 로직 구현.
+- **세부 내용 (핵심 과제):**
+  1. **알람 피로도 억제 및 심각도별 차등 쿨다운 (Alert Dampening)**:
+     - 단순 임계치 초과 시 즉각 알람을 쏘는 구조를 탈피하여 추론 엔진 단에 방파제 추가.
+     - CRITICAL(즉시), MAJOR(2회/30분), MINOR(3회/45분) 등 심각도에 따른 차등 지속성 검증 로직 구현.
+  2. **실시간 상용망 정답지(Ground Truth) 자동화 연동**:
+     - (추후 과제) NMS UI 수동 입력 및 Link Down/Up 로그 추적으로 정답지 자동 구축.
+  3. **시계열 파생 변수(Feature Engineering) 고도화**:
+     - 원본 15분 단위 메트릭에 이동 평균(1h/4h), 이동 변동성, 시차 데이터(Lag) 자동 생성.
+  4. **모델 레지스트리 및 자동 롤백 (Advanced MLOps)**:
+     - MLflow 등 모델 버저닝 및 성능 하락 감지 시 자동 롤백(Rollback) 체계 도입.
+  5. **섀도우 모드 배포 (Shadow Mode Deployment)**:
+     - 오프라인 평가 통과 모델을 백그라운드에서 은밀하게 검증 후 Active 전환.
+  6. **트래픽/장비 군집화 기반 개인화 모델 (Clustered Models)**:
+     - Core/Edge 등 패턴이 유사한 장비들을 K-Means로 클러스터링하여 Local Model로 분리 운영.
   7. **재앙적 망각 방지 (Context-Aware Drift Detection)**:
-     - 단순 MSE 점수 증가에 따른 무조건적인 재학습으로 인해 모델이 과거의 정상 패턴을 잊어버리는(Catastrophic Forgetting) 현상 방지.
-     - 휴일 트래픽 폭주, 정기 점검 등 외부 이벤트를 컨텍스트로 인지하여 재학습 트리거를 똑똑하게 차단(Smart Filter)하는 로직 적용.
+     - 휴일 트래픽 폭주 등 외부 이벤트를 필터링하여 불필요한 자동 재학습 방지.
 - **검증:**
-  - Phase 10의 `evaluate_model.py`를 활용하여 4가지 기능 적용 전/후의 **TTF-Aware F1-Score 향상폭 수학적 증명**.
+  - Phase 10의 `evaluate_model.py`를 활용하여 **심각도별 쿨다운 도입 후 Precision 90% 이상 향상** 검증.
 
 ### Phase 12: 대용량 분산 처리 및 고가용성 아키텍처 (Scalability & HA)
 - **목표:** 전국망 단위(10만 대 이상)의 노드를 지연 없이 실시간으로 분석할 수 있는 상용 엔터프라이즈 인프라 구축.
