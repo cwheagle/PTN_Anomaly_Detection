@@ -136,19 +136,7 @@
 }
 ```
 
-#### 2.4.2 추론 설정 업데이트 (재학습 없음)
-- **Endpoint**: `POST /api/model/inference-config`
-- **Description**: 모델 재학습 없이 임계값이나 감도 설정만 즉시 업데이트합니다.
-- **Query Params**: `ft=traffic|optical`
-- **Body**:
-```json
-{
-  "threshold": 0.15,
-  "slope_threshold": 2.0
-}
-```
-
-#### 2.4.3 모델 학습 실행
+#### 2.4.2 모델 학습 실행
 - **Endpoint**: `POST /api/model/train`
 - **Description**: 사용자가 지정한 훈련 파라미터와 데이터 기간을 사용하여 모델을 재학습합니다. (백그라운드 실행)
 - **Query Params**: 
@@ -168,7 +156,7 @@
 }
 ```
 
-#### 2.4.4 모델 학습 중지
+#### 2.4.3 모델 학습 중지
 - **Endpoint**: `POST /api/model/train/stop`
 - **Description**: 현재 실행 중인 모델 학습 작업을 즉시 중단합니다.
 - **Query Params**: `ft=traffic|optical`

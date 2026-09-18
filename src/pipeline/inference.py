@@ -20,6 +20,9 @@ class AnomalyDetector:
         # [Phase 8] RCA 엔진 초기화 (Feature Contribution + 도메인 룰 기반 진단)
         self.rca_engine = RCAEngine()
 
+        # [Phase 11] Alert Dampening 상태 관리 딕셔너리
+        self.alert_states = {} # {(ip, cid, lid): {'level': 0, 'count': 0}}
+
         # 초기 구동 시 저장된 모델이 있으면 로드
         for ft in ['traffic', 'optical']:
             self.reload_model(ft)
@@ -29,7 +32,24 @@ class AnomalyDetector:
         if ft not in self.tracks: return False
         
         p = PATHS[ft]
+        model_dir = os.path.dirname(p['model'])
+        registry_path = os.path.join(model_dir, f"{ft}_registry.json")
+        
         meta_path = p['model'].replace('.pth', '.json')
+        
+        # [Phase 11] 레지스트리 기반 메타데이터 로드
+        if os.path.exists(registry_path):
+            try:
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+                active_ver = registry.get("active_version")
+                if active_ver:
+                    for v in registry.get("versions", []):
+                        if v["version"] == active_ver and "config_path" in v:
+                            meta_path = os.path.join(model_dir, v["config_path"])
+                            break
+            except Exception as e:
+                print(f"[!] Error reading registry config for {ft}: {e}")
         
         if os.path.exists(meta_path):
             try:
@@ -47,14 +67,36 @@ class AnomalyDetector:
     def reload_model(self, ft):
         """학습 완료 후 또는 초기화 시 파일로부터 모델 가중치, 스케일러, 설정을 모두 로드"""
         p = PATHS[ft]
-        if not os.path.exists(p['model']):
-            print(f"[*] {ft.capitalize()} model file not found, skipping load.")
+        model_dir = os.path.dirname(p['model'])
+        registry_path = os.path.join(model_dir, f"{ft}_registry.json")
+        
+        actual_model_path = p['model']
+        actual_scaler_path = p['scaler']
+        meta_path = p['model'].replace('.pth', '.json')
+        
+        # [Phase 11] 레지스트리에서 Active 모델 탐색
+        if os.path.exists(registry_path):
+            try:
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+                active_ver = registry.get("active_version")
+                if active_ver:
+                    for v in registry.get("versions", []):
+                        if v["version"] == active_ver:
+                            actual_model_path = os.path.join(model_dir, v["model_path"])
+                            actual_scaler_path = os.path.join(os.path.dirname(p['scaler']), v["scaler_path"])
+                            meta_path = os.path.join(model_dir, v["config_path"])
+                            break
+            except Exception as e:
+                print(f"[!] Error reading registry for {ft}: {e}")
+
+        if not os.path.exists(actual_model_path):
+            print(f"[*] {ft.capitalize()} model file not found at {actual_model_path}, skipping load.")
             return False
 
-        print(f"[*] (Re)loading {ft} model from disk...")
+        print(f"[*] (Re)loading {ft} model from {actual_model_path}...")
         try:
             # 설정 파일(.json) 로드
-            meta_path = p['model'].replace('.pth', '.json')
             cfg = MODEL_CONFIG.copy()
             th = None
             
@@ -65,10 +107,16 @@ class AnomalyDetector:
                     th = meta.get('threshold', cfg.get('threshold'))
                     print(f"[*] Loaded metadata for {ft} model (Trained at: {meta.get('trained_at')})")
 
+            # 프로세서 우선 초기화 (파생 변수 차원 확인)
+            proc = DataProcessor(ft, config=cfg)
+            if not proc.load_scaler(actual_scaler_path): 
+                print(f"[!] Failed to load scaler for {ft}")
+                return False
+
             # 모델 인스턴스 생성 및 가중치 로드
-            cfg['input_dim'] = len(FEATURE_GROUPS[ft])
+            cfg['input_dim'] = len(proc.extended_feature_cols)
             model = LSTMAutoencoder(cfg).to(self.device)
-            state_dict = torch.load(p['model'], map_location=self.device, weights_only=True)
+            state_dict = torch.load(actual_model_path, map_location=self.device, weights_only=True)
             new_state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
             model.load_state_dict(new_state_dict)
             
@@ -82,12 +130,6 @@ class AnomalyDetector:
             #     except: pass
             
             model.eval()
-            
-            # 프로세서 및 스케일러 리로드
-            proc = DataProcessor(ft, config=cfg)
-            if not proc.load_scaler(p['scaler']): 
-                print(f"[!] Failed to load scaler for {ft}")
-                return False
             
             # 메모리 교체
             self.tracks[ft] = {'model': model, 'proc': proc, 'th': th if th is not None else 0.1, 'config': cfg}
@@ -109,6 +151,7 @@ class AnomalyDetector:
         """특정 트랙(Traffic/Optical)의 데이터를 분석하여 이상 점수 산출"""
         if ft not in self.tracks: return None
         
+        base_ft = 'traffic' if ft.startswith('traffic') else ft
         track = self.tracks[ft]
         df_clean = track['proc'].preprocess(df, is_train=False)
         if df_clean is None: return None
@@ -154,6 +197,12 @@ class AnomalyDetector:
                 # 노이즈 방지용 글로벌 하한선 (학습된 전역 임계치의 100% 보장)
                 # 과거 변동성이 너무 없어서 dyn_th가 0에 수렴하더라도 최소한 글로벌 임계치는 넘겨야 이상으로 판별
                 min_th = track['th'] * 1.0
+                
+                # [Fix] 만약 과거(past)부터 이미 에러가 지속되어 past_mean이 min_th를 초과했다면, 
+                # 비정상을 '새로운 정상'으로 간주해버리는 치명적 오류(False Negative)가 발생함.
+                # 따라서 past_mean이 min_th를 넘는 경우, dyn_th의 상한을 min_th의 1.2배 등으로 제한.
+                dyn_th = np.where(past_mean > min_th, np.minimum(dyn_th, min_th * 1.2), dyn_th)
+                
                 final_threshold = np.maximum(dyn_th, min_th)
 
                 # [Phase 8] Feature별 기여도 계산용 NumPy 변환
@@ -161,17 +210,27 @@ class AnomalyDetector:
                 outputs_np = outputs.cpu().numpy()
 
             res = df_clean.loc[indices].copy()
-            res[f'{ft}_score'] = mse
-            res[f'is_{ft}_anomaly'] = mse > final_threshold
-            res[f'{ft}_threshold'] = final_threshold
+            res[f'{base_ft}_score'] = mse
+            res[f'is_{base_ft}_anomaly'] = mse > final_threshold
+            res[f'{base_ft}_threshold'] = final_threshold
 
             # [Phase 8] Feature Contribution 계산 (포트 단위 배치 전체에 대해 평균)
-            feature_names = FEATURE_GROUPS[ft]
+            feature_names = track['proc'].extended_feature_cols
             fc_analyzer = FeatureContributionAnalyzer(feature_names)
+            
             # 포트 배치(seqs) 전체 평균 기여도 산출
-            contributions = fc_analyzer.compute(inputs_np, outputs_np)
+            raw_contributions = fc_analyzer.compute(inputs_np, outputs_np)
+            
+            # [Phase 11] 기여도 병합: 파생 변수의 기여도를 원본 변수에 합산
+            base_contributions = {col: 0.0 for col in FEATURE_GROUPS[ft]}
+            for k, v in raw_contributions.items():
+                for base in FEATURE_GROUPS[ft]:
+                    if k.startswith(base):
+                        base_contributions[base] += v
+                        break
+                        
             # JSON 직렬화 가능한 문자열로 저장
-            contributions_json = json.dumps(contributions, ensure_ascii=False)
+            contributions_json = json.dumps(base_contributions, ensure_ascii=False)
             
             # 심각도 점수 산출 로직 (0~100 정규화) - Vectorized 적용 (Phase 9)
             def calculate_severity(mse_arr, threshold_arr):
@@ -184,7 +243,7 @@ class AnomalyDetector:
                 # threshold가 0 이하인 예외 케이스 처리
                 return np.where(threshold_arr <= 0, 0.0, sev)
 
-            res[f'{ft}_severity'] = calculate_severity(res[f'{ft}_score'].values, res[f'{ft}_threshold'].values)
+            res[f'{base_ft}_severity'] = calculate_severity(res[f'{base_ft}_score'].values, res[f'{base_ft}_threshold'].values)
             
             # [Phase 6] 추세 분석 (Slope): 포트별 점수 변화율 산출
             # 최근 4시점을 이용해 선형 회귀 기울기 계산 (Rolling)
@@ -194,19 +253,19 @@ class AnomalyDetector:
                 x = np.arange(len(s_clean))
                 return np.polyfit(x, s_clean.values, 1)[0]
             
-            res[f'{ft}_slope'] = res[f'{ft}_severity'].rolling(4, min_periods=2).apply(rolling_slope, raw=False)
-            res[f'{ft}_slope'] = res[f'{ft}_slope'].fillna(0.0)
+            res[f'{base_ft}_slope'] = res[f'{base_ft}_severity'].rolling(4, min_periods=2).apply(rolling_slope, raw=False)
+            res[f'{base_ft}_slope'] = res[f'{base_ft}_slope'].fillna(0.0)
 
             # 1. 데이터 복구 (Inverse Transform) - 사유 진단 및 DB 저장용
-            if ft == 'traffic':
+            if base_ft == 'traffic':
                 res['tx_packet'] = np.expm1(res['tx_packet']).astype(int)
                 res['rx_packet'] = np.expm1(res['rx_packet']).astype(int)
                 res['error_packet'] = np.expm1(res['error_packet']).astype(int)
 
             # 2. 상세 사유 진단 로직 (복구된 수치 사용)
             def get_detailed_reason(row):
-                if not row[f'is_{ft}_anomaly']: return "NORMAL"
-                if ft == 'traffic':
+                if not row[f'is_{base_ft}_anomaly']: return "NORMAL"
+                if base_ft == 'traffic':
                     err = int(row.get('error_packet', 0))
                     tx = int(row.get('tx_packet', 0))
                     rx = int(row.get('rx_packet', 0))
@@ -214,26 +273,26 @@ class AnomalyDetector:
                     if err > 0: reason += f", Err:{err}"
                     reason += ")"
                     return reason
-                elif ft == 'optical':
+                elif base_ft == 'optical':
                     rx = row.get('rx_avg_power', 0)
                     tx = row.get('tx_avg_power', 0)
                     return f"Optical (RX:{rx:.2f}, TX:{tx:.2f})"
                 return "Anomaly"
             
-            res[f'{ft}_reason'] = res.apply(get_detailed_reason, axis=1)
+            res[f'{base_ft}_reason'] = res.apply(get_detailed_reason, axis=1)
 
             # [Phase 9] RCA 진단명 생성은 통합 단계(detect)로 연기하고 기여도만 저장
             res['feature_contribution'] = contributions_json
 
             # 3. 최종 컬럼 정리 (DB 저장용)
             cols_to_keep = ['occur_date', 'ip_addr', 'cid', 'lid', 
-                           f'{ft}_score', f'{ft}_severity', f'{ft}_slope', f'is_{ft}_anomaly', f'{ft}_threshold', f'{ft}_reason',
+                           f'{base_ft}_score', f'{base_ft}_severity', f'{base_ft}_slope', f'is_{base_ft}_anomaly', f'{base_ft}_threshold', f'{base_ft}_reason',
                            'feature_contribution']
 
             
-            if ft == 'traffic':
+            if base_ft == 'traffic':
                 cols_to_keep.extend(['tx_packet', 'rx_packet', 'error_packet'])
-            elif ft == 'optical':
+            elif base_ft == 'optical':
                 cols_to_keep.extend(['tx_avg_power', 'rx_avg_power'])
                 
             # [Phase 9] 추가된 RCA 컨텍스트 지표(Ratio, Slope) 유지
@@ -278,8 +337,9 @@ class AnomalyDetector:
         df_traffic = append_rca_metrics(df_traffic, 'traffic')
         df_optical = append_rca_metrics(df_optical, 'optical')
 
-        res_t = self._analyze_track(df_traffic, 'traffic') if df_traffic is not None else None
-        res_o = self._analyze_track(df_optical, 'optical') if df_optical is not None else None
+        res_t = self._analyze_track(df_traffic, 'traffic') if df_traffic is not None and not df_traffic.empty else None
+                
+        res_o = self._analyze_track(df_optical, 'optical') if df_optical is not None and not df_optical.empty else None
         
         if res_t is None and res_o is None: return None
         
@@ -390,11 +450,12 @@ class AnomalyDetector:
             ft = 'traffic' if t_sev >= o_sev else 'optical'
             
             # 기본 지표 추출
+            base_ft = ft
             res = {
-                'anomaly_score': row.get(f'{ft}_score', 0.0),
-                'threshold': row.get(f'{ft}_threshold', 0.0),
-                'slope': row.get(f'{ft}_slope', 0.0),
-                'severity': row.get(f'{ft}_severity', 0.0),
+                'anomaly_score': row.get(f'{base_ft}_score', 0.0),
+                'threshold': row.get(f'{base_ft}_threshold', 0.0),
+                'slope': row.get(f'{base_ft}_slope', 0.0),
+                'severity': row.get(f'{base_ft}_severity', 0.0),
                 'slope_label': "STABLE",
                 'ttf_minutes': None,
                 'expected_fatal_time': None
@@ -405,15 +466,19 @@ class AnomalyDetector:
                 cfg = self.tracks[ft]['config']
                 
                 # 1. 추세 라벨 판정
-                slope_th = cfg.get('slope_threshold', 3.0)
+                slope_th = cfg.get('slope_threshold', 0.5)
+                
                 if res['slope'] > slope_th: res['slope_label'] = "RISING"
                 elif res['slope'] < -slope_th: res['slope_label'] = "FALLING"
                 
                 # 2. 잔여 수명 예측 (RUL)
                 target_sev = cfg.get('rul_target', 90.0)
                 # [수정] 현재 심각도가 최소 MINOR(50) 이상인 '진짜 이상 상태'일 때만 잔여 수명을 예측합니다.
-                # 이 조건이 없으면 정상(Severity 10)인데 노이즈로 잠깐 올랐다고 수명을 예측해버려 오탐이 폭발합니다.
-                if res['slope_label'] == "RISING" and res['severity'] >= 50.0 and res['severity'] < target_sev:
+                if res['severity'] >= target_sev:
+                    # 이미 장애 임계치 도달 (TTF = 0)
+                    res['ttf_minutes'] = 0
+                    res['expected_fatal_time'] = row['occur_date']
+                elif res['slope_label'] == "RISING" and res['severity'] >= 50.0:
                     # 원본 TTF 계산 (분 단위)
                     raw_ttf = ((target_sev - res['severity']) / res['slope']) * 15
                     # 15분 단위 정규화 (올림)
@@ -431,6 +496,59 @@ class AnomalyDetector:
         alarm_data = final['severity'].apply(self._get_alarm_info)
         final['alarm_level'] = alarm_data.apply(lambda x: x[0])
         final['alarm_label'] = alarm_data.apply(lambda x: x[1])
+
+        # [Phase 11] Alert Dampening (알람 피로도 억제)
+        # 포트별 시간순으로 정렬 후 상태 추적
+        final = final.sort_values(['ip_addr', 'cid', 'lid', 'occur_date'])
+        
+        def apply_dampening(row):
+            port_key = (row['ip_addr'], row['cid'], row['lid'])
+            current_level = row['alarm_level']
+            current_label = row['alarm_label']
+            is_any = row.get('is_traffic_anomaly', False) or row.get('is_optical_anomaly', False)
+            
+            if port_key not in self.alert_states:
+                self.alert_states[port_key] = {'level': 0, 'count': 0}
+                
+            state = self.alert_states[port_key]
+            
+            if current_level == 0:
+                # 정상 상태면 카운트 리셋
+                state['level'] = 0
+                state['count'] = 0
+                return pd.Series([0, "NORMAL", False])
+                
+            # 심각도가 이전과 같거나 커지면 카운트 증가
+            if current_level >= state['level']:
+                state['level'] = current_level
+                state['count'] += 1
+            else:
+                # 심각도가 낮아지면 새로 카운트 시작
+                state['level'] = current_level
+                state['count'] = 1
+                
+            # 쿨다운 통과 여부 검사
+            # CRITICAL (level 3) -> 즉시 (count >= 1)
+            # MAJOR (level 2) -> 2회 연속 (count >= 2)
+            # MINOR (level 1) -> 3회 연속 (count >= 3)
+            passed = False
+            if state['level'] == 3 and state['count'] >= 1:
+                passed = True
+            elif state['level'] == 2 and state['count'] >= 2:
+                passed = True
+            elif state['level'] == 1 and state['count'] >= 3:
+                passed = True
+                
+            if passed:
+                return pd.Series([current_level, current_label, is_any])
+            else:
+                # 통과 못하면 알람 억제 (억제 상태임을 라벨로 표시)
+                return pd.Series([0, "NORMAL (DAMPENED)", False])
+
+        dampened = final.apply(apply_dampening, axis=1)
+        final['alarm_level'] = dampened[0]
+        final['alarm_label'] = dampened[1]
+        final['is_anomaly'] = dampened[2]
 
         # [표준화] DB 확장형 스키마 및 CSV 저장 형식을 확장
         standard_cols = [

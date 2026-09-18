@@ -77,8 +77,8 @@ class RCATrendDataGenerator(DataGenerator):
                 node_key = f"{ip}_{cid}_{lid}"
                 
                 # 매우 낮은 확률(약 0.05%)로 15분마다 포트 하나씩 RCA 시나리오에 빠짐
-                # 100개 포트 기준 하루(96번)에 약 5건의 장애 발생
-                if random.random() < 0.0005: 
+                # 100개 포트 기준 15분마다 약 1건의 장애 발생 (테스트용 황금 비율 1%)
+                if random.random() < 0.01: 
                     self.trigger_trend_anomaly(dt, node_key)
                 elif random.random() < 0.005: # 장비 교체 등 자연 복구 확률
                     self.reset_trend(node_key)

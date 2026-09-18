@@ -66,11 +66,11 @@ class RuleTable:
         """
         required = {"id", "track", "priority", "diagnosis", "action"}
         if not required.issubset(rule_dict.keys()):
-            logger.error(f"[RCA Engine] Missing required fields. Rule: {rule_dict}")
+            print(f"[RCA Engine] Missing required fields. Rule: {rule_dict}")
             return False
             
         if rule_dict["track"] not in ("traffic", "optical", "integrated"):
-            logger.error(f"[RCA Engine] Invalid track: {rule_dict.get('track')}")
+            print(f"[RCA Engine] Invalid track: {rule_dict.get('track')}")
             return False
 
         # 중복 id 체크

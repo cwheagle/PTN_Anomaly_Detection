@@ -253,40 +253,7 @@
               </div>
             </div>
 
-            <!-- 2. Inference Configuration (Bottom) -->
-            <div class="space-y-8">
-              <div class="flex items-center gap-3">
-                <div class="w-2 h-5 bg-emerald-500 rounded-full"></div>
-                <h4 class="text-sm font-bold text-slate-200 uppercase tracking-wider">Inference Configuration</h4>
-              </div>
-              
-              <div class="space-y-8 bg-slate-800/30 p-6 rounded-xl border border-slate-700/50">
-                <div class="space-y-3">
-                  <div class="flex justify-between items-center">
-                    <label class="text-xs text-slate-400 uppercase font-bold tracking-wider">Anomaly Threshold (MSE)</label>
-                    <span class="text-sm font-mono text-emerald-400 font-bold bg-emerald-500/10 px-2 py-1 rounded">{{ infConfigs[ft]?.threshold?.toFixed(4) }}</span>
-                  </div>
-                  <input type="range" v-model.number="infConfigs[ft].threshold" min="0.0001" max="0.5" step="0.0001"
-                         class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500" />
-                </div>
 
-                <div class="space-y-3">
-                  <div class="flex justify-between items-center">
-                    <label class="text-xs text-slate-400 uppercase font-bold tracking-wider">Anomaly Trend Sensitivity (Slope)</label>
-                    <span class="text-sm font-mono text-emerald-400 font-bold bg-emerald-500/10 px-2 py-1 rounded">{{ infConfigs[ft]?.slope_threshold?.toFixed(1) }}</span>
-                  </div>
-                  <input type="range" v-model.number="infConfigs[ft].slope_threshold" min="0.1" max="10.0" step="0.1"
-                         class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500" />
-                </div>
-
-                <button @click="handleSaveInference(ft as string)"
-                        :disabled="!infDirty[ft as string]"
-                        :class="['w-full py-3.5 rounded-xl text-sm font-bold transition-all border mt-4', 
-                                 infDirty[ft as string] ? 'bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border-emerald-500/30 shadow-lg shadow-emerald-500/10' : 'bg-slate-800 text-slate-600 border-slate-700 cursor-not-allowed']">
-                  Save
-                </button>
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -314,10 +281,7 @@ const isTraining = reactive<Record<string, boolean>>({
   optical: false
 })
 
-const infConfigs = ref<Record<string, any>>({
-  traffic: { threshold: 0.1, slope_threshold: 3.0 },
-  optical: { threshold: 0.1, slope_threshold: 3.0 }
-})
+
 
 const trainConfigs = ref<Record<string, any>>({
   traffic: { epochs: 100, learning_rate: 0.001, batch_size: 32, threshold_percentile: 99.99, patience: 10 },
@@ -335,10 +299,7 @@ const dateConfigs = ref<Record<string, any>>({
   optical: { train_start: getPastDate(37), train_end: getPastDate(7), test_start: getPastDate(7), test_end: getPastDate(0) }
 })
 
-const infDirty = reactive<Record<string, boolean>>({
-  traffic: false,
-  optical: false
-})
+
 
 const notification = reactive({
   show: false,
@@ -377,32 +338,14 @@ const handleCheckDrift = async () => {
 
 watch(() => store.modelStatus, (newVal) => {
   if (newVal.traffic) {
-    infConfigs.value.traffic = { ...newVal.traffic.inference_config }
     trainConfigs.value.traffic = { ...newVal.traffic.training_config }
     isTraining.traffic = newVal.traffic.training?.is_training || false
-    infDirty.traffic = false
   }
   if (newVal.optical) {
-    infConfigs.value.optical = { ...newVal.optical.inference_config }
     trainConfigs.value.optical = { ...newVal.optical.training_config }
     isTraining.optical = newVal.optical.training?.is_training || false
-    infDirty.optical = false
   }
 }, { deep: true, immediate: true })
-
-watch(() => infConfigs.value.traffic, () => { infDirty.traffic = true }, { deep: true })
-watch(() => infConfigs.value.optical, () => { infDirty.optical = true }, { deep: true })
-
-const handleSaveInference = async (ft: string) => {
-  try {
-    await store.updateInferenceConfig(ft, infConfigs.value[ft])
-    showNotification(`${ft.toUpperCase()} inference configuration applied.`)
-    infDirty[ft] = false
-  } catch (err: any) {
-    const errMsg = err.response?.data?.detail || err.message || `Failed to update ${ft} configuration.`
-    showNotification(errMsg, 'error')
-  }
-}
 let statusTimer: ReturnType<typeof setInterval> | null = null
 
 const stopPolling = () => {

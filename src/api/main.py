@@ -149,17 +149,48 @@ async def root():
 
 # --- 모델 관리 API ---
 
+def get_active_model_info(ft: str):
+    p = PATHS.get(ft, {})
+    if not p: return "", ""
+    base_model = p.get('model', '')
+    if not base_model: return "", ""
+    
+    model_dir = os.path.dirname(base_model)
+    registry_path = os.path.join(model_dir, f"{ft}_registry.json")
+    
+    actual_model = base_model
+    actual_meta = base_model.replace('.pth', '.json')
+    
+    if os.path.exists(registry_path):
+        try:
+            with open(registry_path, 'r') as f:
+                registry = json.load(f)
+            active_ver = registry.get("active_version")
+            if active_ver:
+                for v in registry.get("versions", []):
+                    if v["version"] == active_ver:
+                        if "model_path" in v:
+                            actual_model = os.path.join(model_dir, v["model_path"])
+                        if "config_path" in v:
+                            actual_meta = os.path.join(model_dir, v["config_path"])
+                        break
+        except:
+            pass
+    return actual_model, actual_meta
+
 @app.get("/api/model/status")
 async def get_model_status():
     """현재 모델들의 학습 상태, 훈련 설정, 추론 설정을 구분하여 조회"""
     status = {}
     for ft in ['traffic', 'optical']:
-        p = PATHS[ft]
-        meta_path = p['model'].replace('.pth', '.json')
+        target_ft = 'traffic_heavy' if ft == 'traffic' else ft
+        actual_model, meta_path = get_active_model_info(target_ft)
+        if not actual_model:
+            continue
         
         # 기본 구조 정의
         info = {
-            "exists": os.path.exists(p['model']),
+            "exists": os.path.exists(actual_model),
             "training": training_status.get(ft, {"is_training": False}),
             "last_trained": None,
             "samples_used": 0,
@@ -203,41 +234,7 @@ async def get_model_status():
         status[ft] = info
     return status
 
-@app.post("/api/model/inference-config")
-async def update_inference_config(ft: str = Query(..., regex="^(traffic|optical)$"), settings: dict = Body(...)):
-    """모델 재학습 없이 추론 설정(임계치 등)만 즉시 업데이트"""
-    p = PATHS[ft]
-    meta_path = p['model'].replace('.pth', '.json')
-    
-    if not os.path.exists(meta_path):
-        raise HTTPException(status_code=404, detail=f"No model found for {ft}. Train first.")
-        
-    try:
-        with open(meta_path, 'r') as f:
-            meta = json.load(f)
-        
-        # threshold는 최상위와 config 내부 모두 업데이트 (호환성)
-        if "threshold" in settings:
-            meta["threshold"] = settings["threshold"]
-            if "config" not in meta: meta["config"] = {}
-            meta["config"]["threshold"] = settings["threshold"]
-            
-        # 기타 설정들 config에 반영
-        for key, value in settings.items():
-            if key != "threshold":
-                if "config" not in meta: meta["config"] = {}
-                meta["config"][key] = value
-            
-        with open(meta_path, 'w') as f:
-            json.dump(meta, f, indent=4)
-            
-        # 메모리에 즉시 반영 (실시간 리로드)
-        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
-            scheduler_instance.detector.reload_config(ft)
-            
-        return {"status": "success", "updated_config": settings}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
     """백그라운드 학습 실행 (스레드에서 실행되어 이벤트 루프 차단 방지)"""
@@ -262,13 +259,12 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
             "val_loss": val_loss
         })
 
-    # Trainer 생성 및 등록
-    trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress)
-    active_trainers[ft] = trainer
+    # Trainer 생성 및 중지 관리를 위한 래퍼
+    active_trainers[ft] = {"stop_requested": False, "trainers": []}
 
     try:
         # 데이터 수집 전 중지 요청 확인
-        if trainer.stop_requested:
+        if active_trainers[ft]["stop_requested"]:
             print(f"[*] [BG] {ft} training cancelled before data collection.")
             return
 
@@ -279,11 +275,11 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
             test_start=date_params['test_start'],
             test_end=date_params['test_end'],
             feature_type=ft,
-            stop_checker=lambda: trainer.stop_requested
+            stop_checker=lambda: active_trainers[ft]["stop_requested"]
         )
         
         # 데이터 수집 후 중지 요청 확인
-        if trainer.stop_requested:
+        if active_trainers[ft]["stop_requested"]:
             print(f"[*] [BG] {ft} training cancelled after data collection.")
             return
 
@@ -297,14 +293,23 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
             return
 
         # 학습 실행
-        if trainer.train():
+        trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress)
+        active_trainers[ft]["trainers"] = [trainer]
+        
+        if active_trainers[ft]["stop_requested"]: return
+        success = trainer.train()
+        early_stopped = trainer.early_stopped
+        reload_fts = [ft]
+
+        if success:
             msg = "Model training complete."
-            if trainer.early_stopped:
+            if early_stopped:
                 msg = f"Training finished early at epoch {training_status[ft]['current_epoch']} (Optimal weights saved)."
             
             # [Auto-Reload] 실시간 엔진에 새 모델 즉시 반영
             if scheduler_instance and hasattr(scheduler_instance, 'detector'):
-                scheduler_instance.detector.reload_model(ft)
+                for r_ft in reload_fts:
+                    scheduler_instance.detector.reload_model(r_ft)
                 msg += " (In-memory model updated)"
                 
             training_status[ft]["success_msg"] = msg
@@ -358,11 +363,14 @@ async def train_model(
 @app.post("/api/model/train/stop")
 async def stop_training(ft: str = Query(..., regex="^(traffic|optical)$")):
     """현재 진행 중인 모델 학습 강제 중지"""
-    trainer = active_trainers.get(ft)
-    if not trainer:
+    task_info = active_trainers.get(ft)
+    if not task_info:
         return {"status": "ignored", "message": f"No active training task found for {ft}."}
     
-    trainer.stop()
+    task_info["stop_requested"] = True
+    for trainer in task_info["trainers"]:
+        trainer.stop()
+        
     training_status[ft]["last_error"] = "Training stopped by user."
     return {"status": "success", "message": f"Stop request sent to {ft} trainer."}
 

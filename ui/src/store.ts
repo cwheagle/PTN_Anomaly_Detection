@@ -137,16 +137,7 @@ export const store = reactive({
     }
   },
 
-  async updateInferenceConfig(ft: string, settings: any) {
-    try {
-      const res = await axios.post(`/api/model/inference-config?ft=${ft}`, settings)
-      await this.fetchModelStatus()
-      return res.data
-    } catch (err) {
-      console.error('Failed to update inference config', err)
-      throw err
-    }
-  },
+
 
   async trainModel(ft: string, training_config: any = {}, date_params: any = {}) {
     try {

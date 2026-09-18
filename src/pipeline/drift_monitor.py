@@ -11,10 +11,36 @@ class DriftMonitor:
         self.db = DBConnector()
         self.drift_factor = drift_factor
         
+    def _get_active_meta_path(self, ft: str):
+        p = PATHS.get(ft, {})
+        if not p: return ""
+        base_model = p.get('model', '')
+        if not base_model: return ""
+        
+        model_dir = os.path.dirname(base_model)
+        registry_path = os.path.join(model_dir, f"{ft}_registry.json")
+        actual_meta = base_model.replace('.pth', '.json')
+        
+        if os.path.exists(registry_path):
+            try:
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+                active_ver = registry.get("active_version")
+                if active_ver:
+                    for v in registry.get("versions", []):
+                        if v["version"] == active_ver and "config_path" in v:
+                            actual_meta = os.path.join(model_dir, v["config_path"])
+                            break
+            except: pass
+        return actual_meta
+
     def _get_baseline_mse(self, feature_type):
         """저장된 메타데이터에서 기준 MSE(val_loss 또는 threshold/10)를 가져옴"""
-        meta_path = PATHS[feature_type]['model'].replace('.pth', '.json')
-        if not os.path.exists(meta_path):
+        return self._get_single_baseline(feature_type)
+
+    def _get_single_baseline(self, ft):
+        meta_path = self._get_active_meta_path(ft)
+        if not meta_path or not os.path.exists(meta_path):
             return None
             
         with open(meta_path, 'r') as f:

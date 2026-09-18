@@ -25,22 +25,12 @@ class Trainer:
         if config_override:
             self.config.update(config_override)
         
-        self.config['input_dim'] = len(FEATURE_GROUPS[feature_type])
-        
-        # 2. 주입된 설정값으로 모델 및 프로세서 초기화
-        self.model = LSTMAutoencoder(self.config).to(self.device)
-        
-        # [Blackwell 최적화] PyTorch 2.0+ 및 CUDA 환경에서 컴파일 적용 (이식성 유지)
-        # BUG FIX: RuntimeError: Detected that you are using FX to symbolically trace a dynamo-optimized function...
-        # torch.compile과 AMP(Autocast)가 충돌하는 현상이 있으므로 주석 처리 (이미 6초대로 충분히 빠름)
-        # if hasattr(torch, "compile") and self.device.type == "cuda":
-        #     try:
-        #         print(f"[*] Compiling {feature_type} model for training optimization...")
-        #         self.model = torch.compile(self.model)
-        #     except Exception as e:
-        #         print(f"[!] torch.compile failed for {feature_type}: {e}")
-
+        # 2. 주입된 설정값으로 데이터 프로세서 우선 초기화 (파생 변수 차원 확인 목적)
         self.processor = DataProcessor(feature_type, config=self.config)
+        self.config['input_dim'] = len(self.processor.extended_feature_cols)
+        
+        # 3. 늘어난 차원(input_dim)을 반영하여 모델 초기화
+        self.model = LSTMAutoencoder(self.config).to(self.device)
         self.paths = PATHS[feature_type]
         
         self.criterion = nn.MSELoss()
@@ -193,12 +183,36 @@ class Trainer:
                 return False
         
         # 3. 모델 및 스케일러 저장
-        os.makedirs(os.path.dirname(self.paths['model']), exist_ok=True)
+        model_dir = os.path.dirname(self.paths['model'])
+        os.makedirs(model_dir, exist_ok=True)
+        
+        # [Phase 11] Lightweight Model Registry (버전 관리)
+        registry_path = os.path.join(model_dir, f"{self.feature_type}_registry.json")
+        registry = {"active_version": None, "versions": []}
+        if os.path.exists(registry_path):
+            try:
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+            except: pass
+            
+        next_ver = len(registry["versions"]) + 1
+        new_version_id = f"v{next_ver}"
+        
+        # 파일 경로 버저닝
+        base_model = os.path.basename(self.paths['model']).replace('.pth', '')
+        v_model_path = os.path.join(model_dir, f"{base_model}_{new_version_id}.pth")
+        
+        base_scaler = os.path.basename(self.paths['scaler']).replace('.joblib', '')
+        v_scaler_path = os.path.join(model_dir, f"{base_scaler}_{new_version_id}.joblib")
+        
+        # 실제 저장 경로 갱신
+        self.paths['model'] = v_model_path
+        self.paths['scaler'] = v_scaler_path
         
         # 최적의 모델 상태가 있다면 그것을 로드한 뒤 저장, 없으면 현재 상태 저장
         if best_model_state:
             self.model.load_state_dict(best_model_state)
-            print(f"[*] Deploying best model (Val Loss: {best_val_loss:.6f})")
+            print(f"[*] Deploying best model {new_version_id} (Val Loss: {best_val_loss:.6f})")
         
         # [Blackwell 최적화] 저장 시 torch.compile 접두어('_orig_mod.') 제거하여 이식성 확보
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in self.model.state_dict().items()}
@@ -207,8 +221,31 @@ class Trainer:
         
         # 4. 임계치 산출 및 통합 메타데이터 저장
         # 훈련 데이터 기반으로 임계치 결정
-        self._save_metadata(train_sequences, best_val_loss if val_loader else None)
-        print(f"[SUCCESS] {self.feature_type.capitalize()} model deployed.")
+        meta = self._save_metadata(train_sequences, best_val_loss if val_loader else None)
+        
+        # 레지스트리 갱신
+        registry_entry = {
+            "version": new_version_id,
+            "trained_at": meta["trained_at"],
+            "model_path": os.path.basename(v_model_path),
+            "scaler_path": os.path.basename(v_scaler_path),
+            "config_path": os.path.basename(v_model_path.replace('.pth', '.json')),
+            "threshold": meta["threshold"],
+            "final_val_loss": meta["final_val_loss"],
+            "is_active": True # 최신 학습본을 Active로 설정
+        }
+        
+        # 기존 Active 플래그 해제
+        for v in registry["versions"]:
+            v["is_active"] = False
+            
+        registry["versions"].append(registry_entry)
+        registry["active_version"] = new_version_id
+        
+        with open(registry_path, 'w') as f:
+            json.dump(registry, f, indent=4)
+            
+        print(f"[SUCCESS] {self.feature_type.capitalize()} model deployed. (Version: {new_version_id})")
         return True
 
     def _save_metadata(self, sequences, val_loss=None):
@@ -247,3 +284,5 @@ class Trainer:
         config_path = self.paths['model'].replace('.pth', '.json')
         with open(config_path, 'w') as f:
             json.dump(meta, f, indent=4)
+            
+        return meta

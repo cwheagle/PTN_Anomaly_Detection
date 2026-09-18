@@ -1,10 +1,11 @@
 # --- Web & API Server ---
 fastapi                 # 비동기 REST API 프레임워크 (백엔드 핵심)
 uvicorn                 # FastAPI 서버를 구동하는 고성능 ASGI 서버
+httpx                   # 비동기 HTTP 클라이언트 (스케줄러 -> ML API 통신)
 
 # --- Database & Scheduling ---
 mysql-connector-python  # MySQL 공식 드라이버 (커넥션 풀 및 DB 연동)
-apscheduler             # 15분 주기 데이터 수집 및 추론 스케줄링 관리
+APScheduler             # 15분 주기 데이터 수집 및 추론 스케줄링 관리
 
 # --- Data Processing & Machine Learning ---
 scikit-learn            # RobustScaler 등 데이터 전처리 및 스케일링 도구

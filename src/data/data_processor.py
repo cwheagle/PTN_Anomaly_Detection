@@ -13,6 +13,18 @@ class DataProcessor:
         
         self.feature_type = feature_type
         self.feature_cols = FEATURE_GROUPS[feature_type]
+        
+        # [Phase 11] Feature Engineering 확장 컬럼 정의
+        self.extended_feature_cols = []
+        for col in self.feature_cols:
+            self.extended_feature_cols.extend([
+                col, 
+                f"{col}_ma_4",   # 1시간 (15분 * 4) 이동평균
+                f"{col}_ma_16",  # 4시간 (15분 * 16) 이동평균
+                f"{col}_var_4",  # 1시간 변동성
+                f"{col}_lag_1"   # 직전 시점 데이터
+            ])
+            
         # 이상치에 강한 RobustScaler 사용
         self.scaler = RobustScaler()
 
@@ -36,7 +48,7 @@ class DataProcessor:
         if df is None or df.empty: return df
         df = df.copy()
         
-        if self.feature_type == 'traffic':
+        if self.feature_type.startswith('traffic'):
             for col in self.feature_cols:
                 # 음수 방지 및 로그 변환 (10^19 등 거대 수치는 학습 시 필터링됨)
                 df[col] = np.log1p(df[col].clip(lower=0))
@@ -58,7 +70,7 @@ class DataProcessor:
                     continue
 
             # 3. 트래픽 오염 데이터 체크 (원본 수치 기준)
-            if self.feature_type == 'traffic':
+            if self.feature_type.startswith('traffic'):
                 # 에러 패킷이 절반 이상 지속되거나 트래픽 10억(1e9) 초과 시 포트 폐기 (너무 엄격한 단건 필터링 완화)
                 if (group['error_packet'] > 1000).mean() > 0.5 or \
                    (group[['tx_packet', 'rx_packet']] > 1e9).mean().any() > 0.5:
@@ -112,6 +124,20 @@ class DataProcessor:
                     method='linear', limit=1, limit_direction='both'
                 )
 
+        # 5. [Phase 11] Feature Engineering (파생 변수 생성)
+        enriched_dfs = []
+        for (ip, cid, lid), group in df.groupby(['ip_addr', 'cid', 'lid']):
+            group = group.copy()
+            for col in self.feature_cols:
+                # pandas rolling 연산을 통해 파생 변수 생성
+                group[f"{col}_ma_4"] = group[col].rolling(4, min_periods=1).mean()
+                group[f"{col}_ma_16"] = group[col].rolling(16, min_periods=1).mean()
+                group[f"{col}_var_4"] = group[col].rolling(4, min_periods=1).var().fillna(0)
+                group[f"{col}_lag_1"] = group[col].shift(1).bfill() # 첫행은 다음행 값으로 채움
+            enriched_dfs.append(group)
+            
+        df = pd.concat(enriched_dfs, ignore_index=True) if enriched_dfs else df
+
         return df
 
     def create_sequences(self, df, is_train=True):
@@ -120,17 +146,20 @@ class DataProcessor:
         
         # 1. 스케일러 학습 (학습 시에만, NaN을 제외한 순수 데이터 분포만 학습)
         if is_train:
-            valid_data = df[self.feature_cols].dropna()
+            valid_data = df[self.extended_feature_cols].dropna()
             if not valid_data.empty:
                 self.scaler.fit(valid_data)
         
         # 2. 스케일링 수행 (숫자 변환을 위해 임시로 fillna 적용)
-        temp_fill = 0 if self.feature_type == 'traffic' else -40
-        data_vals = df[self.feature_cols].fillna(temp_fill)
+        temp_fill = 0 if self.feature_type.startswith('traffic') else -40
+        data_vals = df[self.extended_feature_cols].fillna(temp_fill)
         scaled_vals = self.scaler.transform(data_vals)
         
+        # [Phase 11 Fix] 파생 변수(var 등)의 극도로 작은 IQR로 인한 스케일 폭발 방지
+        scaled_vals = np.clip(scaled_vals, -10.0, 10.0)
+        
         # 3. 원래 어디가 NaN(2개 이상 연속 누락)이었는지 마스크 생성
-        is_nan_mask = df[self.feature_cols].isna().any(axis=1).values
+        is_nan_mask = df[self.extended_feature_cols].isna().any(axis=1).values
         
         sequences = []
         grouped_data = {} if not is_train else None
