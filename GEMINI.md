@@ -29,18 +29,19 @@
     - **3-Sigma 기반 동적 임계치(Dynamic Threshold) 파이프라인 통합 완료**
     - **자동 재학습**: Data Drift 감지 및 백그라운드 모델 재학습 파이프라인 (완료)
     - 24시간 주기 MSE 평가, 저장된 기존 학습 파라미터(Epochs 등) 재사용 로직, UI 연동 완료.
-    - **오프라인 모델 검증 및 오탐(FP) 최소화 완료**: TTF-Aware 평가 스크립트 기반 F1-Score 0.84 달성 및 오탐률 0.03% 수준(FP 110개) 방어 성공.
+    - **오프라인 모델 검증 및 오탐(FP) 최소화 완료**: 
+        - TTF-Aware 평가 스크립트 기반 F1-Score 0.86 달성 및 정밀도 96.2% 방어 성공.
+        - 알람 피로도 억제 및 장애 사후 방치 기간을 고려한 현실적인 채점(Ground Truth) 로직 보완 완료.
     - **MLOps 및 모델 배포 고도화 완료**:
         - 알람 피로도 억제를 위한 심각도별 차등 쿨다운(Alert Dampening) 적용.
         - 파생 변수(MA, Var, Lag)를 생성하는 모델 고도화 적용 (input_dim=15).
         - 버전 관리를 지원하는 Lightweight Model Registry 도입 (Active/Rollback 가능).
-        - **K-Means 기반 트래픽 군집화 모델(Clustered Models) 분리 완료**: (과도한 오탐 폭증으로 인해 단일 모델로 롤백함)
 
 - **대기 중 (Phase 12)**:
     - **대용량 분산 처리 (Scalability)**: Apache Kafka 기반의 스트림 프로세싱 도입.
     - **고가용성 (HA)**: Kubernetes 기반 파드 오토스케일링 및 페일오버 체계.
 
-- **최종 업데이트**: 2026-07-27
+- **최종 업데이트**: 2026-09-18
 
 ## 4. 워크플로우
 - `plan.md`를 구현 단계의 유일한 진실 공급원(Single Source of Truth)으로 참조합니다.

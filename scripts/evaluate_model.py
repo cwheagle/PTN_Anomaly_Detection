@@ -63,6 +63,7 @@ def evaluate():
     
     tp_count = 0
     fp_count = 0
+    post_failure_alarms = 0
     matched_gt = set()
     ttf_errors = []
     
@@ -91,6 +92,13 @@ def evaluate():
                       (gt_df['start_time'] <= alarm_time) & 
                       (gt_df['failure_time'] >= alarm_time)]
                       
+        # 고장(failure_time) 이후 168시간(7일) 이내에 발생한 알람인지 확인 (Post-Failure)
+        match_post = gt_df[(gt_df['ip_addr'] == ip) & 
+                           (gt_df['cid'] == cid) & 
+                           (gt_df['lid'] == lid) & 
+                           (gt_df['failure_time'] < alarm_time) & 
+                           (gt_df['failure_time'] + pd.Timedelta(hours=168) >= alarm_time)]
+                           
         if not match.empty:
             # True Positive (정답)
             gt = match.iloc[0]
@@ -101,6 +109,13 @@ def evaluate():
             error_minutes = abs((pred_fatal - actual_fatal).total_seconds()) / 60.0
             ttf_errors.append(error_minutes)
             tp_count += 1
+        elif not match_post.empty:
+            # 정당한 사후 알람 (Post-Failure Alarm)
+            post_failure_alarms += 1
+            tp_count += 1 # 정당한 알람이므로 TP에 포함하여 정밀도를 올바르게 계산
+            # 사후 알람도 감지 성공(matched_gt)에 기여 (알람 억제로 인해 늦게 울린 경우 구제)
+            gt = match_post.iloc[0]
+            matched_gt.add(gt.name)
         else:
             # False Positive (오탐 - 정상이거나 장애 범위 밖인데 알람 띄움)
             fp_count += 1
@@ -121,23 +136,24 @@ def evaluate():
     # MAE (Mean Absolute Error)
     mae = sum(ttf_errors) / len(ttf_errors) if ttf_errors else 0
     
-    print("\n" + "="*50)
-    print("    [Phase 10] TTF-Aware Evaluation Report    ")
-    print("="*50)
-    print(f"[*] Total Evaluated Scenarios : {len(gt_df)}")
-    print(f"[*] Total AI Alarms Fired     : {len(alarms)}")
-    print(f"   - Valid TTF Predicted    : {len(alarms) - no_ttf_alarms}")
-    print(f"   - No TTF (Flat Trend)    : {no_ttf_alarms} (Ignored)")
-    print("-" * 50)
-    print(f"[*] True Positives (Valid)    : {tp_count}")
-    print(f"[*] False Positives (False)   : {fp_count}")
-    print(f"[*] False Negatives (Missed)  : {fn_count}")
-    print("-" * 50)
-    print(f"[+] Precision : {precision:.4f} (정밀도)")
-    print(f"[+] Recall    : {recall:.4f} (재현율, 탐지 성공률)")
-    print(f"[*] F1-Score  : {f1:.4f} (TTF-Aware 종합 점수)")
-    print(f"[~] TTF MAE    : {mae:.2f} minutes (예측 잔여 수명 평균 오차)")
-    print("="*50)
+    print("\n" + "="*70)
+    print("            [Phase 10] TTF-Aware Evaluation Report            ")
+    print("="*70)
+    print(f"[*] 총 평가된 장애 시나리오 수 (Total Scenarios) : {len(gt_df)} 건 (시뮬레이터 주입)")
+    print(f"[*] AI가 발생시킨 총 알람 수 (Total Alarms)      : {len(alarms)} 건")
+    print(f"   - 잔여 수명(TTF) 예측 성공 알람              : {len(alarms) - no_ttf_alarms} 건")
+    print(f"   - 악화 추세가 없어 예측 보류된 알람          : {no_ttf_alarms} 건 (평가 제외)")
+    print("-" * 70)
+    print(f"[*] 정답 (True Positives)           : {tp_count} 건 (장애가 발생하기 전 5시간 내에 정확히 울린 예지 알람)")
+    print(f"[*] 사후 정답 (Post-Failure Valid)  : {post_failure_alarms} 건 (이미 고장난 포트에서 지속적으로 울린 정당한 사후 알람)")
+    print(f"[*] 오탐 (False Positives)          : {fp_count} 건 (완전한 정상 상태인데 AI가 잘못 울린 가짜 알람)")
+    print(f"[*] 미탐 (False Negatives)          : {fn_count} 건 (장애가 발생했는데 AI가 한 번도 눈치채지 못한 시나리오 수)")
+    print("-" * 70)
+    print(f"[+] 정밀도 (Precision)    : {precision:.4f} (AI가 울린 알람 중 진짜 장애의 비율)")
+    print(f"[+] 재현율 (Recall)       : {recall:.4f} (전체 장애 시나리오 중 AI가 놓치지 않고 감지한 비율)")
+    print(f"[*] 종합 점수 (F1-Score)  : {f1:.4f} (정밀도와 재현율의 조화 평균)")
+    print(f"[~] 예측 오차 (TTF MAE)   : {mae:.2f} 분 (AI가 예측한 고장 시간과 실제 고장 시간의 평균 오차)")
+    print("="*70)
     print("평가 완료. 결과를 확인해 주세요!")
     
 if __name__ == "__main__":

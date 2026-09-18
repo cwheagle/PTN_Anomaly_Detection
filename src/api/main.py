@@ -183,8 +183,7 @@ async def get_model_status():
     """현재 모델들의 학습 상태, 훈련 설정, 추론 설정을 구분하여 조회"""
     status = {}
     for ft in ['traffic', 'optical']:
-        target_ft = 'traffic_heavy' if ft == 'traffic' else ft
-        actual_model, meta_path = get_active_model_info(target_ft)
+        actual_model, meta_path = get_active_model_info(ft)
         if not actual_model:
             continue
         
