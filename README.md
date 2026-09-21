@@ -187,6 +187,39 @@ npm run dev
 
 ---
 
+## 📦 배포 가이드
+
+운영 서버에 소스 코드를 유출하지 않고 안전하게 배포(납품)하는 오프라인 배포 프로세스
+
+### 1. 사내 빌드 서버에서 도커 이미지 패키징
+먼저 인터넷이 연결된 환경에서 외부 인프라 이미지를 다운로드(Pull)하고, 자체 소스 코드를 도커 이미지로 빌드합니다.
+빌드 전 `docker-compose.prod.yml` 의 `platform` 속성을 배포 서버의 운영체제에 맞게 설정합니다.
+```bash
+docker-compose pull
+docker-compose build
+```
+
+### 2. 도커 이미지를 단일 `.tar` 압축 파일로 추출
+자체 개발한 4개의 애플리케이션 이미지뿐만 아니라, **인프라 이미지(Kafka, Zookeeper, Redis)도 반드시 함께 추출**해야 인터넷이 없는 환경에서 구동됩니다.
+```bash
+docker save -o ptn_anomaly_detection_v1.tar ptn_anomaly_detection-api:latest ptn_anomaly_detection-ui:latest ptn_anomaly_detection-consumer:latest ptn_anomaly_detection-producer:latest confluentinc/cp-kafka:7.5.0 confluentinc/cp-zookeeper:7.5.0 redis:7.2-alpine
+```
+
+### 3. 배포 서버에 이미지 이식 (Load)
+배포 서버로 `ptn_anomaly_detection_v1.tar`, `docker-compose.yml` 파일을 복사한 뒤, `docker-compose.yml`에서 `build`속성을 삭제하고 `image: 'container_name':latest`으로 변경한 후 이미지를 로드합니다.
+```bash
+docker load -i ptn_anomaly_detection_v1.tar
+```
+
+### 4. 배포 서버 환경 설정 및 최종 구동
+`docker-compose.yml` 내의 환경 변수(`DB_HOST` 등)를 배포 서버 환경에 맞게 수정한 후 실행합니다.
+```bash
+docker-compose up -d
+```
+이후 `http://배포_서버_IP` 로 접속하여 대시보드가 정상적으로 뜨는지 확인합니다.
+
+---
+
 ## 🤖 RCA 엔진 — 도메인 룰 구조
 
 이상 탐지 후 각 Feature의 MSE 기여도를 분석하여 장애 원인을 진단합니다.

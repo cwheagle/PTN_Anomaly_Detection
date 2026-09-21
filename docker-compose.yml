@@ -1,7 +1,6 @@
-version: '3.8'
-
 services:
   zookeeper:
+    platform: linux/arm64 # linux/amd64, windows/amd64, ...
     image: confluentinc/cp-zookeeper:7.5.0
     hostname: zookeeper
     container_name: zookeeper
@@ -12,6 +11,7 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
 
   kafka:
+    platform: linux/arm64 # linux/amd64, windows/amd64, ...
     image: confluentinc/cp-kafka:7.5.0
     hostname: kafka
     container_name: kafka
@@ -28,6 +28,7 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
   redis:
+    platform: linux/arm64 # linux/amd64, windows/amd64, ...
     image: redis:7.2-alpine
     hostname: redis
     container_name: redis
@@ -36,17 +37,19 @@ services:
     command: redis-server --save 60 1 --loglevel warning
 
   api:
-    build: 
+    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    build:
       context: .
       dockerfile: Dockerfile.api
-    container_name: ptn_api
+    #image: 'ptn_anomaly_detection-api:latest'
+    container_name: ptn_anomaly_detection-api
     ports:
       - "8000:8000"
     environment:
-      - DB_HOST=192.168.131.179
+      - DB_HOST=localhost
       - DB_USER=root
       - DB_PASS=root
-      - DB_NAME=cowptn_test
+      - DB_NAME=cowptn
       - KAFKA_BROKERS=kafka:29092
       - REDIS_HOST=redis
     depends_on:
@@ -54,25 +57,29 @@ services:
       - redis
 
   ui:
+    platform: linux/arm64 # linux/amd64, windows/amd64, ...
     build:
       context: .
       dockerfile: Dockerfile.ui
-    container_name: ptn_ui
+    #image: 'ptn_anomaly_detection-ui:latest'
+    container_name: ptn_anomaly_detection-ui
     ports:
       - "80:80"
     depends_on:
       - api
 
   consumer:
+    platform: linux/arm64 # linux/amd64, windows/amd64, ...
     build:
       context: .
       dockerfile: Dockerfile.consumer
-    container_name: ptn_consumer
+    #image: 'ptn_anomaly_detection-consumer:latest'
+    container_name: ptn_anomaly_detection-consumer
     environment:
-      - DB_HOST=192.168.131.179
+      - DB_HOST=localhost
       - DB_USER=root
       - DB_PASS=root
-      - DB_NAME=cowptn_test
+      - DB_NAME=cowptn
       - KAFKA_BROKERS=kafka:29092
       - REDIS_HOST=redis
       - API_URL=http://api:8000
@@ -82,15 +89,17 @@ services:
       - api
 
   producer:
+    platform: linux/arm64 # linux/amd64, windows/amd64, ...
     build:
       context: .
       dockerfile: Dockerfile.producer
-    container_name: ptn_producer
+    #image: 'ptn_anomaly_detection-producer:latest'
+    container_name: ptn_anomaly_detection-producer
     environment:
-      - DB_HOST=192.168.131.179
+      - DB_HOST=localhost
       - DB_USER=root
       - DB_PASS=root
-      - DB_NAME=cowptn_test
+      - DB_NAME=cowptn
       - KAFKA_BROKERS=kafka:29092
     depends_on:
       - kafka
