@@ -1,3 +1,5 @@
+import os
+
 # API 및 시스템 버전 (Semantic Versioning: Major.Minor.Patch)
 API_VERSION_MAJOR = 1
 API_VERSION_MINOR = 0
@@ -6,30 +8,30 @@ API_VERSION = f"{API_VERSION_MAJOR}.{API_VERSION_MINOR}.{API_VERSION_PATCH}"
 
 # Database Configuration
 DB_CONFIG = {
-    "host": "YOUR_DB_HOST",
-    "user": "YOUR_DB_USER",
-    "password": "YOUR_DB_PASSWORD",
-    "database": "YOUR_DB_NAME",
-    "port": 3306
+    "host": os.getenv("DB_HOST", "YOUR_DB_HOST"),
+    "user": os.getenv("DB_USER", "YOUR_DB_USER"),
+    "password": os.getenv("DB_PASS", "YOUR_DB_PASSWORD"),
+    "database": os.getenv("DB_NAME", "YOUR_DB_NAME"),
+    "port": int(os.getenv("DB_PORT",YOUR_DB_PORT))
 }
 
 # --- Kafka & Redis Configuration (Phase 12) ---
 KAFKA_CONFIG = {
-    "bootstrap_servers": "localhost:9092",
-    "topic_metrics": "ptn_metrics",
-    "consumer_group_id": "ptn_inference_group",
+    "bootstrap_servers": os.getenv("KAFKA_BROKERS", "YOUR_KAFKA_BROKERS"),
+    "topic_metrics": os.getenv("KAFKA_TOPIC_METRICS", "ptn_metrics"),
+    "consumer_group_id": os.getenv("KAFKA_CONSUMER_GROUP_ID", "ptn_inference_group"),
     "auto_offset_reset": "earliest"
 }
 
 REDIS_CONFIG = {
-    "host": "localhost",
-    "port": 6379,
+    "host": os.getenv("REDIS_HOST", "YOUR_REDIS_HOST"),
+    "port": int(os.getenv("REDIS_PORT",YOUR_REDIS_PORT)),
     "db": 0,
     "decode_responses": True
 }
 
 # API Webhook Configuration
-API_URL = "http://localhost:8000"
+API_URL = os.getenv("API_URL", "YOUR_API_URL")
 # ----------------------------------------------
 
 # Feature Groups

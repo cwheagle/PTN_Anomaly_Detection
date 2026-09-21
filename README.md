@@ -122,20 +122,14 @@ cp src/config.py.example src/config.py
 
 ### 2. 인프라 및 서버 실행 (Docker Compose)
 
-분산 아키텍처 구동을 위해 Kafka와 Redis를 먼저 실행합니다.
+모든 시스템 컴포넌트(UI, API, Kafka, Redis, Consumer, Producer)는 Docker Compose로 통합되어 한 번에 실행됩니다. (Phase 12 적용)
 
 ```bash
-# 인프라 가동 (Kafka, Zookeeper, Redis)
-docker-compose up -d
+# 전체 시스템 빌드 및 백그라운드 가동
+docker-compose up -d --build
 
-# API 서버 시작 (Background 유지보수 스케줄러 포함)
-python src\api\main.py
-
-# 워커(Consumer) 시작
-python src\pipeline\kafka_consumer.py
-
-# 데이터 수집기(Producer) 시작
-python src\pipeline\kafka_producer.py
+# 실행 중인 컨테이너 상태 확인
+docker-compose ps
 ```
 
 서버 기동 후 **Model Management UI** 또는 API로 초기 모델 학습을 시작합니다.
@@ -150,14 +144,46 @@ curl -X POST "http://localhost:8000/api/model/train?feature_type=optical"
 
 > 학습 진행 상태 및 파라미터 설정은 **Model Management** 뷰에서 실시간으로 확인할 수 있습니다.
 
-### 3. 프론트엔드 실행
+### 3. 프론트엔드 직접 실행 (로컬 개발 시)
 
+Docker를 사용하지 않고 로컬에서 UI를 띄울 때는 아래를 참고하세요.
 ```bash
 cd ui
 npm install
 npm run dev
 # http://localhost:5173 접속
 ```
+
+---
+
+## 🛠️ 빌드, 실행 및 디버깅 방법
+
+### Docker Compose 환경 (운영/통합 테스트 권장)
+- **전체 종료 및 초기화:** `docker-compose down -v` (볼륨까지 완전히 삭제)
+- **특정 서비스 실시간 로그 확인 (디버깅 핵심):**
+  ```bash
+  docker-compose logs -f api       # API 서버 로그 (SSE 웹훅 브로드캐스트 등)
+  docker-compose logs -f consumer  # AI 추론 엔진 로그 (이상 탐지 및 알람 판정)
+  docker-compose logs -f producer  # 데이터 수집기 폴링 로그
+  docker-compose logs -f ui        # 프론트엔드 Nginx 접속 로그
+  ```
+- **Consumer 버퍼(Redis 윈도우) 초기화:** 
+  기존 테스트 데이터가 꼬였을 때 상태를 비웁니다.
+  ```bash
+  docker exec redis redis-cli flushall
+  ```
+
+### 로컬 개발 환경 (개별 컴포넌트 디버깅 시)
+코드를 수정하면서 즉시 반영(Reload)하거나 브레이크포인트를 걸기 위해서는 인프라만 컨테이너로 띄우고, 앱은 터미널에서 직접 실행하는 것이 편리합니다.
+1. `docker-compose up -d kafka redis zookeeper` (인프라만 실행)
+2. `.env` 파일을 만들거나 환경 변수를 세팅하여 `DB_HOST`, `REDIS_HOST`, `KAFKA_BROKERS` 등을 `localhost`로 맞춥니다.
+3. 터미널을 여러 개 열어 개별 실행:
+   - API 서버: `python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload`
+   - Consumer: `python src/pipeline/kafka_consumer.py`
+   - Producer (과거 데이터 시뮬레이션 테스트): 
+     ```bash
+     python src/pipeline/kafka_producer.py --mode sim --start "2026-07-27 06:00:00" --end "2026-07-27 11:00:00"
+     ```
 
 ---
 
@@ -235,9 +261,6 @@ python tests/test_run.py
 
 # 데이터 수집 단독 실행
 python scripts/collect_data.py
-
-# 스케줄러 테스트 가동
-python scripts/main_scheduler.py
 
 # 모델 오프라인 평가 및 F1-Score 산출
 python scripts/evaluate_model.py

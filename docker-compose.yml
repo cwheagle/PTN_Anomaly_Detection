@@ -34,3 +34,63 @@ services:
     ports:
       - "6379:6379"
     command: redis-server --save 60 1 --loglevel warning
+
+  api:
+    build: 
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: ptn_api
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=192.168.131.179
+      - DB_USER=root
+      - DB_PASS=root
+      - DB_NAME=cowptn_test
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_HOST=redis
+    depends_on:
+      - kafka
+      - redis
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: ptn_ui
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: ptn_consumer
+    environment:
+      - DB_HOST=192.168.131.179
+      - DB_USER=root
+      - DB_PASS=root
+      - DB_NAME=cowptn_test
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_HOST=redis
+      - API_URL=http://api:8000
+    depends_on:
+      - kafka
+      - redis
+      - api
+
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: ptn_producer
+    environment:
+      - DB_HOST=192.168.131.179
+      - DB_USER=root
+      - DB_PASS=root
+      - DB_NAME=cowptn_test
+      - KAFKA_BROKERS=kafka:29092
+    depends_on:
+      - kafka
