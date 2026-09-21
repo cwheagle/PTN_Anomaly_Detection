@@ -124,14 +124,14 @@
 - **검증:**
   - Phase 10의 `evaluate_model.py`를 활용하여 **심각도별 쿨다운 도입 후 Precision 90% 이상 향상** 검증.
 
-### Phase 12: 대용량 분산 처리 및 폐쇄망 배포 아키텍처 (Scalability & HA) (Go)
+### Phase 12: 대용량 분산 처리 및 폐쇄망 배포 아키텍처 (Scalability & HA) (Complete)
 - **목표:** 전국망 단위(10만 대 이상)의 노드를 지연 없이 실시간으로 분석할 수 있는 상용 엔터프라이즈 인프라 구축 및 폐쇄망 배포 환경 구성.
 - **세부 내용:**
   1. **마이크로서비스 컨테이너화 (Dockerization)**: Kubernetes에 배포하기 위한 필수 전제 조건. UI, API, Producer, 추론 엔진(Consumer)을 각각 독립된 Docker 이미지로 빌드하여 폐쇄망 오프라인 배포 파이프라인 구축.
   2. **스트림 프로세싱(Stream Processing) 도입**: 기존 DB 스케줄러 폴링(Polling) 방식을 탈피하여, Apache Kafka 기반의 실시간 데이터 파이프라인으로 마이그레이션.
   3. **클라우드 네이티브 고가용성 (Kubernetes)**: 빌드된 도커 컨테이너들을 K8s 클러스터에 배포. 트래픽 부하에 따라 AI 추론 파드(Pod)를 HPA(오토스케일링)로 동적 확장하고, 장애 시 즉각 페일오버(Failover)하는 완벽한 HA 체계 완성.
 
-### Phase 13: XAI(설명 가능한 AI) 및 능동 학습 (Active Learning)
+### Phase 13: XAI(설명 가능한 AI) 및 능동 학습 (Active Learning) (Go)
 - **목표:** 현업 엔지니어의 신뢰도를 높이고, 인간의 피드백을 통해 AI가 스스로 진화하는 플라이휠(Flywheel) 완성.
 - **세부 내용:**
   1. **XAI 폭포수 차트 (SHAP / LIME 적용)**: RCA 결과 도출 시, 각 메트릭이 최종 Severity(95점)에 기여한 비중을 시각적인 폭포수 차트로 대시보드에 제공.

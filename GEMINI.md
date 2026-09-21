@@ -20,8 +20,8 @@
 - **검증**: `tests/` 디렉토리에 대응하는 테스트 케이스가 없는 코드는 완료된 것으로 간주하지 않습니다.
 
 ## 3. 현재 작업 상태 (Status)
-- **현재 단계**: Phase 12 대용량 분산 처리 및 고가용성 아키텍처 대기 중
-- **완료 항목 (Phase 11까지)**:
+- **현재 단계**: Phase 13 XAI 및 능동 학습 대기 중
+- **완료 항목 (Phase 12까지)**:
     - RCA 엔진 코어 구현 및 룰 관리 프론트엔드 연동 완료. 
     - Feature Contribution 산출기, 구조화된 도메인 룰 JSON(Min/Max/기여도), 조치 방법(Action) 연동 완료.
     - Rule Management 동적 폼 및 대시보드 툴팁 UI 구축 완벽 적용.
@@ -36,12 +36,16 @@
         - 알람 피로도 억제를 위한 심각도별 차등 쿨다운(Alert Dampening) 적용.
         - 파생 변수(MA, Var, Lag)를 생성하는 모델 고도화 적용 (input_dim=15).
         - 버전 관리를 지원하는 Lightweight Model Registry 도입 (Active/Rollback 가능).
+    - **대용량 분산 처리 및 고가용성 아키텍처 완료**:
+        - Apache Kafka 기반 스트림 프로세싱 도입 (Producer/Consumer 완벽 분리).
+        - Redis를 활용한 분산 환경에서의 시계열 Rolling Window 상태 관리 구축.
+        - API, UI, Producer, Consumer 각 서비스별 컨테이너화(Dockerization) 완료.
 
-- **대기 중 (Phase 12)**:
-    - **대용량 분산 처리 (Scalability)**: Apache Kafka 기반의 스트림 프로세싱 도입.
-    - **고가용성 (HA)**: Kubernetes 기반 파드 오토스케일링 및 페일오버 체계.
+- **대기 중 (Phase 13)**:
+    - **XAI (설명 가능한 AI)**: SHAP/LIME을 통한 폭포수 차트 구현.
+    - **능동 학습 (Active Learning)**: 관리자 피드백 기반 실시간 라벨링 및 RLHF 파이프라인.
 
-- **최종 업데이트**: 2026-09-18
+- **최종 업데이트**: 2026-09-21
 
 ## 4. 워크플로우
 - `plan.md`를 구현 단계의 유일한 진실 공급원(Single Source of Truth)으로 참조합니다.

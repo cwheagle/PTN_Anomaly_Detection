@@ -13,6 +13,25 @@ DB_CONFIG = {
     "port": 3306
 }
 
+# --- Kafka & Redis Configuration (Phase 12) ---
+KAFKA_CONFIG = {
+    "bootstrap_servers": "localhost:9092",
+    "topic_metrics": "ptn_metrics",
+    "consumer_group_id": "ptn_inference_group",
+    "auto_offset_reset": "earliest"
+}
+
+REDIS_CONFIG = {
+    "host": "localhost",
+    "port": 6379,
+    "db": 0,
+    "decode_responses": True
+}
+
+# API Webhook Configuration
+API_URL = "http://localhost:8000"
+# ----------------------------------------------
+
 # Feature Groups
 FEATURE_GROUPS = {
     "traffic": ['tx_packet', 'rx_packet', 'error_packet'],

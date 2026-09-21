@@ -80,24 +80,6 @@
 ]
 ```
 
-### 2.3. 스케줄러 상태 및 제어
-추론 엔진의 가동 상태를 조회하거나 제어합니다.
-
-- **URL**: `/api/scheduler/status`
-- **Method**: `GET` (상태 조회) / `POST` (제어 명령)
-- **GET Response**:
-```json
-{
-  "status": "running", // 또는 "stopped"
-  "next_run_time": "2026-05-14 10:30:00"
-}
-```
-- **POST Body**:
-```json
-{ 
-  "action": "start"  // "start", "stop"
-}
-```
 
 ### 2.4. 모델 관리 및 훈련
 
@@ -288,5 +270,24 @@
 }
 ```
 
+### 2.7. 시스템 내부 통신 (Internal Webhook)
+Kafka Consumer가 추론 결과를 바탕으로 실시간 알람을 발송하기 위해 API 서버에 호출하는 내부용 엔드포인트입니다. 외부 노출을 권장하지 않습니다.
+
+- **URL**: `/api/internal/alarm`
+- **Method**: `POST`
+- **Body Example**:
+```json
+[
+  {
+    "occur_date": "2026-05-14 10:15:00",
+    "ip_addr": "192.168.99.226",
+    "cid": 1,
+    "lid": 5,
+    "alarm_label": "CRITICAL",
+    "anomaly_reason": "Traffic (TX:1200, RX:0)"
+  }
+]
+```
+
 ---
-*최종 업데이트: 2026-05-26*
+*최종 업데이트: 2026-09-21*

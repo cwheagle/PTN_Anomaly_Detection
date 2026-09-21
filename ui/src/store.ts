@@ -3,8 +3,6 @@ import axios from 'axios'
 
 export const store = reactive({
   backendStatus: 'offline',
-  schedulerStatus: 'unknown',
-  nextRunTime: '',
   alarms: [] as any[],
   anomalies: [] as any[],
   watchlist: [] as any[],
@@ -70,49 +68,6 @@ export const store = reactive({
       this.isRefreshingWatchlist = false
     }
   },
-
-  async fetchSchedulerStatus() {
-    try {
-      const res = await axios.get('/api/scheduler/status')
-      this.schedulerStatus = res.data.status
-      this.nextRunTime = res.data.next_run_time
-    } catch (err) {
-      console.error('Failed to fetch scheduler status', err)
-    }
-  },
-
-  async controlScheduler(action: string) {
-    try {
-      if (action === 'start') this.schedulerStatus = 'running'
-      else if (action === 'stop') {
-        this.schedulerStatus = 'stopped'
-        this.alarms = []
-      }
-
-      const res = await axios.post('/api/scheduler/status', { action })
-      this.schedulerStatus = res.data.status
-      this.nextRunTime = res.data.next_run_time
-
-      if (this.schedulerStatus !== 'running') {
-        this.alarms = []
-      }
-    } catch (err) {
-      console.error('Failed to control scheduler', err)
-      this.fetchSchedulerStatus()
-      throw err
-    }
-  },
-
-  async runNow() {
-    try {
-      const res = await axios.post('/api/scheduler/run-now')
-      return res.data
-    } catch (err) {
-      console.error('Failed to trigger manual run', err)
-      throw err
-    }
-  },
-
   async fetchHistory(params: { ip_addr: string, slot_id: number, port_id: number, days?: number }) {
     try {
       const res = await axios.get(`/api/anomalies/history`, {

@@ -1,43 +1,6 @@
 <template>
   <div class="space-y-6">
-    <!-- Status Cards -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-2">
-      <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center relative overflow-hidden">
-        <div class="z-10">
-          <p class="text-slate-400 text-xs uppercase font-bold tracking-wider mb-1">Anomaly Detection Scheduler</p>
-          <div class="flex items-center gap-3">
-            <span :class="['text-xl font-mono font-bold uppercase', 
-                          store.schedulerStatus === 'running' ? 'text-emerald-400' : 'text-rose-400']">
-              {{ store.schedulerStatus }}
-            </span>
-            <div class="flex gap-1">
-              <button @click="store.controlScheduler('start')" 
-                      v-if="store.schedulerStatus !== 'running'"
-                      class="p-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-lg transition-colors border border-emerald-500/20" title="Start">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-              </button>
-              <button @click="store.controlScheduler('stop')" 
-                      v-if="store.schedulerStatus === 'running'"
-                      class="p-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-lg transition-colors border border-rose-500/20" title="Stop">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
-              </button>
-              <button @click="handleRunNow" 
-                      class="p-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-lg transition-colors border border-blue-500/20" title="Run Now">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"></path><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"></path><path d="M9 12H4s.55-3.03 2-5c1.62-2.2 5-3 5-3"></path><path d="M12 15v5s3.03-.55 5-2c2.2-1.62 3-5 3-5"></path></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-        <div class="flex items-center gap-3 z-10">
-          <div v-if="store.schedulerStatus === 'running'" class="text-right">
-            <p class="text-[10px] text-slate-500 uppercase font-bold tracking-tighter">Next Run</p>
-            <p class="text-sm text-blue-400 font-mono font-bold leading-none">{{ store.nextRunTime || '--:--' }}</p>
-          </div>
-          <div class="p-3 bg-slate-700/30 rounded-lg">
-            <svg xmlns="http://www.w3.org/2000/svg" :class="['w-6 h-6', store.schedulerStatus === 'running' ? 'text-emerald-400' : 'text-slate-500']" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-          </div>
-        </div>
-      </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
       <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
         <div>
           <p class="text-slate-400 text-xs uppercase font-bold tracking-wider mb-1">Total Anomalies</p>
@@ -453,17 +416,6 @@ const formatTTF = (minutes: number | null) => {
   const h = Math.floor(minutes / 60)
   const m = Math.round(minutes % 60)
   return h > 0 ? `${h}h ${m}m` : `${m}m`
-}
-
-const handleRunNow = async () => {
-  try {
-    await store.runNow()
-    alert('Manual analysis cycle triggered successfully. Please wait a few moments for results to refresh.')
-    // 전역 스토어의 디바운스된 fetch 호출 (2초 후 실행 예약)
-    store.debouncedFetch(2000)
-  } catch (err) {
-    alert('Failed to trigger manual run. Check backend logs.')
-  }
 }
 
 // Dynamic Visibility Helpers

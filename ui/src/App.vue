@@ -117,9 +117,6 @@ const setupSSE = () => {
   sseSource.value = source
   
   source.addEventListener('alarm', (event) => {
-    // unknown 상태(초기화 중)이거나 running일 때 모두 수신 허용
-    if (store.schedulerStatus === 'stopped') return
-    
     const data = JSON.parse(event.data)
     console.log('[SSE] Alarm received:', data)
     const key = `${data.ip_addr}-${data.slot_id}-${data.port_id}`
@@ -162,14 +159,12 @@ const setupSSE = () => {
 onMounted(() => {
   store.fetchAnomalies()
   store.fetchWatchlist()
-  store.fetchSchedulerStatus()
   store.fetchActiveAlarms()
   setupSSE()
   
   const interval = setInterval(() => {
     store.fetchAnomalies()
     store.fetchWatchlist()
-    store.fetchSchedulerStatus()
   }, 60000)
   onUnmounted(() => clearInterval(interval))
 })

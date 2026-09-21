@@ -121,7 +121,9 @@ class DBConnector:
 
     def fetch_traffic(self, start_time, end_time, stop_checker=None):
         """이더넷 트래픽 성능 데이터 조회"""
-        hours = pd.date_range(start=start_time, end=end_time, freq='h')
+        start_dt = pd.to_datetime(start_time).floor('h')
+        end_dt = pd.to_datetime(end_time).floor('h')
+        hours = pd.date_range(start=start_dt, end=end_dt, freq='h')
         conn = self.get_connection()
         if not conn: return None
         all_dfs = []
@@ -152,7 +154,9 @@ class DBConnector:
 
     def fetch_optical(self, start_time, end_time, stop_checker=None):
         """광파워 성능 데이터 조회"""
-        hours = pd.date_range(start=start_time, end=end_time, freq='h')
+        start_dt = pd.to_datetime(start_time).floor('h')
+        end_dt = pd.to_datetime(end_time).floor('h')
+        hours = pd.date_range(start=start_dt, end=end_dt, freq='h')
         conn = self.get_connection()
         if not conn: return None
         all_dfs = []

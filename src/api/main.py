@@ -11,21 +11,22 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, HTTPException, Body, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.background import BackgroundScheduler
+import threading
 
 # 프로젝트 루트 디렉토리를 path에 추가
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(root_dir)
 os.chdir(root_dir) # 작업 디렉토리를 프로젝트 루트로 강제 변경
 
-from src.pipeline.scheduler import PTNAnomalyScheduler
 from src.data.db_connector import DBConnector
 from src.data.data_collector import DataCollector
 from src.models.trainer import Trainer
 from src.pipeline.drift_monitor import DriftMonitor
-from src.config import PATHS, MODEL_CONFIG, API_VERSION
+from src.config import PATHS, MODEL_CONFIG, API_VERSION, REDIS_CONFIG, RETENTION_DAYS
+import redis
 
 # 글로벌 객체
-scheduler_instance = None
 db = DBConnector()
 collector = DataCollector()
 event_queues = set() # SSE 클라이언트들을 위한 큐 집합
@@ -37,6 +38,7 @@ training_status = {
 active_trainers = {} # 현재 실행 중인 Trainer 인스턴스 (중지용)
 drift_monitor = DriftMonitor(drift_factor=1.5)
 last_drift_result = None # 가장 최근의 Drift Check 결과 캐싱
+redis_client = redis.Redis(**REDIS_CONFIG) # Redis Client for Pub/Sub
 
 async def broadcast_alarm(alarm_data: dict):
     """모든 연결된 SSE 클라이언트에게 알람 전송 (전송 성공 여부 반환)"""
@@ -105,22 +107,56 @@ async def alarm_callback(anomalies_df):
         del active_alarms_state[key]
         print(f"[SSE] Broadcasted CLEAR: {key}")
 
+maintenance_scheduler = BackgroundScheduler()
+
+def run_daily_maintenance():
+    """매일 새벽 3시에 실행되는 자동 유지보수 (DB 정리 및 데이터 드리프트 검사)"""
+    print("[*] [Maintenance] Running daily maintenance tasks...")
+    try:
+        # 1. 오래된 데이터 정리
+        db.delete_old_data(RETENTION_DAYS)
+        print(f"[*] [Maintenance] Cleaned up DB data older than {RETENTION_DAYS} days.")
+        
+        # 2. 데이터 드리프트 검사
+        global last_drift_result
+        result = drift_monitor.check_drift()
+        last_drift_result = result
+        
+        if result.get("drift_detected"):
+            now = datetime.now()
+            date_params = {
+                'train_start': (now - timedelta(days=37)).strftime('%Y-%m-%d'),
+                'train_end': (now - timedelta(days=7)).strftime('%Y-%m-%d'),
+                'test_start': (now - timedelta(days=7)).strftime('%Y-%m-%d'),
+                'test_end': now.strftime('%Y-%m-%d')
+            }
+            
+            for ft in result.get("drifted_tracks", []):
+                if training_status.get(ft, {}).get("is_training"):
+                    continue
+                saved_config = {}
+                meta_path = PATHS[ft]['model'].replace('.pth', '.json')
+                if os.path.exists(meta_path):
+                    try:
+                        with open(meta_path, 'r') as f:
+                            saved_config = json.load(f).get("config", {})
+                    except: pass
+                
+                print(f"[*] [Drift] Triggering Auto-Retraining for {ft} due to Data Drift.")
+                threading.Thread(target=run_training_pipeline, args=(ft, saved_config, date_params), daemon=True).start()
+    except Exception as e:
+        print(f"[!] [Maintenance] Error during daily maintenance: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """서버 생명주기 관리"""
-    global scheduler_instance
-    print("[*] PTN Anomaly Detection Service Initializing...")
-    
-    scheduler_instance = PTNAnomalyScheduler()
-    if hasattr(scheduler_instance, 'set_callback'):
-        scheduler_instance.set_callback(alarm_callback)
-    
-    scheduler_instance.start()
+    print("[*] PTN Anomaly Detection API Service Initializing...")
+    maintenance_scheduler.add_job(run_daily_maintenance, 'cron', hour=3, minute=0)
+    maintenance_scheduler.start()
+    print("[*] Daily maintenance scheduler started (Runs at 03:00 AM).")
     yield
-    
     print("[*] Service shutting down...")
-    if scheduler_instance:
-        scheduler_instance.scheduler.shutdown()
+    maintenance_scheduler.shutdown()
 
 app = FastAPI(
     title="PTN Anomaly Detection API",
@@ -306,10 +342,8 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
                 msg = f"Training finished early at epoch {training_status[ft]['current_epoch']} (Optimal weights saved)."
             
             # [Auto-Reload] 실시간 엔진에 새 모델 즉시 반영
-            if scheduler_instance and hasattr(scheduler_instance, 'detector'):
-                for r_ft in reload_fts:
-                    scheduler_instance.detector.reload_model(r_ft)
-                msg += " (In-memory model updated)"
+            msg += " (Model reloading broadcasted to Consumers via Redis)"
+            redis_client.publish('ptn_control', json.dumps({'action': 'reload', 'track': ft}))
                 
             training_status[ft]["success_msg"] = msg
             print(f"[*] [BG] {ft.capitalize()} {msg}")
@@ -446,37 +480,18 @@ async def stream_alarms(request: Request):
             event_queues.remove(queue)
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-@app.get("/api/scheduler/status")
-async def get_scheduler_status():
-    if not scheduler_instance: return {"status": "stopped", "next_run_time": None}
-    state = scheduler_instance.scheduler.state
-    status_str = "running" if state == 1 else "stopped"
-    next_run = None
-    if status_str == "running":
-        jobs = scheduler_instance.scheduler.get_jobs()
-        if jobs and jobs[0].next_run_time:
-            next_run = jobs[0].next_run_time.strftime('%Y-%m-%d %H:%M:%S')
-    return {"status": status_str, "next_run_time": next_run}
-
-@app.post("/api/scheduler/run-now")
-async def run_scheduler_now():
-    """즉시 분석 작업(데이터 수집->추론->저장) 실행"""
+@app.post("/api/internal/alarm")
+async def trigger_sse_alarm(data: list = Body(...)):
+    """Consumer에서 추론 완료 후 발생한 알람을 전달받아 SSE로 브로드캐스트하는 내부 엔드포인트"""
     try:
-        # 비동기로 실행하여 API 응답은 즉시 반환
-        asyncio.create_task(scheduler_instance.run_job())
-        return {"status": "success", "message": "Manual analysis task started in background."}
+        if not data:
+            return {"status": "ok"}
+        df = pd.DataFrame(data)
+        await alarm_callback(df)
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/scheduler/status")
-async def control_scheduler(data: dict = Body(...)):
-    action = data.get("action")
-    if not scheduler_instance: raise HTTPException(status_code=500, detail="Scheduler not ready")
-    if action == "stop": scheduler_instance.scheduler.pause()
-    elif action == "start":
-        scheduler_instance.restart()
-        if scheduler_instance.scheduler.state == 2: scheduler_instance.scheduler.resume()
-    return await get_scheduler_status()
 
 # --- [Phase 9] Data Drift & Auto-Retraining API ---
 
@@ -548,10 +563,6 @@ async def check_drift_and_retrain(background_tasks: BackgroundTasks):
 async def get_rca_rules():
     """현재 등록된 RCA 도메인 룰 테이블 반환"""
     try:
-        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
-            rules = scheduler_instance.detector.rca_engine.get_rules()
-            return {"count": len(rules), "rules": rules}
-        # scheduler 미기동 시 직접 로드
         from src.rca.rule_engine import RCAEngine
         engine = RCAEngine()
         rules = engine.get_rules()
@@ -571,12 +582,9 @@ async def add_rca_rule(rule: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Invalid track. Must be 'traffic', 'optical' or 'integrated'.")
     
     try:
-        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
-            success = scheduler_instance.detector.rca_engine.add_rule(rule)
-        else:
-            from src.rca.rule_engine import RCAEngine
-            engine = RCAEngine()
-            success = engine.add_rule(rule)
+        from src.rca.rule_engine import RCAEngine
+        engine = RCAEngine()
+        success = engine.add_rule(rule)
         
         if success:
             return {"status": "success", "message": f"Rule '{rule['id']}' added.", "rule": rule}
@@ -602,9 +610,6 @@ async def delete_rca_rule(rule_id: str):
             raise HTTPException(status_code=404, detail=f"Rule ID '{rule_id}' not found.")
         with open(DEFAULT_RULES_PATH, "w", encoding="utf-8") as f:
             json.dump(new_rules, f, ensure_ascii=False, indent=2)
-        # 실시간 반영
-        if scheduler_instance and hasattr(scheduler_instance, 'detector'):
-            scheduler_instance.detector.rca_engine.reload_rules()
         return {"status": "success", "message": f"Rule '{rule_id}' deleted."}
     except HTTPException:
         raise

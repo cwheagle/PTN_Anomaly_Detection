@@ -36,15 +36,15 @@
 ## 🏗️ 시스템 아키텍처
 
 ```
-MySQL DB (분산)          FastAPI 백엔드              Vue 3 프론트엔드
-┌─────────────┐         ┌──────────────────────┐    ┌───────────────────┐
-│ Traffic DB  │──15min──▶  DataFetcher           │    │  실시간 대시보드   │
-│ Optical DB  │         │  Preprocessor          │◀──▶│  RCA 진단 뷰      │
-└─────────────┘         │  InferenceEngine        │    │  Rule Management  │
-                        │  RCA Engine             │    │  Model Management │
-                        │  Dynamic Threshold      │───▶│  알람/이벤트 패널 │
-                        │  Auto-Retraining MLOps  │    └───────────────────┘
-                        └──────────────────────┘
+MySQL DB (분산)          Kafka Message Bus           FastAPI & Vue
+┌─────────────┐         ┌─────────────────┐         ┌───────────────────┐
+│ Traffic DB  │──수집──▶│ ptn_metrics     │──구독──▶│ Consumer Workers  │
+│ Optical DB  │         │ (Kafka Topic)   │         │ (추론 & RCA 진단) │
+└─────────────┘         └─────────────────┘         └─────────┬─────────┘
+                                                              │ 웹훅 알람
+                                                    ┌─────────▼─────────┐
+                                                    │ API Server (SSE)  │──▶ 대시보드
+                                                    └───────────────────┘
 ```
 
 ### 분석 트랙
@@ -120,11 +120,22 @@ cp src/config.py.example src/config.py
 # config.py 편집: DB 호스트, 포트, 계정, 대상 장비 정보 입력
 ```
 
-### 2. 백엔드 서버 실행 및 모델 학습
+### 2. 인프라 및 서버 실행 (Docker Compose)
+
+분산 아키텍처 구동을 위해 Kafka와 Redis를 먼저 실행합니다.
 
 ```bash
-# FastAPI 서버 시작 (15분 주기 자동 추론 포함)
-uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+# 인프라 가동 (Kafka, Zookeeper, Redis)
+docker-compose up -d
+
+# API 서버 시작 (Background 유지보수 스케줄러 포함)
+python src\api\main.py
+
+# 워커(Consumer) 시작
+python src\pipeline\kafka_consumer.py
+
+# 데이터 수집기(Producer) 시작
+python src\pipeline\kafka_producer.py
 ```
 
 서버 기동 후 **Model Management UI** 또는 API로 초기 모델 학습을 시작합니다.
@@ -198,9 +209,9 @@ npm run dev
 | Phase 8 | RCA 엔진 코어 및 Rule Management UI | ✅ 완료 |
 | Phase 9 | 3-Sigma 동적 임계치 + 자동 재학습 파이프라인 | ✅ 완료 |
 | Phase 10 | 오프라인 모델 검증 및 TTF-Aware F1-Score 평가 | ✅ 완료 |
-| **Phase 11** | **MLOps 고도화 (정답지 자동화, Feature Engineering, MLflow)** | 🔜 진행 예정 |
-| Phase 12 | 대용량 분산 처리 (Kafka, Kubernetes) | 📋 계획 |
-| Phase 13 | XAI (SHAP/LIME) 및 Human-in-the-loop | 📋 계획 |
+| Phase 11 | MLOps 고도화 (Alert Dampening, Lightweight Registry) | ✅ 완료 |
+| Phase 12 | 대용량 분산 처리 (Kafka, Redis, Dockerization) | ✅ 완료 |
+| **Phase 13** | **XAI (SHAP/LIME) 및 능동 학습 (Active Learning)** | 🔜 진행 예정 |
 
 ---
 
@@ -236,10 +247,10 @@ python scripts/evaluate_model.py
 
 ## 🛠️ 기술 스택
 
-**백엔드**
+**백엔드 & 인프라**
 - Python, PyTorch (LSTM-Autoencoder)
 - FastAPI, Uvicorn (ASGI 서버)
-- APScheduler (15분 주기 스케줄링)
+- Apache Kafka (분산 메시징 버스), Redis (분산 상태 관리)
 - MySQL, mysql-connector-python
 - scikit-learn (RobustScaler), Pandas, joblib
 
