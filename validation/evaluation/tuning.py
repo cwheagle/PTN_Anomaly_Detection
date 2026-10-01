@@ -16,6 +16,7 @@ import time
 import numpy as np
 import pandas as pd
 
+from validation.evaluation.baselines import BASELINES
 from validation.evaluation.metrics import summarize
 from validation.simulator.scenario_generator import load
 from src.pipeline.alerting import (AlertPolicy, dampening_step, dynamic_threshold, level_from_severity,
@@ -140,3 +141,13 @@ def select_policy(df, min_early=0.70, max_fp=0.02):
     """조기 탐지율 >= min_early 이고 오탐 <= max_fp 인 정책 중 이벤트 F1 이 최대인 행을 반환 (없으면 None)"""
     ok = df[(df["early_detection_rate"] >= min_early) & (df["false_incidents_per_port_day"] <= max_fp)]
     return None if ok.empty else ok.sort_values("event_f1", ascending=False).iloc[0]
+
+
+def baseline_alarms(data, rows, name):
+    """기준선 알람을 AI 가 채점한 스텝(rows)과 같은 스텝에서 계산"""
+    raw = data["traffic"].merge(data["optical"], on=KEY + ["occur_date"], how="outer")
+    b = BASELINES[name](raw)
+    merged = rows[KEY + ["occur_date"]].merge(pd.concat([raw[KEY + ["occur_date"]], b], axis=1),
+                                              on=KEY + ["occur_date"], how="left")
+    return pd.DataFrame({**{k: merged[k] for k in KEY + ["occur_date"]},
+                         "alarm": merged["alarm"].fillna(False).astype(bool), "severity": merged["score"].fillna(0.0)})

@@ -319,6 +319,13 @@ python validation/cli/train_isolated.py --variant noisy --out validation/runs/mo
 python validation/cli/evaluate_model.py --models-dir validation/runs/models_noisy --tag noisymodel
 python validation/cli/compare_reports.py validation/runs/seed7_n6_d14 validation/runs/seed7_n6_d14_clean   # 리포트 비교표
 
+# 알람 정책 튜닝 (재학습 없이): 임계치 배율 x σ x 댐프닝 스윕 -> 선택 규칙으로 정책 추천
+python validation/cli/tune_alerting.py --models-dir <모델폴더> --tag <이름>
+# 개발에 쓰지 않은 시드에서 정책 검증 (평균±표준편차, 기본 정책/기준선과 비교)
+python validation/cli/validate_policy.py --models-dir <모델폴더> --tag <이름> --datasets seed23_n6_d14,seed31_n6_d14 --scale 3 --sigma 2 --damping "heavy(6/4/3)"
+# 시뮬레이션 가정 민감도 (노이즈/장애 강도/유병률/장애 유형 비율)
+python validation/cli/sensitivity.py --models-dir <모델폴더> --scale 3 --sigma 2 --damping "heavy(6/4/3)"
+
 # 모델 오프라인 평가 (이벤트 중심, 시드 고정, 베이스라인 병기 — DB 불필요)
 python validation/cli/evaluate_model.py                 # 기본: seed=7, 6노드x10포트, 14일 (약 2~3분)
 python validation/cli/evaluate_model.py --clean         # 정상 노이즈를 끈 데이터 (분포 이동 영향 분리)

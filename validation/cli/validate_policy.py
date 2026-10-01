@@ -22,9 +22,7 @@ sys.path.insert(0, root_dir)
 os.chdir(root_dir)
 
 from src.pipeline.alerting import AlertPolicy
-from validation.evaluation.baselines import BASELINES
-from validation.evaluation.metrics import KEY
-from validation.evaluation.tuning import DAMPING_PRESETS, evaluate_alarms, get_scores, simulate_alarms, RUNS
+from validation.evaluation.tuning import DAMPING_PRESETS, baseline_alarms, evaluate_alarms, get_scores, simulate_alarms
 
 METRICS = [("early_detection_rate", "조기탐지", "pct"), ("episode_detection_rate", "탐지", "pct"),
            ("lead_time_median_min", "리드(분)", "num"), ("false_incidents_per_port_day", "오탐/포트일", "f3"),
@@ -35,16 +33,6 @@ def fmt(v, kind):
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return "-"
     return {"pct": f"{v:.1%}", "num": f"{v:.0f}", "f3": f"{v:.3f}"}[kind]
-
-
-def baseline_alarms(data, rows, name):
-    """기준선 알람을 AI 가 채점한 스텝(rows)과 같은 스텝에서 계산"""
-    raw = data["traffic"].merge(data["optical"], on=KEY + ["occur_date"], how="outer")
-    b = BASELINES[name](raw)
-    merged = rows[KEY + ["occur_date"]].merge(pd.concat([raw[KEY + ["occur_date"]], b], axis=1),
-                                              on=KEY + ["occur_date"], how="left")
-    return pd.DataFrame({**{k: merged[k] for k in KEY + ["occur_date"]},
-                         "alarm": merged["alarm"].fillna(False).astype(bool), "severity": merged["score"].fillna(0.0)})
 
 
 def main():

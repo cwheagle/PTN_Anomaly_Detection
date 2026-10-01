@@ -86,3 +86,19 @@ PATHS = {
 # Scheduler Configuration
 INTERVAL_MINUTES = 15
 RETENTION_DAYS = 30
+
+# --- 알람 판정 정책 (선택): src/pipeline/alerting.py 의 AlertPolicy 기본값을 덮어쓴다 -------------------
+# 설정하지 않으면 기본 정책(아래 주석의 default)이 적용된다. 모델과 짝으로 정해야 하므로 모델 승격 시 함께 검토할 것.
+#
+#   default (기본)            : threshold_scale=1.0, sigma_k=3.0, dampening_steps={1: 3, 2: 2, 3: 1}
+#   precision (오탐 억제형)    : threshold_scale=3.0, sigma_k=2.0, dampening_steps={1: 6, 2: 4, 3: 3}
+#
+# precision 프리셋 (시뮬레이션 기준, 정상 변동을 포함해 학습한 모델 'noisy' 와 짝):
+#   검증 전용 시드 3개 평균 이벤트 F1 0.617 -> 0.796, 오탐 0.100 -> 0.010 건/포트·일,
+#   그 대가로 조기 탐지율 77% -> 65%, 리드타임 중앙값 205 -> 152분 (알람이 최소 연속 3스텝=45분 뒤에 나감).
+#   현장이 오탐과 예지 중 무엇을 더 중시하는지에 따라 선택. 실데이터로 검증된 값이 아님.
+# ALERT_POLICY = {
+#     "threshold_scale": 3.0,
+#     "sigma_k": 2.0,
+#     "dampening_steps": {1: 6, 2: 4, 3: 3},   # MINOR / MAJOR / CRITICAL 이 알람이 되기 위한 연속 스텝 수
+# }

@@ -80,5 +80,24 @@ def test_dampening_policy_can_be_relaxed_or_tightened():
     assert _run([3, 3], strict) == [False, True]
 
 
-def test_load_policy_defaults_without_override():
-    assert load_policy() == AlertPolicy() or load_policy().dampening_steps == {1: 3, 2: 2, 3: 1}
+def test_load_policy_defaults_without_override(monkeypatch):
+    import src.config as cfg
+    monkeypatch.delattr(cfg, "ALERT_POLICY", raising=False)
+    assert load_policy() == AlertPolicy()
+
+
+def test_load_policy_applies_config_override(monkeypatch):
+    """src/config.py 의 ALERT_POLICY(config.py.example 의 precision 프리셋)가 정책으로 반영되어야 함"""
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "ALERT_POLICY", {"threshold_scale": 3.0, "sigma_k": 2.0,
+                                              "dampening_steps": {1: 6, 2: 4, 3: 3}}, raising=False)
+    p = load_policy()
+    assert (p.threshold_scale, p.sigma_k) == (3.0, 2.0)
+    assert p.dampening_steps == {1: 6, 2: 4, 3: 3}
+    assert p.dyn_cap == 1.2                                  # 지정하지 않은 값은 기본값 유지
+
+
+def test_load_policy_ignores_unknown_keys(monkeypatch):
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "ALERT_POLICY", {"no_such_option": 1, "sigma_k": 2.5}, raising=False)
+    assert load_policy().sigma_k == 2.5
