@@ -130,6 +130,23 @@ docker-compose up -d --build
 docker-compose ps
 ```
 
+**CPU 아키텍처 (`PTN_PLATFORM`)**: 기본값은 GPU 서버(arm64)용 `linux/arm64` 입니다. x86 PC 에서 로컬 테스트할 때는 에뮬레이션을 피하도록 `linux/amd64` 로 덮어씁니다.
+```text
+# 권장: 프로젝트 루트의 .env 파일 (docker compose 가 자동으로 읽음, git 제외). 템플릿: .env.example
+PTN_PLATFORM=linux/amd64
+DB_NAME=cowptn_test
+```
+```powershell
+# 또는 셸에서 일회성 지정 (Windows PowerShell)
+$env:PTN_PLATFORM="linux/amd64"; docker compose up -d --build
+```
+```bash
+# Linux / macOS / Git Bash
+PTN_PLATFORM=linux/amd64 docker compose up -d --build
+```
+> Windows 는 Docker Desktop 이 **Linux containers** 모드여야 합니다. 컨테이너에서 호스트 MySQL 은 `host.docker.internal` 로 접속하므로, MySQL 의 `root` 계정이 외부 호스트(`'%'`)에서 접속 가능해야 합니다.
+> 로컬 테스트가 통과해도 arm64 이미지의 빌드/실행(aarch64 wheel 유무 등)은 별도로 확인해야 합니다.
+
 서버 기동 후 **Model Management UI** 또는 API로 초기 모델 학습을 시작합니다.
 
 ```bash

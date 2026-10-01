@@ -48,6 +48,8 @@
 
     - **폴더 구조 정리 (2026-10-01)**: 솔루션(`src/`, `ui/`)과 검증 도구를 분리. `tools/`+`scripts/` → `validation/`(simulator, evaluation, cli, runs). `src` → `validation` 방향 import 금지(`tests/test_architecture.py`). 구형 코드 정리: `collect_data.py`, 구형 이력 생성기 3종(`generate_history`, `generate_rca_history`, `realtime_injector`) 삭제 → `validation/cli/seed_db.py`로 대체, 레거시 정답지는 `validation/runs/legacy/` 로 보관. `tests/`는 Phase 이름 기반 파일을 해체해 `src/` 구조를 따르는 모듈별 배치로 재정리 (72 PASS).
 
+    - **배치-스트리밍 동등성 검증 (2026-10-01)**: 평가(전체 시계열 배치)와 운영(Consumer 건별 16행 윈도우)의 결과를 실제 `process_message` 로 재생해 비교(12포트, 약 1.6만 건). 기존 윈도우는 `ma_16` 이력이 잘려 알람 99.84%/심각도 차이 0.50 일치였고, 필요 길이를 `window_size+15=27` 로 수정 후 100%/0.00 일치. 지금까지의 평가 수치는 스트리밍 운영에서도 성립. RCA 룰 16개 중 6개가 잘못된 키로 매칭되지 않던 문제 수정 및 룰 검증 추가. `docker-compose` 플랫폼을 `PTN_PLATFORM` 환경변수로 변경(기본 arm64).
+
 - **대기 중 (Phase 13)**:
     - **XAI (설명 가능한 AI)**: SHAP/LIME을 통한 폭포수 차트 구현.
     - **능동 학습 (Active Learning)**: 관리자 피드백 기반 실시간 라벨링 및 RLHF 파이프라인.

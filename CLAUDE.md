@@ -16,6 +16,6 @@ Claude Code도 아래 문서를 **동일한 규범**으로 따릅니다. (중복
 - **상태 동기화**: 큰 작업 완료 시 `GEMINI.md`의 `Status` 섹션을 업데이트합니다. 진행 상태의 원본은 `GEMINI.md` 하나로 유지하며, 이 파일(`CLAUDE.md`)에는 상태를 따로 기록하지 않습니다.
 - **테스트 실행**: `pytest -v` (모듈 단위: `pytest tests/models/ -v`). `tests/` 는 `src/` 구조를 따르는 모듈별 배치.
 - **폴더 규칙**: `src/`·`ui/` 는 솔루션, `validation/` 은 시뮬레이터·평가·실험 도구(`validation/README.md`). `src` 는 `validation` 을 import 하지 않음(`tests/test_architecture.py`). 모델 평가는 `python validation/cli/evaluate_model.py`.
-- **통합 실행**: `docker-compose up -d --build` (인프라만 실행: `docker-compose up -d kafka redis zookeeper`)
+- **통합 실행**: `docker-compose up -d --build` (인프라만 실행: `docker-compose up -d kafka redis zookeeper`). 기본 플랫폼은 arm64(GPU 서버)이며, 로컬(Windows x86) 테스트는 프로젝트 루트 `.env` 의 `PTN_PLATFORM=linux/amd64` 를 사용 (`.env.example` 참고, git 제외).
 - **로컬 API 서버**: `python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload`
 - **환경**: Windows 11. `src/config.py`는 `src/config.py.example`을 기반으로 하며 DB 접속 정보 등을 포함합니다(`.gitignore` 처리됨).

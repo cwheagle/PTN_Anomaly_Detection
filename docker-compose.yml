@@ -1,6 +1,6 @@
 services:
   zookeeper:
-    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    platform: ${PTN_PLATFORM:-linux/arm64}  # 기본: GPU 서버(arm64). 로컬 x86 테스트는 PTN_PLATFORM=linux/amd64
     image: confluentinc/cp-zookeeper:7.5.0
     hostname: zookeeper
     container_name: zookeeper
@@ -11,7 +11,7 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
 
   kafka:
-    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    platform: ${PTN_PLATFORM:-linux/arm64}  # 기본: GPU 서버(arm64). 로컬 x86 테스트는 PTN_PLATFORM=linux/amd64
     image: confluentinc/cp-kafka:7.5.0
     hostname: kafka
     container_name: kafka
@@ -28,7 +28,7 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
   redis:
-    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    platform: ${PTN_PLATFORM:-linux/arm64}  # 기본: GPU 서버(arm64). 로컬 x86 테스트는 PTN_PLATFORM=linux/amd64
     image: redis:7.2-alpine
     hostname: redis
     container_name: redis
@@ -37,7 +37,7 @@ services:
     command: redis-server --save 60 1 --loglevel warning
 
   api:
-    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    platform: ${PTN_PLATFORM:-linux/arm64}  # 기본: GPU 서버(arm64). 로컬 x86 테스트는 PTN_PLATFORM=linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.api
@@ -64,7 +64,7 @@ services:
       - redis
 
   ui:
-    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    platform: ${PTN_PLATFORM:-linux/arm64}  # 기본: GPU 서버(arm64). 로컬 x86 테스트는 PTN_PLATFORM=linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.ui
@@ -76,7 +76,7 @@ services:
       - api
 
   consumer:
-    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    platform: ${PTN_PLATFORM:-linux/arm64}  # 기본: GPU 서버(arm64). 로컬 x86 테스트는 PTN_PLATFORM=linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.consumer
@@ -103,7 +103,7 @@ services:
       - api
 
   producer:
-    platform: linux/arm64 # linux/amd64, windows/amd64, ...
+    platform: ${PTN_PLATFORM:-linux/arm64}  # 기본: GPU 서버(arm64). 로컬 x86 테스트는 PTN_PLATFORM=linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.producer
