@@ -25,12 +25,17 @@ class DBConnector:
                 port=self.config['port']
             )
         except Error as e:
-            print(f"[DB] Connection pool error: {e}")
+            # lessons #14: 접속 실패를 조용히 넘기면 상위 로직이 캐시 데이터로 오동작함 -> 명시적으로 중단
+            raise RuntimeError(
+                f"[DB] Connection pool init failed ({self.config['host']}:{self.config['port']}/"
+                f"{self.config['database']}): {e}"
+            ) from e
 
     def get_connection(self):
         try:
             return self.pool.get_connection()
-        except:
+        except Exception as e:
+            print(f"[DB] Failed to get connection from pool: {e}")
             return None
 
     def _ensure_anomaly_table(self):
@@ -121,9 +126,9 @@ class DBConnector:
 
     def fetch_traffic(self, start_time, end_time, stop_checker=None):
         """이더넷 트래픽 성능 데이터 조회"""
-        start_dt = pd.to_datetime(start_time).floor('h')
-        end_dt = pd.to_datetime(end_time).floor('h')
-        hours = pd.date_range(start=start_dt, end=end_dt, freq='h')
+        start_ts, end_ts = pd.to_datetime(start_time), pd.to_datetime(end_time)
+        start_str, end_str = start_ts.strftime('%Y-%m-%d %H:%M:%S'), end_ts.strftime('%Y-%m-%d %H:%M:%S')
+        hours = pd.date_range(start=start_ts.floor('h'), end=end_ts.floor('h'), freq='h')
         conn = self.get_connection()
         if not conn: return None
         all_dfs = []
@@ -139,13 +144,13 @@ class DBConnector:
                     SELECT occur_date, ip_addr, cid, lid,
                            bbe_in_error as error_packet, es as tx_packet, ses as rx_packet
                     FROM {table}
-                    WHERE signal_type = {SIGNAL_TYPES['ETH']}
-                      AND occur_date BETWEEN '{start_time}' AND '{end_time}'
+                    WHERE signal_type = %s
+                      AND occur_date BETWEEN %s AND %s
                 """
                 cursor = conn.cursor()
                 cursor.execute(f"SHOW TABLES LIKE '{table}'")
                 if cursor.fetchone():
-                    df = pd.read_sql(query, conn)
+                    df = pd.read_sql(query, conn, params=(SIGNAL_TYPES['ETH'], start_str, end_str))
                     if not df.empty: all_dfs.append(df)
                 cursor.close()
             return pd.concat(all_dfs, ignore_index=True) if all_dfs else None
@@ -154,9 +159,9 @@ class DBConnector:
 
     def fetch_optical(self, start_time, end_time, stop_checker=None):
         """광파워 성능 데이터 조회"""
-        start_dt = pd.to_datetime(start_time).floor('h')
-        end_dt = pd.to_datetime(end_time).floor('h')
-        hours = pd.date_range(start=start_dt, end=end_dt, freq='h')
+        start_ts, end_ts = pd.to_datetime(start_time), pd.to_datetime(end_time)
+        start_str, end_str = start_ts.strftime('%Y-%m-%d %H:%M:%S'), end_ts.strftime('%Y-%m-%d %H:%M:%S')
+        hours = pd.date_range(start=start_ts.floor('h'), end=end_ts.floor('h'), freq='h')
         conn = self.get_connection()
         if not conn: return None
         all_dfs = []
@@ -171,12 +176,12 @@ class DBConnector:
                 query = f"""
                     SELECT occur_date, ip_addr, cid, lid, tx_avg_power, rx_avg_power
                     FROM {table}
-                    WHERE occur_date BETWEEN '{start_time}' AND '{end_time}'
+                    WHERE occur_date BETWEEN %s AND %s
                 """
                 cursor = conn.cursor()
                 cursor.execute(f"SHOW TABLES LIKE '{table}'")
                 if cursor.fetchone():
-                    df = pd.read_sql(query, conn)
+                    df = pd.read_sql(query, conn, params=(start_str, end_str))
                     if not df.empty: all_dfs.append(df)
                 cursor.close()
             return pd.concat(all_dfs, ignore_index=True) if all_dfs else None

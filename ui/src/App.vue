@@ -109,6 +109,7 @@ const route = useRoute()
 const activeToasts = ref<any[]>([])
 const showNotificationCenter = ref(false)
 const sseSource = ref<EventSource | null>(null)
+let refreshInterval: ReturnType<typeof setInterval> | null = null
 
 const setupSSE = () => {
   if (sseSource.value) sseSource.value.close()
@@ -135,7 +136,6 @@ const setupSSE = () => {
     } 
     else if (data.type === 'CLEAR') {
       // 2. 자동 해제: 정상으로 돌아온 포트의 알람은 목록에서 삭제
-      const wasExisting = store.alarms.some(a => `${a.ip_addr}-${a.slot_id}-${a.port_id}` !== key)
       store.alarms = store.alarms.filter(a => `${a.ip_addr}-${a.slot_id}-${a.port_id}` !== key)
       
       const toastId = Date.now()
@@ -162,14 +162,14 @@ onMounted(() => {
   store.fetchActiveAlarms()
   setupSSE()
   
-  const interval = setInterval(() => {
+  refreshInterval = setInterval(() => {
     store.fetchAnomalies()
     store.fetchWatchlist()
   }, 60000)
-  onUnmounted(() => clearInterval(interval))
 })
 
 onUnmounted(() => {
+  if (refreshInterval) clearInterval(refreshInterval)
   if (sseSource.value) sseSource.value.close()
 })
 </script>

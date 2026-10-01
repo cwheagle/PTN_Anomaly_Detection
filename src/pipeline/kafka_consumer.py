@@ -21,6 +21,10 @@ from src.config import KAFKA_CONFIG, MODEL_CONFIG, RETENTION_DAYS, REDIS_CONFIG,
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+CRITICAL_LEVEL = 3
+
+METRIC_COLS = ['tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power']
+
 class PTNKafkaConsumer:
     """
     Kafka 토픽을 구독하여 실시간 스트림 데이터를 처리하는 추론 엔진 워커 (Consumer).
@@ -33,6 +37,9 @@ class PTNKafkaConsumer:
         
         # 모델의 window_size(기본 12) + 추세 분석용 과거 4시점 = 총 16시점 필요
         self.required_size = MODEL_CONFIG.get('window_size', 12) + 4
+
+        # 포트별 직전 알람 레벨 (CRITICAL -> 정상 복구 시 CLEAR 웹훅을 보내기 위함, 프로세스 메모리)
+        self._last_alarm_level = {}
 
         conf = {
             'bootstrap.servers': KAFKA_CONFIG['bootstrap_servers'],
@@ -59,8 +66,16 @@ class PTNKafkaConsumer:
                     track = data.get('track')
                     logger.info(f"[Control] Received reload request for {track} model")
                     self.detector.reload_model(track)
+                elif data.get('action') == 'reload_rules':
+                    logger.info("[Control] Received RCA rules reload request")
+                    self.detector.rca_engine.reload_rules()
             except Exception as e:
                 logger.error(f"[Control] Failed to parse control message: {e}")
+
+    @staticmethod
+    def should_notify(is_anomaly, alarm_label, prev_level) -> bool:
+        """API 웹훅 전송 여부: 이상/알람 상태이거나, 직전에 CRITICAL이었다가 복구된 경우(CLEAR 전달)"""
+        return bool(is_anomaly) or alarm_label != "NORMAL" or prev_level >= CRITICAL_LEVEL
 
     def process_message(self, key_str: str, record: dict):
         """
@@ -84,6 +99,10 @@ class PTNKafkaConsumer:
         df = pd.DataFrame(window_data)
         if 'occur_date' in df.columns:
             df['occur_date'] = pd.to_datetime(df['occur_date'])
+        # Producer가 결측을 null로 보내므로, 전부 null인 컬럼이 object가 되지 않도록 수치형으로 강제 변환
+        for col in METRIC_COLS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
         # 5. AnomalyDetector 실행 (최신 시점 결과 1건만 반환)
         # Producer에서 Traffic/Optical을 병합해서 보냈으므로 동일한 df를 양쪽에 넣음
@@ -96,8 +115,13 @@ class PTNKafkaConsumer:
             
             logger.info(f"[{key_str}] Processed! Anomaly: {is_anomaly}, Alarm: {alarm}")
             
-            if is_anomaly or alarm != "NORMAL":
-                logger.info(f"[{key_str}] Anomaly Detected! Alarm: {alarm}")
+            level = int(results.iloc[0].get('alarm_level', 0) or 0)
+            prev_level = self._last_alarm_level.get(key_str, 0)
+            self._last_alarm_level[key_str] = level
+
+            if self.should_notify(is_anomaly, alarm, prev_level):
+                if is_anomaly or alarm != "NORMAL":
+                    logger.info(f"[{key_str}] Anomaly Detected! Alarm: {alarm}")
                 # 웹훅을 통해 API 서버에 SSE 발송 요청
                 try:
                     payload = results.replace({np.nan: None}).to_dict(orient="records")

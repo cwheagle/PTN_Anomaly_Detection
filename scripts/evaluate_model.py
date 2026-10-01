@@ -1,7 +1,7 @@
 import os
 import sys
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 # 프로젝트 루트 디렉토리를 path에 추가 (scripts 폴더에서 실행 시 패키지 인식 목적)
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,12 +39,12 @@ def evaluate():
     df_t = db.fetch_traffic(start_str, end_str)
     df_o = db.fetch_optical(start_str, end_str)
     
-    if df_t.empty and df_o.empty:
+    if (df_t is None or df_t.empty) and (df_o is None or df_o.empty):
         print("[!] DB returned empty datasets. Ensure you have generated history data.")
         return
         
     # 3. 모델 추론 진행
-    print(f"[*] Running AI Inference on {len(df_t)} traffic records and {len(df_o)} optical records...")
+    print(f"[*] Running AI Inference on {0 if df_t is None else len(df_t)} traffic records and {0 if df_o is None else len(df_o)} optical records...")
     detector = AnomalyDetector()
     
     # latest_only=False 를 주어 과거 전체에 대한 추론 수행

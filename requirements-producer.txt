@@ -1,0 +1,6 @@
+# Producer 컨테이너 전용 최소 의존성 (torch/scikit-learn/fastapi 불필요)
+mysql-connector-python  # MySQL 드라이버 (DBConnector)
+APScheduler             # 15분 주기 스케줄링
+pandas                  # 데이터 조회/병합
+numpy                   # pandas 의존 및 수치 처리
+confluent-kafka         # Kafka Producer

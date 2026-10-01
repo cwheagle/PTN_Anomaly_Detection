@@ -19,6 +19,7 @@ root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 sys.path.append(root_dir)
 os.chdir(root_dir) # 작업 디렉토리를 프로젝트 루트로 강제 변경
 
+from src.api.alarm_tracker import plan_alarm_events
 from src.data.db_connector import DBConnector
 from src.data.data_collector import DataCollector
 from src.models.trainer import Trainer
@@ -56,56 +57,25 @@ async def broadcast_alarm(alarm_data: dict):
 active_alarms_state = {}
 
 async def alarm_callback(anomalies_df):
-    """스케줄러에서 호출할 콜백 함수: 중복 방지 및 자동 해제 로직 포함"""
-    global active_alarms_state
-    
-    # 1. 현재 탐지된 Critical 목록 추출
-    criticals = anomalies_df[anomalies_df['alarm_label'] == 'CRITICAL']
-    current_critical_keys = set()
-    
-    for _, row in criticals.iterrows():
-        key = (row['ip_addr'], int(row['cid']), int(row['lid']))
-        current_critical_keys.add(key)
-        
-        # 중복 발송 방지: 동일 포트, 동일 발생 시점이면 무시
-        if key in active_alarms_state and active_alarms_state[key] == str(row['occur_date']):
-            continue
-            
-        # 신규 발생 또는 업데이트된 알람 발송
-        alarm_info = {
-            "type": "ALARM",
-            "event_time": str(row['occur_date']),
-            "ip_addr": row['ip_addr'],
-            "slot_id": int(row['cid']),
-            "port_id": int(row['lid']),
-            "severity": row['alarm_label'],
-            "message": row['anomaly_reason']
-        }
-        
-        # 실제 전송에 성공했을 때만 상태 업데이트
-        if await broadcast_alarm(alarm_info):
-            active_alarms_state[key] = str(row['occur_date'])
-            print(f"[SSE] Successfully broadcasted ALARM: {key}")
-        else:
-            print(f"[SSE] Retrying ALARM later (No clients): {key}")
+    """Consumer 웹훅 콜백: 포트 단위로 알람 발생/해제를 판단 (중복 방지 포함)
 
-    # 2. 자동 해제(Recovery) 처리
-    # 이전에 Critical이었으나 현재 목록에 없는 경우 해제 이벤트 전송
-    prev_critical_keys = set(active_alarms_state.keys())
-    recovered_keys = prev_critical_keys - current_critical_keys
-    
-    for key in recovered_keys:
-        clear_info = {
-            "type": "CLEAR",
-            "event_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "ip_addr": key[0],
-            "slot_id": key[1],
-            "port_id": key[2],
-            "message": "Alarm cleared"
-        }
-        await broadcast_alarm(clear_info)
-        del active_alarms_state[key]
-        print(f"[SSE] Broadcasted CLEAR: {key}")
+    payload에 포함된 포트의 상태만 평가한다. (Consumer는 포트 1건씩 전송하므로,
+    payload에 없는 포트를 '복구'로 간주하면 다른 포트의 알람이 잘못 해제된다.)
+    """
+    events = plan_alarm_events(anomalies_df.to_dict(orient="records"), active_alarms_state)
+
+    for event, key, occur in events:
+        if event["type"] == "ALARM":
+            # 실제 전송에 성공했을 때만 상태 업데이트 (클라이언트가 없으면 다음에 재시도)
+            if await broadcast_alarm(event):
+                active_alarms_state[key] = occur
+                print(f"[SSE] Successfully broadcasted ALARM: {key}")
+            else:
+                print(f"[SSE] Retrying ALARM later (No clients): {key}")
+        else:
+            await broadcast_alarm(event)
+            active_alarms_state.pop(key, None)
+            print(f"[SSE] Broadcasted CLEAR: {key}")
 
 maintenance_scheduler = BackgroundScheduler()
 
@@ -135,7 +105,7 @@ def run_daily_maintenance():
                 if training_status.get(ft, {}).get("is_training"):
                     continue
                 saved_config = {}
-                meta_path = PATHS[ft]['model'].replace('.pth', '.json')
+                _, meta_path = get_active_model_info(ft)  # 레지스트리의 Active 버전 메타데이터
                 if os.path.exists(meta_path):
                     try:
                         with open(meta_path, 'r') as f:
@@ -373,6 +343,9 @@ async def train_model(
     test_end: str = Query(None)
 ):
     """사용자가 지정한 훈련 설정 및 날짜 범위를 기반으로 모델 재학습 시작"""
+    if training_status.get(ft, {}).get("is_training"):
+        raise HTTPException(status_code=409, detail=f"{ft} training is already in progress.")
+
     # 날짜 파라미터가 없으면 기본값 생성
     now = datetime.now()
     if not train_start: train_start = (now - timedelta(days=37)).strftime('%Y-%m-%d')
@@ -386,6 +359,8 @@ async def train_model(
         'test_start': test_start,
         'test_end': test_end
     }
+    # 백그라운드 작업이 시작되기 전의 연타도 막기 위해 즉시 학습 중으로 표시
+    training_status[ft]["is_training"] = True
     background_tasks.add_task(run_training_pipeline, ft, training_config, date_params)
     return {
         "status": "started", 
@@ -539,7 +514,7 @@ async def check_drift_and_retrain(background_tasks: BackgroundTasks):
                 
             # 기존에 저장된 모델 설정(epochs, lr 등)을 불러옴
             saved_config = {}
-            meta_path = PATHS[ft]['model'].replace('.pth', '.json')
+            _, meta_path = get_active_model_info(ft)  # 레지스트리의 Active 버전 메타데이터
             if os.path.exists(meta_path):
                 try:
                     with open(meta_path, 'r') as f:
@@ -558,6 +533,13 @@ async def check_drift_and_retrain(background_tasks: BackgroundTasks):
     return result
 
 # --- [Phase 8] RCA Rules API ---
+
+def _publish_rules_reload():
+    """룰 변경을 Consumer들에 전파 (Redis Pub/Sub). 실패해도 API 응답에는 영향 없음."""
+    try:
+        redis_client.publish('ptn_control', json.dumps({'action': 'reload_rules'}))
+    except Exception as e:
+        print(f"[!] [RCA] Failed to broadcast rules reload: {e}")
 
 @app.get("/api/rca/rules")
 async def get_rca_rules():
@@ -587,6 +569,7 @@ async def add_rca_rule(rule: dict = Body(...)):
         success = engine.add_rule(rule)
         
         if success:
+            _publish_rules_reload()
             return {"status": "success", "message": f"Rule '{rule['id']}' added.", "rule": rule}
         else:
             raise HTTPException(status_code=409, detail=f"Rule ID '{rule.get('id')}' already exists or save failed.")
@@ -610,6 +593,7 @@ async def delete_rca_rule(rule_id: str):
             raise HTTPException(status_code=404, detail=f"Rule ID '{rule_id}' not found.")
         with open(DEFAULT_RULES_PATH, "w", encoding="utf-8") as f:
             json.dump(new_rules, f, ensure_ascii=False, indent=2)
+        _publish_rules_reload()
         return {"status": "success", "message": f"Rule '{rule_id}' deleted."}
     except HTTPException:
         raise

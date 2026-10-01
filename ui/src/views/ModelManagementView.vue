@@ -27,7 +27,7 @@
             </div>
             <div>
               <h3 class="text-lg font-bold text-slate-200">Data Drift Monitor</h3>
-              <p class="text-xs text-slate-400">Detects baseline distribution shift (24H Average MSE vs Validation Loss) and automatically triggers retraining.</p>
+              <p class="text-xs text-slate-400">Detects baseline distribution shift (24H Average Score vs Training Baseline MSE) and automatically triggers retraining.</p>
             </div>
           </div>
           <button @click="handleCheckDrift"
@@ -55,7 +55,7 @@
                 </div>
               </div>
               <div class="text-right">
-                <div class="text-[10px] text-slate-500 mb-1">Baseline Val Loss</div>
+                <div class="text-[10px] text-slate-500 mb-1">Baseline MSE</div>
                 <div class="font-mono text-xs text-slate-400">{{ store.driftStatus[ft]?.baseline_mse?.toFixed(5) }}</div>
                 <div class="text-[10px] text-slate-500 mb-1 mt-1">24H Average MSE</div>
                 <div class="font-mono text-xs text-slate-400">{{ store.driftStatus[ft]?.mean_mse?.toFixed(5) }}</div>

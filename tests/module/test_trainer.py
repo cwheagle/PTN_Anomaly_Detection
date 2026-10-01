@@ -1,37 +1,76 @@
-import pytest
+import json
 import os
-import pandas as pd
-from src.models.trainer import Trainer
-from src.config import PATHS
 
-def test_trainer_with_real_data(monkeypatch):
-    """실제 생성된 train_data.csv를 사용하여 학습 프로세스 검증"""
-    train_data_path = "data/train_data.csv"
-    if not os.path.exists(train_data_path):
-        pytest.skip("train_data.csv가 없습니다. test_simul을 먼저 실행하세요.")
-        
-    trainer = Trainer()
-    
-    # 설정 최적화: 테스트 속도를 위해 최소한의 실행
-    trainer.config['epochs'] = 1
-    
-    # 모델 및 스케일러 저장 경로를 테스트용으로 임시 변경
-    test_model_path = "models/test_model.pth"
-    test_scaler_path = "models/test_scaler.joblib"
-    monkeypatch.setitem(PATHS, 'model_save_path', test_model_path)
-    monkeypatch.setitem(PATHS, 'scaler_save_path', test_scaler_path)
-    
-    try:
-        # 학습 실행 (data/train_data.csv 사용)
-        trainer.train(train_data_path)
-        
-        # 파일 생성 확인
-        assert os.path.exists(test_model_path)
-        assert os.path.exists(test_scaler_path)
-        
-    finally:
-        # 테스트 완료 후 임시 파일 삭제
-        if os.path.exists(test_model_path):
-            os.remove(test_model_path)
-        if os.path.exists(test_scaler_path):
-            os.remove(test_scaler_path)
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.config import PATHS
+from src.models.trainer import Trainer
+
+
+@pytest.fixture
+def tiny_train_csv(tmp_path):
+    """학습 가능한 최소 규모의 합성 traffic 데이터 (2개 포트 x 80시점)"""
+    n = 80
+    rng = np.random.default_rng(0)
+    frames = []
+    for lid in (1, 2):
+        frames.append(pd.DataFrame({
+            'occur_date': pd.date_range('2026-04-01', periods=n, freq='15min'),
+            'ip_addr': '10.0.0.1', 'cid': 1, 'lid': lid,
+            'tx_packet': rng.integers(900, 1100, n),
+            'rx_packet': rng.integers(900, 1100, n),
+            'error_packet': 0,
+        }))
+    path = tmp_path / "traffic_train.csv"
+    pd.concat(frames, ignore_index=True).to_csv(path, index=False)
+    return str(path)
+
+
+@pytest.fixture
+def isolated_paths(tmp_path, monkeypatch):
+    """모델 산출물이 프로젝트의 models/ 를 건드리지 않도록 PATHS를 임시 경로로 교체"""
+    paths = {
+        'model': str(tmp_path / 'traffic_ae.pth'),
+        'scaler': str(tmp_path / 'traffic_scaler.joblib'),
+    }
+    monkeypatch.setitem(PATHS, 'traffic', paths)
+    return paths
+
+
+def _train(csv_path):
+    trainer = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16})
+    assert trainer.train(train_path=csv_path, val_path=csv_path) is True
+    return trainer
+
+
+def test_trainer_does_not_mutate_global_paths(tiny_train_csv, isolated_paths):
+    """회귀: 학습이 전역 PATHS를 버전 경로로 덮어쓰면 다음 학습 파일명이 v2_v3처럼 누적됨"""
+    before = dict(isolated_paths)
+
+    trainer = _train(tiny_train_csv)
+
+    assert PATHS['traffic'] == before
+    assert os.path.basename(trainer.paths['model']) == 'traffic_ae_v1.pth'
+
+
+def test_registry_versions_increment_cleanly(tiny_train_csv, isolated_paths, tmp_path):
+    """연속 학습 시 traffic_ae_v1 -> traffic_ae_v2 로 증가 (traffic_ae_v1_v2 금지)"""
+    _train(tiny_train_csv)
+    _train(tiny_train_csv)
+
+    registry = json.load(open(tmp_path / 'traffic_registry.json'))
+    assert registry['active_version'] == 'v2'
+    assert [v['model_path'] for v in registry['versions']] == ['traffic_ae_v1.pth', 'traffic_ae_v2.pth']
+    assert os.path.exists(tmp_path / 'traffic_ae_v2.pth')
+    assert os.path.exists(tmp_path / 'traffic_ae_v2.json')
+
+
+def test_metadata_contains_threshold_and_baseline(tiny_train_csv, isolated_paths, tmp_path):
+    """드리프트 감지용 baseline_mse가 메타데이터에 저장되고 임계치 이하의 양수여야 함"""
+    _train(tiny_train_csv)
+
+    meta = json.load(open(tmp_path / 'traffic_ae_v1.json'))
+    assert meta['config']['input_dim'] == 15
+    assert 0 < meta['baseline_mse'] <= meta['threshold']

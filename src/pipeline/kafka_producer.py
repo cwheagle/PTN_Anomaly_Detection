@@ -67,8 +67,9 @@ class PTNKafkaProducer:
             logger.warning("Merged dataframe is empty.")
             return
             
-        # Nan 처리
-        df.fillna(0, inplace=True)
+        # NaN은 0으로 채우지 않고 JSON null로 전달 (결측 광파워가 0 dBm, 결측 트래픽이 0으로
+        # 오인되어 오탐을 만드는 것을 방지). 결측 처리는 Consumer의 DataProcessor가 담당.
+        df = df.astype(object).where(df.notna(), None)
 
         count = 0
         for _, row in df.iterrows():

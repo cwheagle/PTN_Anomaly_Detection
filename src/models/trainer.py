@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
 from .model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
-from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS
+from src.config import MODEL_CONFIG, PATHS
 
 class Trainer:
     def __init__(self, feature_type='traffic', config_override=None, progress_callback=None):
@@ -31,7 +31,8 @@ class Trainer:
         
         # 3. 늘어난 차원(input_dim)을 반영하여 모델 초기화
         self.model = LSTMAutoencoder(self.config).to(self.device)
-        self.paths = PATHS[feature_type]
+        # 전역 PATHS를 오염시키지 않도록 복사본 사용 (학습 시 버전별 경로로 덮어씀)
+        self.paths = dict(PATHS[feature_type])
         
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.config['learning_rate'])
@@ -265,7 +266,9 @@ class Trainer:
                 mses.extend(torch.mean(diff, dim=1).cpu().numpy())
         
         threshold = float(np.percentile(mses, self.config['threshold_percentile']))
-        
+        # 드리프트 감지용 기준값: 추론 시 모니터링하는 score(마지막 시점 MSE)와 동일 지표의 평균
+        baseline_mse = float(np.mean(mses))
+
         # 훈련된 임계치를 config 내부에도 업데이트 (통합 관리)
         self.config['threshold'] = threshold
         
@@ -276,6 +279,7 @@ class Trainer:
             "trained_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "config": self.config,
             "threshold": threshold,
+            "baseline_mse": baseline_mse,
             "samples_used": len(sequences),
             "final_val_loss": float(val_loss) if val_loss is not None else None
         }

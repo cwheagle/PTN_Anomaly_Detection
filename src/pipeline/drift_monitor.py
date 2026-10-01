@@ -1,6 +1,5 @@
 import os
 import json
-import asyncio
 from datetime import datetime, timedelta
 import pandas as pd
 from src.data.db_connector import DBConnector
@@ -46,6 +45,12 @@ class DriftMonitor:
         with open(meta_path, 'r') as f:
             meta = json.load(f)
             
+        # 추론 score와 같은 지표(마지막 시점 MSE 평균)로 저장된 기준값 우선 사용
+        baseline = meta.get("baseline_mse")
+        if baseline is not None and baseline > 0:
+            return baseline
+
+        # (구버전 모델 호환) baseline_mse가 없으면 val_loss 사용 — 지표가 달라 정확도가 낮음, 재학습 시 해소됨
         val_loss = meta.get("final_val_loss")
         if val_loss is not None and val_loss > 0:
             return val_loss

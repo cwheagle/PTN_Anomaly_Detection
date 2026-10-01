@@ -138,7 +138,7 @@ class TestRCAEngine:
         contribs = {'tx_packet': 40.0, 'rx_packet': 30.0, 'error_packet': 30.0}
         result = engine.diagnose('traffic', contribs, is_anomaly=False)
         print(f"\n[TEST] Normal case: {result}")
-        assert result == 'NORMAL', f"Expected 'NORMAL', got: {result}"
+        assert result == ('NORMAL', None), f"Expected ('NORMAL', None), got: {result}"
         print("  PASS: NORMAL returned for non-anomaly")
 
     def test_custom_rule_priority(self):
@@ -150,14 +150,15 @@ class TestRCAEngine:
                 "id": "TEST-001",
                 "track": "traffic",
                 "priority": 10,
-                "condition": "error_contribution > 50",
+                "contributions": {"error_packet": 50},
                 "diagnosis": "테스트 커스텀 진단",
+                "action": "테스트 조치",
             }
         ]
         contribs = {'tx_packet': 10.0, 'rx_packet': 15.0, 'error_packet': 75.0}
         result = engine.diagnose('traffic', contribs, is_anomaly=True)
         print(f"\n[TEST] Custom rule result: {result}")
-        assert result == "테스트 커스텀 진단", \
+        assert result == ("테스트 커스텀 진단", "테스트 조치"), \
             f"Expected custom rule diagnosis, got: {result}"
         print("  PASS: Custom rule applied with priority")
 
@@ -165,7 +166,7 @@ class TestRCAEngine:
         """룰 파일 없을 때 DefaultRuleSet Fallback 동작"""
         engine = RCAEngine(rules_path=None)  # 룰 없음
         contribs = {'tx_packet': 10.0, 'rx_packet': 15.0, 'error_packet': 75.0}
-        result = engine.diagnose('traffic', contribs, is_anomaly=True)
+        result, _action = engine.diagnose('traffic', contribs, is_anomaly=True)
         print(f"\n[TEST] Fallback diagnosis: {result}")
         assert result != 'NORMAL', "Should return some diagnosis, not NORMAL"
         assert len(result) > 0, "Should return non-empty string"
@@ -178,17 +179,18 @@ class TestRCAEngine:
             pytest.skip("Default rules file not found, skipping rule-match test")
 
         contribs = {'tx_packet': 10.0, 'rx_packet': 15.0, 'error_packet': 75.0}
-        result = engine.diagnose('traffic', contribs, is_anomaly=True)
+        result, action = engine.diagnose('traffic', contribs, is_anomaly=True)
         print(f"\n[TEST] Default rules file diagnosis: {result}")
-        assert 'CRC' in result or '오류' in result, \
-            f"Expected CRC diagnosis from default rules, got: {result}"
-        print("  PASS: CRC diagnosis from default_rules.json")
+        # 룰 문구는 도메인 전문가가 수정하므로 문구 대신 '룰이 매칭되어 진단+조치가 나왔는지'를 검증
+        assert result not in ('NORMAL', '', None), f"Expected a diagnosis, got: {result}"
+        assert action, "룰 매칭 시 추천 조치(action)가 함께 반환되어야 함"
+        print("  PASS: diagnosis + action from default_rules.json")
 
     def test_optical_rx_diagnosis(self):
         """optical rx_avg_power 기여도 > 60% → 광 수신 열화 진단"""
         engine = RCAEngine()
         contribs = {'tx_avg_power': 20.0, 'rx_avg_power': 80.0}
-        result = engine.diagnose('optical', contribs, is_anomaly=True)
+        result, _action = engine.diagnose('optical', contribs, is_anomaly=True)
         print(f"\n[TEST] Optical RX diagnosis: {result}")
         assert '수신' in result or 'RX' in result, \
             f"Expected RX degradation, got: {result}"

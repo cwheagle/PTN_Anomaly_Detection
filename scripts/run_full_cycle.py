@@ -4,8 +4,8 @@ import os
 # 현재 디렉토리를 경로에 추가하여 src 모듈을 찾을 수 있게 함
 sys.path.append(os.getcwd())
 
-from tests.test_train import run_training
-from tests.test_inference import run_inference_test
+from run_training import run_training
+from run_inference_check import run_inference_test
 
 def run_full_cycle():
     """학습부터 추론 검증까지 전체 사이클 통합 실행"""

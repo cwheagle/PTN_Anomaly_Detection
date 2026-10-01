@@ -11,7 +11,6 @@ JSON 파일 기반의 도메인 룰 테이블을 로드하고, Feature Contribut
 """
 import os
 import json
-from typing import Optional
 from src.rca.default_rules import DefaultRuleSet
 
 

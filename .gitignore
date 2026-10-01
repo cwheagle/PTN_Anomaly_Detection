@@ -26,7 +26,6 @@ ui/node_modules/
 ui/dist/
 ui/.vite/
 ui/*.local
-ui/package-lock.json
 
 # Secrets & Config
 src/config.py
@@ -38,3 +37,6 @@ Thumbs.db
 
 # Project Specific
 logs/plots/
+
+# Docker 배포 산출물 (대용량)
+*.tar

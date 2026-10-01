@@ -1,0 +1,21 @@
+# 빌드 컨텍스트 제외 (호스트의 플랫폼 종속 산출물이 이미지로 섞이는 것을 방지)
+.git
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.venv
+venv
+
+# UI: 호스트의 node_modules(Windows 바이너리)가 컨테이너 설치본을 덮어쓰지 않도록
+ui/node_modules
+ui/dist
+
+# 이미지에 불필요한 대용량/비실행 자산 (models/, src/ 는 포함해야 함)
+data
+logs
+tests
+tools
+docs
+참고
+*.tar
+*.md

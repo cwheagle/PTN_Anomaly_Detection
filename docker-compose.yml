@@ -46,12 +46,19 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DB_HOST=localhost
-      - DB_USER=root
-      - DB_PASS=root
-      - DB_NAME=cowptn
+      - DB_HOST=${DB_HOST:-host.docker.internal}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASS=${DB_PASS:-root}
+      - DB_NAME=${DB_NAME:-cowptn_test}
+      - DB_PORT=${DB_PORT:-3306}
       - KAFKA_BROKERS=kafka:29092
       - REDIS_HOST=redis
+    volumes:
+      - ptn_models:/app/models
+      - ptn_rca_rules:/app/src/rca/rules
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
     depends_on:
       - kafka
       - redis
@@ -76,13 +83,20 @@ services:
     #image: 'ptn_anomaly_detection-consumer:latest'
     container_name: ptn_anomaly_detection-consumer
     environment:
-      - DB_HOST=localhost
-      - DB_USER=root
-      - DB_PASS=root
-      - DB_NAME=cowptn
+      - DB_HOST=${DB_HOST:-host.docker.internal}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASS=${DB_PASS:-root}
+      - DB_NAME=${DB_NAME:-cowptn_test}
+      - DB_PORT=${DB_PORT:-3306}
       - KAFKA_BROKERS=kafka:29092
       - REDIS_HOST=redis
       - API_URL=http://api:8000
+    volumes:
+      - ptn_models:/app/models
+      - ptn_rca_rules:/app/src/rca/rules
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
     depends_on:
       - kafka
       - redis
@@ -96,10 +110,18 @@ services:
     #image: 'ptn_anomaly_detection-producer:latest'
     container_name: ptn_anomaly_detection-producer
     environment:
-      - DB_HOST=localhost
-      - DB_USER=root
-      - DB_PASS=root
-      - DB_NAME=cowptn
+      - DB_HOST=${DB_HOST:-host.docker.internal}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASS=${DB_PASS:-root}
+      - DB_NAME=${DB_NAME:-cowptn_test}
+      - DB_PORT=${DB_PORT:-3306}
       - KAFKA_BROKERS=kafka:29092
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
     depends_on:
       - kafka
+
+volumes:
+  ptn_models: # api(학습) -> consumer(추론) 간 모델 파일 공유
+  ptn_rca_rules: # api(룰 편집) -> consumer(RCA) 간 룰 파일 공유

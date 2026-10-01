@@ -1,7 +1,6 @@
 # --- Web & API Server ---
 fastapi                 # 비동기 REST API 프레임워크 (백엔드 핵심)
 uvicorn                 # FastAPI 서버를 구동하는 고성능 ASGI 서버
-httpx                   # 비동기 HTTP 클라이언트 (스케줄러 -> ML API 통신)
 requests                # 동기 HTTP 클라이언트 (웹훅)
 
 # --- Database & Scheduling ---

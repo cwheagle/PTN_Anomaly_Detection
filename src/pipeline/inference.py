@@ -27,43 +27,6 @@ class AnomalyDetector:
         for ft in ['traffic', 'optical']:
             self.reload_model(ft)
 
-    def reload_config(self, ft):
-        """저장된 메타데이터 파일(.json)에서 설정을 다시 읽어 메모리에 반영"""
-        if ft not in self.tracks: return False
-        
-        p = PATHS[ft]
-        model_dir = os.path.dirname(p['model'])
-        registry_path = os.path.join(model_dir, f"{ft}_registry.json")
-        
-        meta_path = p['model'].replace('.pth', '.json')
-        
-        # [Phase 11] 레지스트리 기반 메타데이터 로드
-        if os.path.exists(registry_path):
-            try:
-                with open(registry_path, 'r') as f:
-                    registry = json.load(f)
-                active_ver = registry.get("active_version")
-                if active_ver:
-                    for v in registry.get("versions", []):
-                        if v["version"] == active_ver and "config_path" in v:
-                            meta_path = os.path.join(model_dir, v["config_path"])
-                            break
-            except Exception as e:
-                print(f"[!] Error reading registry config for {ft}: {e}")
-        
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, 'r') as f:
-                    meta = json.load(f)
-                    # 기존 config 유지하면서 meta의 config로 업데이트
-                    self.tracks[ft]['config'].update(meta.get('config', {}))
-                    self.tracks[ft]['th'] = meta.get('threshold', self.tracks[ft]['th'])
-                    print(f"[*] Reloaded config for {ft} track (Threshold: {self.tracks[ft]['th']})")
-                    return True
-            except Exception as e:
-                print(f"[!] Error reloading config for {ft}: {e}")
-        return False
-
     def reload_model(self, ft):
         """학습 완료 후 또는 초기화 시 파일로부터 모델 가중치, 스케일러, 설정을 모두 로드"""
         p = PATHS[ft]

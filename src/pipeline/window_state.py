@@ -1,7 +1,7 @@
 import json
 import redis
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 from src.config import REDIS_CONFIG, MODEL_CONFIG
 
 logger = logging.getLogger(__name__)
