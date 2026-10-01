@@ -140,12 +140,20 @@ class DataProcessor:
 
         return df
 
-    def create_sequences(self, df, is_train=True):
-        """NaN(보간되지 않은 결측치)이 포함된 윈도우는 버리고 유효한 시퀀스만 생성"""
+    def create_sequences(self, df, is_train=True, fit_scaler=None):
+        """NaN(보간되지 않은 결측치)이 포함된 윈도우는 버리고 유효한 시퀀스만 생성
+
+        Args:
+            is_train: True 면 평면 시퀀스 배열을, False 면 포트별 dict 를 반환
+            fit_scaler: 스케일러를 이 데이터로 fit 할지 여부. None 이면 is_train 과 동일.
+                        검증 데이터는 is_train=True(평면 배열 반환)이면서 fit_scaler=False 로 호출해야
+                        학습 데이터로 fit 한 스케일러가 검증 데이터로 덮어써지지 않는다.
+        """
         df = df.copy()
+        fit = is_train if fit_scaler is None else fit_scaler
         
         # 1. 스케일러 학습 (학습 시에만, NaN을 제외한 순수 데이터 분포만 학습)
-        if is_train:
+        if fit:
             valid_data = df[self.extended_feature_cols].dropna()
             if not valid_data.empty:
                 self.scaler.fit(valid_data)

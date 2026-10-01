@@ -74,3 +74,27 @@ def test_metadata_contains_threshold_and_baseline(tiny_train_csv, isolated_paths
     meta = json.load(open(tmp_path / 'traffic_ae_v1.json'))
     assert meta['config']['input_dim'] == 15
     assert 0 < meta['baseline_mse'] <= meta['threshold']
+
+
+def test_saved_scaler_is_fit_on_train_data_not_validation(tiny_train_csv, isolated_paths, tmp_path):
+    """회귀: 검증 데이터 로더가 스케일러를 다시 fit 하면, 학습 시퀀스와 저장된 스케일러의 스케일링이 달라진다
+    (추론 시 학습과 다른 스케일링이 적용되고, 임계치도 어긋남)"""
+    import joblib
+    from src.data.data_processor import DataProcessor
+
+    # 검증 데이터: 분포가 크게 다른(50배 큰 트래픽) 파일
+    val = pd.read_csv(tiny_train_csv)
+    val[['tx_packet', 'rx_packet']] = val[['tx_packet', 'rx_packet']] * 50
+    val_path = tmp_path / "traffic_val.csv"
+    val.to_csv(val_path, index=False)
+
+    trainer = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16})
+    assert trainer.train(train_path=tiny_train_csv, val_path=str(val_path)) is True
+
+    # 기대값: 학습 데이터만으로 fit 한 스케일러
+    ref = DataProcessor('traffic')
+    ref.create_sequences(ref.preprocess(pd.read_csv(tiny_train_csv), is_train=True), is_train=True)
+
+    saved = joblib.load(trainer.paths['scaler'])
+    assert saved.center_ == pytest.approx(ref.scaler.center_)
+    assert saved.scale_ == pytest.approx(ref.scaler.scale_)

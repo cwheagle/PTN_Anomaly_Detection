@@ -42,7 +42,7 @@ class Trainer:
         self.stop_requested = True
         print(f"[*] Stop requested for {self.feature_type} trainer.")
 
-    def _prepare_loader(self, data_path):
+    def _prepare_loader(self, data_path, fit_scaler=True):
         if not os.path.exists(data_path):
             print(f"[ERROR] Data file not found: {data_path}")
             return None
@@ -58,7 +58,7 @@ class Trainer:
             return None
         
         print(f"[*] Creating sequences...")
-        sequences = self.processor.create_sequences(df_clean, is_train=True)
+        sequences = self.processor.create_sequences(df_clean, is_train=True, fit_scaler=fit_scaler)
         if len(sequences) == 0 or self.stop_requested: 
             print(f"[!] No sequences created")
             return None
@@ -81,7 +81,7 @@ class Trainer:
         if self.stop_requested: return False
         
         print(f"[*] Preparing validation loader...")
-        v_res = self._prepare_loader(v_path) # 검증 데이터
+        v_res = self._prepare_loader(v_path, fit_scaler=False) # 검증 데이터: 학습 데이터로 fit 한 스케일러를 그대로 사용
         if self.stop_requested: return False
         
         if not t_res:
