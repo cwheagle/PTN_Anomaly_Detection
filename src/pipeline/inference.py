@@ -11,9 +11,12 @@ from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS, SEVERITY_CONFIG
 from src.rca.feature_contribution import FeatureContributionAnalyzer
 from src.rca.rule_engine import RCAEngine
+from src.pipeline.alerting import AlertPolicy, load_policy, dynamic_threshold, severity_from_ratio, dampening_step
 
 class AnomalyDetector:
-    def __init__(self):
+    def __init__(self, policy=None):
+        # 알람 판정 정책(동적 임계치 k, 전역 임계치 배율, 댐프닝 횟수 등). 기본값은 기존 동작과 동일.
+        self.policy = policy or load_policy()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tracks = {} # {f_type: {'model': m, 'proc': p, 'th': t, 'config': c}}
 
@@ -110,6 +113,37 @@ class AnomalyDetector:
                 return SEVERITY_CONFIG[tier]["level"], SEVERITY_CONFIG[tier]["label"]
         return SEVERITY_CONFIG["NORMAL"]["level"], SEVERITY_CONFIG["NORMAL"]["label"]
 
+    def track_scores(self, df, ft):
+        """튜닝/분석용: 트랙의 포트·시각별 원시 점수만 추출 (임계치·심각도·댐프닝은 적용하지 않음).
+
+        Returns: DataFrame(occur_date, ip_addr, cid, lid, mse, past_mean, past_std) 와 전역 임계치(track['th']).
+        여기서 얻은 값에 alerting.py 의 함수를 적용하면 detect() 와 같은 알람을 재현한다.
+        모델 추론은 이 한 번만 하면 되므로, 임계치/댐프닝 정책을 바꿔 가며 빠르게 시험할 수 있다.
+        """
+        if ft not in self.tracks:
+            return None, None
+        track = self.tracks[ft]
+        df_clean = track['proc'].preprocess(df, is_train=False)
+        if df_clean is None:
+            return None, None
+        grouped = track['proc'].create_sequences(df_clean, is_train=False)
+        if not grouped:
+            return None, None
+        parts = []
+        for (ip, cid, lid), (seqs, indices) in grouped.items():
+            inputs = torch.from_numpy(seqs).float().to(self.device)
+            with torch.no_grad():
+                outputs = track['model'](inputs)
+                diff_all = ((inputs - outputs) ** 2).cpu().numpy()
+            mse_all = diff_all.mean(axis=2)                          # (batch, seq_len)
+            past = mse_all[:, :-1]
+            out = df_clean.loc[indices, ['occur_date', 'ip_addr', 'cid', 'lid']].copy()
+            out['mse'] = diff_all[:, -1, :].mean(axis=1)
+            out['past_mean'] = past.mean(axis=1)
+            out['past_std'] = past.std(axis=1)
+            parts.append(out)
+        return (pd.concat(parts, ignore_index=True) if parts else None), track['th']
+
     def _analyze_track(self, df, ft):
         """특정 트랙(Traffic/Optical)의 데이터를 분석하여 이상 점수 산출"""
         if ft not in self.tracks: return None
@@ -154,19 +188,8 @@ class AnomalyDetector:
                 past_mean = np.mean(past_mse, axis=1)
                 past_std = np.std(past_mse, axis=1)
                 
-                # 동적 임계치 밴드 (mu + 3 sigma)
-                dyn_th = past_mean + 3 * past_std
-                
-                # 노이즈 방지용 글로벌 하한선 (학습된 전역 임계치의 100% 보장)
-                # 과거 변동성이 너무 없어서 dyn_th가 0에 수렴하더라도 최소한 글로벌 임계치는 넘겨야 이상으로 판별
-                min_th = track['th'] * 1.0
-                
-                # [Fix] 만약 과거(past)부터 이미 에러가 지속되어 past_mean이 min_th를 초과했다면, 
-                # 비정상을 '새로운 정상'으로 간주해버리는 치명적 오류(False Negative)가 발생함.
-                # 따라서 past_mean이 min_th를 넘는 경우, dyn_th의 상한을 min_th의 1.2배 등으로 제한.
-                dyn_th = np.where(past_mean > min_th, np.minimum(dyn_th, min_th * 1.2), dyn_th)
-                
-                final_threshold = np.maximum(dyn_th, min_th)
+                # 동적 임계치 = max(μ + k·σ, 전역 임계치 × scale), 과거부터 오류가 지속된 경우 상한 적용 (src/pipeline/alerting.py)
+                final_threshold = dynamic_threshold(past_mean, past_std, track['th'], self.policy)
 
                 # [Phase 8] Feature별 기여도 계산용 NumPy 변환
                 inputs_np = inputs.cpu().numpy()
@@ -195,18 +218,8 @@ class AnomalyDetector:
             # JSON 직렬화 가능한 문자열로 저장
             contributions_json = json.dumps(base_contributions, ensure_ascii=False)
             
-            # 심각도 점수 산출 로직 (0~100 정규화) - Vectorized 적용 (Phase 9)
-            def calculate_severity(mse_arr, threshold_arr):
-                # 0 나누기 방지
-                th_safe = np.where(threshold_arr <= 0, 1e-9, threshold_arr)
-                ratio = mse_arr / th_safe
-                sev = np.where(ratio <= 1.0,
-                               ratio * 50.0, # 정상 구간
-                               50.0 + 50.0 * (1 - np.exp(-0.5 * (ratio - 1.0)))) # 이상 구간
-                # threshold가 0 이하인 예외 케이스 처리
-                return np.where(threshold_arr <= 0, 0.0, sev)
-
-            res[f'{base_ft}_severity'] = calculate_severity(res[f'{base_ft}_score'].values, res[f'{base_ft}_threshold'].values)
+            # 심각도 점수 (0~100): ratio = score / 임계치, 1.0 에서 50 (src/pipeline/alerting.py)
+            res[f'{base_ft}_severity'] = severity_from_ratio(res[f'{base_ft}_score'].values, res[f'{base_ft}_threshold'].values, self.policy)
             
             # [Phase 6] 추세 분석 (Slope): 포트별 점수 변화율 산출
             # 최근 4시점을 이용해 선형 회귀 기울기 계산 (Rolling)
@@ -475,33 +488,11 @@ class AnomalyDetector:
                 
             state = self.alert_states[port_key]
             
+            # 등급별 연속 횟수 요건(기본: CRITICAL 즉시 / MAJOR 2회 / MINOR 3회)을 통과해야 알람 (src/pipeline/alerting.py)
+            passed = dampening_step(state, int(current_level), self.policy)
             if current_level == 0:
-                # 정상 상태면 카운트 리셋
-                state['level'] = 0
-                state['count'] = 0
                 return pd.Series([0, "NORMAL", False])
-                
-            # 심각도가 이전과 같거나 커지면 카운트 증가
-            if current_level >= state['level']:
-                state['level'] = current_level
-                state['count'] += 1
-            else:
-                # 심각도가 낮아지면 새로 카운트 시작
-                state['level'] = current_level
-                state['count'] = 1
-                
-            # 쿨다운 통과 여부 검사
-            # CRITICAL (level 3) -> 즉시 (count >= 1)
-            # MAJOR (level 2) -> 2회 연속 (count >= 2)
-            # MINOR (level 1) -> 3회 연속 (count >= 3)
-            passed = False
-            if state['level'] == 3 and state['count'] >= 1:
-                passed = True
-            elif state['level'] == 2 and state['count'] >= 2:
-                passed = True
-            elif state['level'] == 1 and state['count'] >= 3:
-                passed = True
-                
+
             if passed:
                 return pd.Series([current_level, current_label, is_any])
             else:

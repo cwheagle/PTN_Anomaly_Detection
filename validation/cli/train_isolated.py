@@ -58,36 +58,51 @@ def main():
     ap.add_argument("--margin-before-h", type=float, default=1.0)
     ap.add_argument("--margin-after-h", type=float, default=4.0, help="복구 후 제외 시간 (ma_16 등 파생 변수 영향 구간)")
     ap.add_argument("--val-ratio", type=float, default=0.2)
+    ap.add_argument("--tracks", choices=["both", "traffic", "optical", "none"], default="both",
+                    help="학습할 트랙. none 이면 학습 데이터 준비만 수행 (병렬 학습 전 데이터 생성용)")
+    ap.add_argument("--reuse-data", action="store_true", help="out/train_data 에 이미 있는 CSV 를 재사용 (병렬 학습 프로세스용)")
+    ap.add_argument("--threads", type=int, default=None, help="torch CPU 스레드 수 (병렬 학습 시 코어 분배)")
     args = ap.parse_args()
+    if args.threads:
+        import torch
+        torch.set_num_threads(args.threads)
 
     if args.seed == 7:
         raise SystemExit("[!] seed 7 은 평가용 시드입니다. 학습 데이터는 다른 시드를 사용하세요.")
 
     os.makedirs(args.out, exist_ok=True)
-    normal, cfg = build_normal_frames(args.variant, args.seed, args.nodes, args.days,
-                                      args.margin_before_h, args.margin_after_h)
-
-    # 시간 기준 분할: 앞쪽 (1 - val_ratio) 학습 / 뒤쪽 검증 (둘 다 정상 데이터)
-    split = pd.Timestamp(cfg.start) + pd.Timedelta(days=args.days * (1 - args.val_ratio))
     data_dir = os.path.join(args.out, "train_data")
     os.makedirs(data_dir, exist_ok=True)
-    paths = {}
-    for ft in ("traffic", "optical"):
-        df = normal[ft]
-        tr, va = df[df["occur_date"] < split], df[df["occur_date"] >= split]
-        paths[ft] = (os.path.join(data_dir, f"{ft}_train.csv"), os.path.join(data_dir, f"{ft}_val.csv"))
-        tr.to_csv(paths[ft][0], index=False)
-        va.to_csv(paths[ft][1], index=False)
-        print(f"[*] {ft}: train rows={len(tr):,}, val rows={len(va):,}")
+    paths = {ft: (os.path.join(data_dir, f"{ft}_train.csv"), os.path.join(data_dir, f"{ft}_val.csv"))
+             for ft in ("traffic", "optical")}
+
+    if args.reuse_data and all(os.path.exists(p) for pair in paths.values() for p in pair):
+        print(f"[*] 기존 학습 데이터를 재사용합니다: {data_dir}")
+    else:
+        normal, cfg = build_normal_frames(args.variant, args.seed, args.nodes, args.days,
+                                          args.margin_before_h, args.margin_after_h)
+        # 시간 기준 분할: 앞쪽 (1 - val_ratio) 학습 / 뒤쪽 검증 (둘 다 정상 데이터)
+        split = pd.Timestamp(cfg.start) + pd.Timedelta(days=args.days * (1 - args.val_ratio))
+        for ft in ("traffic", "optical"):
+            df = normal[ft]
+            tr, va = df[df["occur_date"] < split], df[df["occur_date"] >= split]
+            tr.to_csv(paths[ft][0], index=False)
+            va.to_csv(paths[ft][1], index=False)
+            print(f"[*] {ft}: train rows={len(tr):,}, val rows={len(va):,}")
+
+    if args.tracks == "none":
+        print("[*] 데이터 준비만 완료했습니다.")
+        return
+    tracks = ("traffic", "optical") if args.tracks == "both" else (args.tracks,)
 
     # 활성 모델 경로(PATHS)를 격리 폴더로 교체 (이 프로세스 안에서만 유효)
     from src.config import PATHS
     from src.models.trainer import Trainer
-    for ft in ("traffic", "optical"):
+    for ft in tracks:
         PATHS[ft] = {"model": os.path.join(args.out, f"{ft}_ae.pth"),
                      "scaler": os.path.join(args.out, f"{ft}_scaler.joblib")}
 
-    for ft in ("traffic", "optical"):
+    for ft in tracks:
         t = time.time()
         trainer = Trainer(ft, config_override={"epochs": args.epochs, "batch_size": args.batch_size,
                                                "patience": args.patience})
