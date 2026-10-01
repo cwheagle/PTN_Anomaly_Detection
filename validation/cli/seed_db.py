@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--days", type=int, default=3)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--nodes", type=int, default=10, help="노드 수 (노드당 10포트)")
+    ap.add_argument("--warmup-days", type=float, default=1.0, help="초반 정상 구간(일). 짧은 시연 데이터에서 장애를 빨리 보려면 줄임")
+    ap.add_argument("--mean-gap-days", type=float, default=7.0, help="포트별 평균 장애 간격(일). 시연에서 장애를 자주 보려면 줄임")
     ap.add_argument("--out", default=None, help="정답/메타 저장 폴더 (기본 validation/runs/seed_db_<seed>)")
     ap.add_argument("--yes", action="store_true", help="확인 질문 없이 진행")
     args = ap.parse_args()
@@ -51,7 +53,8 @@ def main():
     end = datetime.now().replace(second=0, microsecond=0)
     end -= timedelta(minutes=end.minute % 15)
     start = end - timedelta(days=args.days)
-    cfg = ScenarioConfig(seed=args.seed, nodes=args.nodes, days=args.days, start=start.strftime("%Y-%m-%d %H:%M:%S"))
+    cfg = ScenarioConfig(seed=args.seed, nodes=args.nodes, days=args.days, start=start.strftime("%Y-%m-%d %H:%M:%S"),
+                         warmup_days=args.warmup_days, mean_gap_days=args.mean_gap_days)
     print(f"[*] 대상: {DB_CONFIG_SIM['host']}:{DB_CONFIG_SIM['port']}/{db_name} | 기간 {start} ~ {end} | "
           f"포트 {cfg.nodes * cfg.ports_per_node}개 | seed={cfg.seed}")
     if not args.yes and input("추가(INSERT)합니다. 진행? (y/n): ").lower() != "y":

@@ -50,6 +50,9 @@
 
     - **배치-스트리밍 동등성 검증 (2026-10-01)**: 평가(전체 시계열 배치)와 운영(Consumer 건별 16행 윈도우)의 결과를 실제 `process_message` 로 재생해 비교(12포트, 약 1.6만 건). 기존 윈도우는 `ma_16` 이력이 잘려 알람 99.84%/심각도 차이 0.50 일치였고, 필요 길이를 `window_size+15=27` 로 수정 후 100%/0.00 일치. 지금까지의 평가 수치는 스트리밍 운영에서도 성립. RCA 룰 16개 중 6개가 잘못된 키로 매칭되지 않던 문제 수정 및 룰 검증 추가. `docker-compose` 플랫폼을 `PTN_PLATFORM` 환경변수로 변경(기본 arm64).
 
+    - **E2E 점검 (Docker, 2026-10-01)**: 로컬(Windows, amd64)에서 7개 컨테이너를 실제 기동해 Producer → Kafka → Consumer → Redis → DB → API → UI 를 끝까지 검증. 30포트×96스텝(2,880건) 처리, 결과 2,100행 저장, ALARM 281건이 DB 의 CRITICAL 행과 일치, CLEAR 24건이 DB 의 실제 복구 시점과 24/24 일치(오해제 0), 수정한 RCA 룰(OP-006)이 실제 파이프라인에서 매칭, 룰 추가·재학습(v2 배포)이 공유 볼륨과 Redis 로 Consumer 에 리로드됨, Redis 윈도우 27건 확인. **발견·수정**: 컨테이너 시간대(UTC)가 DB(KST)와 9시간 어긋나 Producer 가 오래된 구간을 조회 → compose 에 `TZ` 추가. 미검증: arm64 이미지 빌드, GPU, 브라우저 화면 동작.
+    - **E2E 후속 수정 (2026-10-01)**: (1) 댐프닝으로 억제된 `NORMAL (DAMPENED)` 행이 알람처럼 로그/웹훅 대상이던 결함 수정(직전이 CRITICAL 이면 해제 전달은 유지), (2) 지속 중인 CRITICAL 의 ALARM 이 매 스텝 반복(인시던트당 평균 10.8건)되던 것을 `ALARM_RENOTIFY_MINUTES` 로 조절 가능하게 함(기본 15 = 기존 동작 유지, 60 설정 시 281→85건, CLEAR 24/24 일치), (3) E2E 절차 문서(`docs/e2e_guide.md`)와 자동 판정 도구(`validation/cli/e2e_verify.py`, 10/10 PASS) 추가. 전체 87 테스트 통과.
+
 - **대기 중 (Phase 13)**:
     - **XAI (설명 가능한 AI)**: SHAP/LIME을 통한 폭포수 차트 구현.
     - **능동 학습 (Active Learning)**: 관리자 피드백 기반 실시간 라벨링 및 RLHF 파이프라인.

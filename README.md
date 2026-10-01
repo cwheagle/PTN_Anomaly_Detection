@@ -144,6 +144,10 @@ $env:PTN_PLATFORM="linux/amd64"; docker compose up -d --build
 # Linux / macOS / Git Bash
 PTN_PLATFORM=linux/amd64 docker compose up -d --build
 ```
+**알람 재알림 간격 (`ALARM_RENOTIFY_MINUTES`)**: 지속 중인 CRITICAL 포트에 ALARM(SSE)을 다시 보내는 간격입니다. `15`(기본) = 15분 스텝마다(기존 동작), `60` = 진입 시 + 1시간마다, `0` = 진입 시 1회만. 복구(CLEAR)는 설정과 무관하게 항상 전달됩니다. (E2E 기준 ALARM 281건 → 60분 설정 시 85건)
+
+**E2E 점검**: 컨테이너 전체 경로를 검증하는 절차와 자동 판정 도구는 [`docs/e2e_guide.md`](docs/e2e_guide.md), `validation/cli/e2e_verify.py` 를 참고하세요.
+
 > Windows 는 Docker Desktop 이 **Linux containers** 모드여야 합니다. 컨테이너에서 호스트 MySQL 은 `host.docker.internal` 로 접속하므로, MySQL 의 `root` 계정이 외부 호스트(`'%'`)에서 접속 가능해야 합니다.
 > 로컬 테스트가 통과해도 arm64 이미지의 빌드/실행(aarch64 wheel 유무 등)은 별도로 확인해야 합니다.
 

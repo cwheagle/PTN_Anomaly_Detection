@@ -80,7 +80,7 @@ def _traffic_baseline(rng, prof, hours):
 def _plan_episodes(rng, cfg, n_steps):
     """한 포트의 에피소드 목록 [(start, ramp, plateau, scenario, magnitude)] — 서로 겹치지 않음"""
     episodes = []
-    t = cfg.warmup_days * STEPS_PER_DAY
+    t = int(cfg.warmup_days * STEPS_PER_DAY)    # 소수 일수 허용
     mean_gap = cfg.mean_gap_days * STEPS_PER_DAY
     while True:
         t += int(rng.exponential(mean_gap))

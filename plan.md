@@ -141,7 +141,7 @@
      - 수집된 라벨링 데이터를 즉시 반영하여 다음 재학습 시 모델의 가중치를 교정하는 능동 학습(Active Learning) 파이프라인 완성.
 
 ### Backlog (이월 항목 — 완료로 오인되지 않도록 별도 관리)
-- **E2E 점검 (Docker)**: Producer → Kafka → Redis → Consumer → DB → API → UI 를 실제 컨테이너로 끝까지 검증. 준비: `.env`(PTN_PLATFORM=linux/amd64, DB_NAME=cowptn_test), MySQL root@'%' 확인됨, Producer 용 현재 시점 데이터(`validation/cli/seed_db.py` 또는 sim 모드). 기존 `ptn_rca_rules`/`ptn_models` 볼륨이 있으면 `docker compose down -v` 필요.
+- **E2E 후속 개선 후보 (2026-10-01 E2E 에서 확인)**: (0) [완료] 억제된 알람 웹훅 제거, 재알림 간격 설정, E2E 문서/검증 스크립트, (1) Kafka 가 준비되기 전에 Producer/Consumer 가 먼저 떠서 시작 직후 `Connection refused` 로그 발생(자동 재연결로 무해) → healthcheck 기반 `depends_on` 검토, (2) Consumer 재시작 시 직전 알람 레벨이 메모리라 사라짐, (3) 구버전 모델(v1)은 `baseline_mse` 가 없어 드리프트 감지가 무력(traffic ratio 0.31) → 재학습 필요, (4) 브라우저에서의 UI 화면 동작은 미검증.
 - **GPU 서버(arm64) 배포 시 확인 항목**: (1) 현재 `docker-compose.yml` 에 GPU 연결 설정(`gpus`/`deploy.resources.reservations.devices`)이 없어 컨테이너는 CPU로만 학습·추론함, (2) `pip install torch` 의 aarch64 wheel 이 CUDA 를 지원하는지 서버에서 `torch.cuda.is_available()` 로 확인 필요(GB10 등 최신 GPU는 NVIDIA 공식 CUDA 이미지/전용 인덱스 필요 가능), (3) arm64 이미지 빌드(aarch64 wheel 유무) 검증. 로컬 테스트는 `PTN_PLATFORM=linux/amd64`.
 - **격리 재학습 실험 결과 반영 및 모델 개선 (최우선)**: 정상 데이터(장애 제거 + 정상 변동 포함) 재학습으로 조기 탐지율 44%→79~83%, 노이즈 환경 이벤트 F1 0.32→0.63까지 개선됨(`validation/cli/train_isolated.py`). 남은 과제:
   1. 수렴 확인: 모든 실험 학습이 30에폭 상한에 도달(검증 손실이 계속 감소) → 에폭/조기 종료 조정 후 재평가
