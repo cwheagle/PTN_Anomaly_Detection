@@ -8,6 +8,7 @@ export const store = reactive({
   watchlist: [] as any[],
   rcaRules: [] as any[],
   modelStatus: {} as Record<string, any>,
+  modelVersions: {} as Record<string, any>,
   driftStatus: null as any,
   isCheckingDrift: false,
   isRefreshingAnomalies: false,
@@ -93,6 +94,27 @@ export const store = reactive({
   },
 
 
+
+  async fetchModelVersions() {
+    try {
+      const res = await axios.get('/api/model/versions')
+      this.modelVersions = res.data
+    } catch (err) {
+      console.error('Failed to fetch model versions', err)
+    }
+  },
+
+  async promoteModel(ft: string, version: string, force = false) {
+    const res = await axios.post('/api/model/promote', null, { params: { ft, version, force } })
+    await this.fetchModelVersions()
+    return res.data
+  },
+
+  async rollbackModel(ft: string) {
+    const res = await axios.post('/api/model/rollback', null, { params: { ft } })
+    await this.fetchModelVersions()
+    return res.data
+  },
 
   async trainModel(ft: string, training_config: any = {}, date_params: any = {}) {
     try {

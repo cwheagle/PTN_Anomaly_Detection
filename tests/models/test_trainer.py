@@ -98,3 +98,32 @@ def test_saved_scaler_is_fit_on_train_data_not_validation(tiny_train_csv, isolat
     saved = joblib.load(trainer.paths['scaler'])
     assert saved.center_ == pytest.approx(ref.scaler.center_)
     assert saved.scale_ == pytest.approx(ref.scaler.scale_)
+
+
+def test_trainer_activate_false_saves_candidate_and_keeps_active_model(tiny_train_csv, isolated_paths, tmp_path):
+    """API 경로(activate=False): 첫 학습은 자동 활성화, 이후 학습은 후보로만 저장되어 활성 모델이 바뀌지 않아야 함"""
+    from src.models import registry
+
+    first = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16}, activate=False)
+    assert first.train(train_path=tiny_train_csv, val_path=tiny_train_csv) is True
+    assert first.activated is True and first.version == 'v1'              # 활성 모델이 없으니 최초 학습은 활성화
+
+    second = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16}, activate=False)
+    assert second.train(train_path=tiny_train_csv, val_path=tiny_train_csv) is True
+    assert second.activated is False and second.version == 'v2'
+
+    reg = registry.load(str(tmp_path), 'traffic')
+    assert reg['active_version'] == 'v1'                                  # 후보 학습이 활성 모델을 바꾸지 않음
+    assert registry.status_of(reg, 'v2') == 'candidate'
+    assert os.path.exists(tmp_path / 'traffic_ae_v2.pth')                 # 파일은 저장되어 승격 가능
+
+    registry.promote(str(tmp_path), 'traffic', 'v2', force=True)
+    assert registry.load(str(tmp_path), 'traffic')['active_version'] == 'v2'
+
+
+def test_registry_entry_contains_baseline_and_samples(tiny_train_csv, isolated_paths, tmp_path):
+    """승격 시 비교/표시에 쓰이도록 레지스트리 항목에 baseline_mse 와 samples_used 가 저장되어야 함"""
+    from src.models import registry
+    _train(tiny_train_csv)
+    entry = registry.load(str(tmp_path), 'traffic')['versions'][0]
+    assert entry['baseline_mse'] > 0 and entry['samples_used'] > 0

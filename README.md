@@ -153,6 +153,8 @@ PTN_PLATFORM=linux/amd64 docker compose up -d --build
 
 서버 기동 후 **Model Management UI** 또는 API로 초기 모델 학습을 시작합니다.
 
+**모델 배포 방식 (후보 → 승격)**: 재학습 결과(UI의 Train 버튼, 드리프트 자동 재학습)는 **후보(Candidate)로만 저장**되고 실시간 엔진에 반영되지 않습니다. Model Management 화면의 **Model Versions** 에서 임계치·검증 손실을 확인한 뒤 **Promote** 해야 반영되며, 문제가 있으면 **Rollback** 으로 직전 활성 버전으로 되돌립니다. 후보가 현재 모델과 크게 다르면(임계치/검증 손실 3배 초과) 경고를 보여주고 한 번 더 확인합니다. (활성 모델이 아직 없는 최초 학습만 자동 활성화) API: `GET /api/model/versions`, `POST /api/model/promote`, `POST /api/model/rollback` ([`docs/api_spec.md`](docs/api_spec.md)).
+
 ```bash
 # Traffic 모델 학습
 curl -X POST "http://localhost:8000/api/model/train?feature_type=traffic"

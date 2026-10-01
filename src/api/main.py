@@ -23,6 +23,7 @@ from src.api.alarm_tracker import plan_alarm_events
 from src.data.db_connector import DBConnector
 from src.data.data_collector import DataCollector
 from src.models.trainer import Trainer
+from src.models import registry as model_registry
 from src.pipeline.drift_monitor import DriftMonitor
 from src.config import PATHS, MODEL_CONFIG, API_VERSION, REDIS_CONFIG, RETENTION_DAYS
 import redis
@@ -201,6 +202,9 @@ async def get_model_status():
             "training": training_status.get(ft, {"is_training": False}),
             "last_trained": None,
             "samples_used": 0,
+            "active_version": model_registry.list_versions(os.path.dirname(PATHS[ft]['model']), ft)["active_version"],
+            "candidate_versions": [v["version"] for v in model_registry.list_versions(os.path.dirname(PATHS[ft]['model']), ft)["versions"]
+                                   if v["status"] == "candidate"],
             # 추론 설정 (실시간 수정 가능 항목만 노출)
             "inference_config": {
                 "threshold": MODEL_CONFIG.get('threshold', 0.1),
@@ -300,7 +304,9 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
             return
 
         # 학습 실행
-        trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress)
+        # activate=False: 학습 결과는 '후보'로만 저장. 사람이 승격(/api/model/promote)해야 Consumer 에 반영된다.
+        # (활성 모델이 아직 없는 최초 학습만 자동 활성화)
+        trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress, activate=False)
         active_trainers[ft]["trainers"] = [trainer]
         
         if active_trainers[ft]["stop_requested"]: return
@@ -313,9 +319,13 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
             if early_stopped:
                 msg = f"Training finished early at epoch {training_status[ft]['current_epoch']} (Optimal weights saved)."
             
-            # [Auto-Reload] 실시간 엔진에 새 모델 즉시 반영
-            msg += " (Model reloading broadcasted to Consumers via Redis)"
-            redis_client.publish('ptn_control', json.dumps({'action': 'reload', 'track': ft}))
+            training_status[ft]["candidate_version"] = trainer.version
+            if trainer.activated:
+                # 최초 학습(활성 모델 없음): 즉시 반영
+                msg += f" ({trainer.version} activated; reload broadcasted to Consumers via Redis)"
+                redis_client.publish('ptn_control', json.dumps({'action': 'reload', 'track': ft}))
+            else:
+                msg += f" Saved as candidate {trainer.version} (NOT active). Review and promote it in Model Management to deploy."
                 
             training_status[ft]["success_msg"] = msg
             print(f"[*] [BG] {ft.capitalize()} {msg}")
@@ -369,6 +379,53 @@ async def train_model(
         "message": f"{ft} model training task queued.",
         "range": date_params
     }
+
+def _model_dir(ft: str) -> str:
+    return os.path.dirname(PATHS[ft]['model'])
+
+
+def _broadcast_model_reload(ft: str):
+    """승격/롤백 후 Consumer 들이 새 활성 모델을 읽도록 Redis 로 알림 (실패해도 API 응답에는 영향 없음)"""
+    try:
+        redis_client.publish('ptn_control', json.dumps({'action': 'reload', 'track': ft}))
+    except Exception as e:
+        print(f"[!] [Registry] Failed to broadcast model reload: {e}")
+
+
+@app.get("/api/model/versions")
+async def get_model_versions(ft: str = Query(None, pattern="^(traffic|optical)$")):
+    """트랙별 모델 버전 목록 (active / candidate / retired). ft 를 생략하면 두 트랙 모두."""
+    fts = [ft] if ft else ['traffic', 'optical']
+    return {t: model_registry.list_versions(_model_dir(t), t) for t in fts}
+
+
+@app.post("/api/model/promote")
+async def promote_model(ft: str = Query(..., pattern="^(traffic|optical)$"), version: str = Query(...),
+                        force: bool = Query(False)):
+    """후보(또는 이전 버전)를 활성화. 현재 모델과 크게 어긋나면(임계치/검증 손실) force=true 없이는 409."""
+    try:
+        result = model_registry.promote(_model_dir(ft), ft, version, force=force)
+    except model_registry.PromotionWarning as e:
+        raise HTTPException(status_code=409, detail={"message": "후보가 현재 활성 모델과 크게 다릅니다. 확인 후 force=true 로 다시 요청하세요.",
+                                                     "warnings": e.warnings})
+    except model_registry.VersionNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except model_registry.RegistryError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    _broadcast_model_reload(ft)
+    return {"status": "success", "track": ft, **result}
+
+
+@app.post("/api/model/rollback")
+async def rollback_model(ft: str = Query(..., pattern="^(traffic|optical)$")):
+    """직전에 활성이었던 버전으로 되돌림"""
+    try:
+        result = model_registry.rollback(_model_dir(ft), ft)
+    except model_registry.RegistryError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    _broadcast_model_reload(ft)
+    return {"status": "success", "track": ft, **result}
+
 
 @app.post("/api/model/train/stop")
 async def stop_training(ft: str = Query(..., regex="^(traffic|optical)$")):

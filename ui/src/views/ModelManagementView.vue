@@ -89,6 +89,7 @@
                             info.exists ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30']">
                 {{ info.exists ? 'Active' : 'Missing' }}
               </span>
+              <span v-if="info.active_version" class="px-2 py-1 rounded text-xs font-mono text-slate-300 bg-slate-700/50 border border-slate-600">{{ info.active_version }}</span>
             </div>
             <div class="text-sm">
               <span class="text-slate-500">Last Trained:</span>
@@ -253,6 +254,62 @@
               </div>
             </div>
 
+            <!-- 2. Model Versions: 재학습 결과는 후보로만 저장되며, 승격(Promote)해야 실시간 엔진에 반영됨 -->
+            <div class="space-y-4">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                  <div class="w-2 h-5 bg-blue-500 rounded-full"></div>
+                  <h4 class="text-sm font-bold text-slate-200 uppercase tracking-wider">Model Versions</h4>
+                </div>
+                <button @click="handleRollback(ft as string)" :disabled="!canRollback(ft as string)"
+                        class="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+                  Rollback
+                </button>
+              </div>
+              <p class="text-xs text-slate-500 leading-relaxed">
+                재학습 결과는 <span class="text-amber-400 font-bold">Candidate</span> 로만 저장됩니다. 임계치·검증 손실을 확인한 뒤 <span class="text-blue-400 font-bold">Promote</span> 해야 실시간 엔진에 반영됩니다.
+              </p>
+              <div class="overflow-x-auto bg-slate-800/30 rounded-xl border border-slate-700/50">
+                <table class="w-full text-left text-xs">
+                  <thead class="text-slate-500 uppercase text-[10px] tracking-wider">
+                    <tr>
+                      <th class="px-3 py-2">Version</th>
+                      <th class="px-3 py-2">Trained</th>
+                      <th class="px-3 py-2">Threshold</th>
+                      <th class="px-3 py-2">Val Loss</th>
+                      <th class="px-3 py-2">Samples</th>
+                      <th class="px-3 py-2">Status</th>
+                      <th class="px-3 py-2 text-right"></th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-700/50">
+                    <tr v-for="ver in versionsOf(ft as string)" :key="ver.version" class="hover:bg-slate-700/20">
+                      <td class="px-3 py-2 font-mono font-bold text-slate-200">{{ ver.version }}</td>
+                      <td class="px-3 py-2 font-mono text-slate-400">{{ ver.trained_at || '-' }}</td>
+                      <td class="px-3 py-2 font-mono text-slate-300">{{ fmtNum(ver.threshold) }}</td>
+                      <td class="px-3 py-2 font-mono text-slate-300">{{ fmtNum(ver.final_val_loss) }}</td>
+                      <td class="px-3 py-2 font-mono text-slate-400">{{ ver.samples_used ? ver.samples_used.toLocaleString() : '-' }}</td>
+                      <td class="px-3 py-2">
+                        <span :class="['px-2 py-0.5 rounded text-[10px] font-bold uppercase',
+                                       ver.status === 'active' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                                       ver.status === 'candidate' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                                       'bg-slate-500/20 text-slate-400 border border-slate-500/30']">{{ ver.status }}</span>
+                      </td>
+                      <td class="px-3 py-2 text-right">
+                        <button v-if="ver.status !== 'active'" @click="handlePromote(ft as string, ver.version)"
+                                class="px-3 py-1 text-[11px] font-bold rounded-lg bg-blue-600/20 border border-blue-500/30 text-blue-300 hover:bg-blue-600/30 transition-colors">
+                          Promote
+                        </button>
+                      </td>
+                    </tr>
+                    <tr v-if="versionsOf(ft as string).length === 0">
+                      <td colspan="7" class="px-3 py-6 text-center text-slate-500 italic">No versions yet.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
 
           </div>
         </div>
@@ -366,6 +423,7 @@ const startPolling = () => {
     const isAnyTraining = Object.values(store.modelStatus).some((m: any) => m.training?.is_training)
     if (!isAnyTraining) {
       stopPolling()
+      await store.fetchModelVersions()      // 학습이 끝나면 새 후보가 목록에 나타남
     }
   }, 10000)
 }
@@ -387,6 +445,55 @@ const handleTrain = async (ft: string) => {
   }
 }
 
+// --- Model Versions ---
+const versionsOf = (ft: string): any[] => {
+  const list = store.modelVersions?.[ft]?.versions || []
+  return [...list].reverse()          // 최신 버전이 위로
+}
+
+const canRollback = (ft: string) => {
+  const list = store.modelVersions?.[ft]?.versions || []
+  return list.some((x: any) => x.status === 'retired')
+}
+
+const fmtNum = (n: number | null | undefined) => (n === null || n === undefined) ? '-' : Number(n).toPrecision(4)
+
+const handlePromote = async (ft: string, version: string) => {
+  if (!confirm(`${ft.toUpperCase()} 모델 ${version} 을(를) 활성화합니다.\n실시간 추론 엔진에 즉시 반영됩니다. 계속하시겠습니까?`)) return
+  try {
+    await store.promoteModel(ft, version, false)
+    showNotification(`${ft.toUpperCase()} ${version} 활성화 완료`, 'success')
+    await store.fetchModelStatus()
+  } catch (err: any) {
+    const detail = err.response?.data?.detail
+    if (err.response?.status === 409 && detail?.warnings) {
+      // 서버가 현재 모델과 크게 다른 후보라고 경고: 내용을 보여주고 한 번 더 확인
+      const list = detail.warnings.map((w: string) => `- ${w}`).join('\n')
+      if (!confirm(`경고: 이 후보는 현재 활성 모델과 크게 다릅니다.\n\n${list}\n\n그래도 활성화하시겠습니까?`)) return
+      try {
+        await store.promoteModel(ft, version, true)
+        showNotification(`${ft.toUpperCase()} ${version} 활성화 완료 (경고 무시)`, 'success')
+        await store.fetchModelStatus()
+      } catch (e2: any) {
+        showNotification(e2.response?.data?.detail || e2.message || '승격 실패', 'error')
+      }
+      return
+    }
+    showNotification((typeof detail === 'string' ? detail : null) || err.message || '승격 실패', 'error')
+  }
+}
+
+const handleRollback = async (ft: string) => {
+  if (!confirm(`${ft.toUpperCase()} 모델을 직전 활성 버전으로 되돌립니다. 계속하시겠습니까?`)) return
+  try {
+    const r = await store.rollbackModel(ft)
+    showNotification(`${ft.toUpperCase()} ${r.previous} → ${r.active} 롤백 완료`, 'success')
+    await store.fetchModelStatus()
+  } catch (err: any) {
+    showNotification(err.response?.data?.detail || err.message || '롤백 실패', 'error')
+  }
+}
+
 const handleStop = async (ft: string) => {
   if (!confirm(`훈련을 중지하시겠습니까?`)) return
   try {
@@ -402,6 +509,7 @@ const handleStop = async (ft: string) => {
 
 onMounted(async () => {
   await store.fetchModelStatus()
+  await store.fetchModelVersions()
   await store.fetchDriftStatus()
   
   // 진입 시 이미 학습 중인 모델이 있다면 폴링 시작

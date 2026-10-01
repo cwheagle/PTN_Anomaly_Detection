@@ -56,7 +56,8 @@ python validation/cli/e2e_verify.py --sse-log validation/runs/e2e_sse.log --seed
 | 확인 | 명령 |
 |---|---|
 | RCA 룰 + Consumer 리로드 | UTF-8 JSON 파일로 `POST /api/rca/rules` → consumer 로그에 `Received RCA rules reload request` |
-| 모델 재학습 → 핫 리로드 | `POST /api/model/train?ft=optical&train_start=...&train_end=...` (`{"epochs":2}`) → consumer 로그에 `(Re)loading optical model from models/optical_ae_v2.pth` |
+| 재학습 → 후보 저장 | `POST /api/model/train?ft=optical&train_start=...&train_end=...` (`{"epochs":2}`) → `GET /api/model/versions?ft=optical` 에 `v2 candidate`, **활성은 v1 유지, consumer 리로드 없음** |
+| 승격 경고 / 승격 / 롤백 | `POST /api/model/promote?ft=optical&version=v2` → 비정상 후보면 409 + 경고, `force=true` 로 승격 시 consumer 로그에 `(Re)loading optical model from models/optical_ae_v2.pth`, `POST /api/model/rollback?ft=optical` → v1 복귀 |
 | Redis 윈도우 | `docker compose exec -T redis redis-cli LLEN "<ip>:<cid>:<lid>"` → 27 |
 | UI | 브라우저에서 `http://localhost` (정적 파일/프록시는 HTTP 로 확인 가능) |
 

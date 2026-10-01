@@ -150,6 +150,44 @@
 }
 ```
 
+#### 2.4.4 모델 버전 조회
+- **Endpoint**: `GET /api/model/versions`
+- **Description**: 트랙별 모델 버전 목록과 상태를 반환합니다. 재학습 결과는 **후보(candidate)** 로 저장되며, 승격해야 활성(active)이 됩니다. 활성이었다가 교체된 버전은 `retired` 입니다.
+- **Query Params**: `ft=traffic|optical` (생략 시 두 트랙 모두)
+- **Response**:
+```json
+{
+  "optical": {
+    "active_version": "v1",
+    "versions": [
+      {"version": "v1", "status": "active", "trained_at": "2026-09-18 10:08:41", "threshold": 0.1704, "final_val_loss": 0.0175, "baseline_mse": null, "samples_used": null},
+      {"version": "v2", "status": "candidate", "trained_at": "2026-10-01 15:09:47", "threshold": 8.6756, "final_val_loss": 0.6886, "baseline_mse": 0.61, "samples_used": 899}
+    ]
+  }
+}
+```
+
+#### 2.4.5 모델 승격 (후보 → 활성)
+- **Endpoint**: `POST /api/model/promote`
+- **Description**: 지정한 버전을 활성화하고 Consumer 에 Redis 로 리로드를 알립니다. 후보가 현재 활성 모델과 크게 다르면(임계치 또는 검증 손실이 3배 초과/미만) **409 와 경고 목록**을 반환하며, 확인 후 `force=true` 로 다시 요청해야 합니다.
+- **Query Params**: `ft=traffic|optical`, `version=v2`, `force=false`
+- **Response (200)**: `{"status": "success", "track": "optical", "previous": "v1", "active": "v2", "warnings": []}`
+- **Response (409, 경고)**:
+```json
+{"detail": {"message": "후보가 현재 활성 모델과 크게 다릅니다. 확인 후 force=true 로 다시 요청하세요.",
+            "warnings": ["임계치가 현재 모델 대비 50.9배 (0.1704 -> 8.676)", "검증 손실이 현재 모델 대비 39.3배 (0.01753 -> 0.6886)"]}}
+```
+- **오류**: `404` 버전 없음 / `409` 이미 활성이거나 모델 파일 누락 / `422` 잘못된 트랙
+
+#### 2.4.6 모델 롤백
+- **Endpoint**: `POST /api/model/rollback`
+- **Description**: 직전에 활성이었던 버전으로 되돌립니다(활성화 이력 기준, 파일이 남아 있는 버전만). 한 번 더 호출하면 다시 직전 활성으로 돌아갑니다.
+- **Query Params**: `ft=traffic|optical`
+- **Response**: `{"status": "success", "track": "optical", "previous": "v2", "active": "v1", "warnings": []}`
+- **오류**: `409` 되돌릴 이전 활성 버전이 없음
+
+> **재학습 동작 변경 (2026-10-01)**: `POST /api/model/train` 과 드리프트 자동 재학습의 결과는 더 이상 즉시 활성화되지 않고 후보로만 저장됩니다. (활성 모델이 아직 없는 최초 학습만 자동 활성화)
+
 ### 2.5. RCA 도메인 룰 관리 (Rule Engine)
 
 #### 2.5.1. 등록된 도메인 룰 조회

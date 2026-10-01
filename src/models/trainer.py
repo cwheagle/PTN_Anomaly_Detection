@@ -8,17 +8,23 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
+from . import registry
 from .model import LSTMAutoencoder
 from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS
 
 class Trainer:
-    def __init__(self, feature_type='traffic', config_override=None, progress_callback=None):
+    def __init__(self, feature_type='traffic', config_override=None, progress_callback=None, activate=True):
         self.feature_type = feature_type
         self.progress_callback = progress_callback
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.stop_requested = False
         self.early_stopped = False # 조기 종료 여부 플래그 추가
+        # activate=False 이면 학습 결과를 '후보'로만 저장 (활성 버전이 없는 최초 학습은 예외적으로 활성화).
+        # API(UI Train 버튼, 드리프트 재학습)는 False 를 사용하고, 사람이 승격해야 Consumer 에 반영된다.
+        self.activate = activate
+        self.activated = None       # 학습 후: 이 버전이 활성화되었는지
+        self.version = None         # 학습 후: 저장된 버전 ID
 
         # 1. 설정값 병합 (기본값 + 외부 주입값)
         self.config = MODEL_CONFIG.copy()
@@ -187,17 +193,9 @@ class Trainer:
         model_dir = os.path.dirname(self.paths['model'])
         os.makedirs(model_dir, exist_ok=True)
         
-        # [Phase 11] Lightweight Model Registry (버전 관리)
-        registry_path = os.path.join(model_dir, f"{self.feature_type}_registry.json")
-        registry = {"active_version": None, "versions": []}
-        if os.path.exists(registry_path):
-            try:
-                with open(registry_path, 'r') as f:
-                    registry = json.load(f)
-            except: pass
-            
-        next_ver = len(registry["versions"]) + 1
-        new_version_id = f"v{next_ver}"
+        # [Phase 11] Lightweight Model Registry (버전 관리, src/models/registry.py)
+        new_version_id = registry.next_version_id(registry.load(model_dir, self.feature_type))
+        self.version = new_version_id
         
         # 파일 경로 버저닝
         base_model = os.path.basename(self.paths['model']).replace('.pth', '')
@@ -224,7 +222,7 @@ class Trainer:
         # 훈련 데이터 기반으로 임계치 결정
         meta = self._save_metadata(train_sequences, best_val_loss if val_loader else None)
         
-        # 레지스트리 갱신
+        # 레지스트리 갱신 (후보로 저장하거나, 활성 버전이 없으면 활성화)
         registry_entry = {
             "version": new_version_id,
             "trained_at": meta["trained_at"],
@@ -233,20 +231,16 @@ class Trainer:
             "config_path": os.path.basename(v_model_path.replace('.pth', '.json')),
             "threshold": meta["threshold"],
             "final_val_loss": meta["final_val_loss"],
-            "is_active": True # 최신 학습본을 Active로 설정
+            "baseline_mse": meta.get("baseline_mse"),
+            "samples_used": meta.get("samples_used"),
         }
-        
-        # 기존 Active 플래그 해제
-        for v in registry["versions"]:
-            v["is_active"] = False
+        with registry.transaction(model_dir, self.feature_type) as reg:
+            self.activated = registry.add_version(reg, registry_entry, self.activate)
             
-        registry["versions"].append(registry_entry)
-        registry["active_version"] = new_version_id
-        
-        with open(registry_path, 'w') as f:
-            json.dump(registry, f, indent=4)
-            
-        print(f"[SUCCESS] {self.feature_type.capitalize()} model deployed. (Version: {new_version_id})")
+        if self.activated:
+            print(f"[SUCCESS] {self.feature_type.capitalize()} model deployed. (Version: {new_version_id})")
+        else:
+            print(f"[SUCCESS] {self.feature_type.capitalize()} model saved as CANDIDATE. (Version: {new_version_id}, not active — promote to deploy)")
         return True
 
     def _save_metadata(self, sequences, val_loss=None):
