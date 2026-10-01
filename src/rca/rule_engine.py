@@ -14,6 +14,39 @@ import json
 from src.rca.default_rules import DefaultRuleSet
 
 
+# 룰 조건에 쓸 수 있는 필드: 추론(AnomalyDetector.detect)이 raw_data 로 넘기는 키와 반드시 일치해야 한다.
+TRAFFIC_FEATURES = ("tx_packet", "rx_packet", "error_packet")
+OPTICAL_FEATURES = ("tx_avg_power", "rx_avg_power")
+TRACK_FEATURES = {
+    "traffic": TRAFFIC_FEATURES,
+    "optical": OPTICAL_FEATURES,
+    "integrated": TRAFFIC_FEATURES + OPTICAL_FEATURES,
+}
+RAW_FIELDS = (
+    set(TRAFFIC_FEATURES) | set(OPTICAL_FEATURES)
+    | {f"{f}_trend_slope" for f in TRAFFIC_FEATURES + OPTICAL_FEATURES}
+    | {f"{f}_ratio" for f in TRAFFIC_FEATURES}
+    | {"traffic_severity", "optical_severity"}
+)
+
+
+def validate_rule(rule: dict) -> list:
+    """룰 정의의 문제 목록을 반환 (빈 리스트면 정상).
+    존재하지 않는 키를 쓰면 그 룰은 조용히 영원히 매칭되지 않으므로 저장/로드 시 걸러낸다."""
+    issues = []
+    track = rule.get("track")
+    for feat in rule.get("contributions", {}):
+        if feat not in TRACK_FEATURES.get(track, ()):
+            issues.append(f"contributions: '{feat}' 은(는) '{track}' 트랙의 feature 가 아님")
+    for key in rule.get("raw_conditions", {}):
+        base = key[4:] if key[:4] in ("min_", "max_") else None
+        if base is None:
+            issues.append(f"raw_conditions: '{key}' 는 min_/max_ 로 시작해야 함")
+        elif base not in RAW_FIELDS:
+            issues.append(f"raw_conditions: '{key}' 의 '{base}' 는 추론이 제공하지 않는 필드 (매칭되지 않음)")
+    return issues
+
+
 # 기본 룰 파일 경로
 DEFAULT_RULES_PATH = os.path.join(
     os.path.dirname(__file__), "rules", "default_rules.json"
@@ -49,6 +82,9 @@ class RuleTable:
                 rules = json.load(f)
             # priority 내림차순 정렬 (높은 우선순위 먼저 평가)
             rules.sort(key=lambda r: r.get("priority", 0), reverse=True)
+            for r in rules:
+                for issue in validate_rule(r):
+                    print(f"[RCA][WARN] rule {r.get('id')}: {issue}")
             print(f"[RCA] Loaded {len(rules)} rules from {path}")
             return rules
         except Exception as e:
@@ -70,6 +106,11 @@ class RuleTable:
             
         if rule_dict["track"] not in ("traffic", "optical", "integrated"):
             print(f"[RCA Engine] Invalid track: {rule_dict.get('track')}")
+            return False
+
+        issues = validate_rule(rule_dict)
+        if issues:
+            print(f"[RCA] Invalid rule '{rule_dict.get('id')}': {issues}")
             return False
 
         # 중복 id 체크

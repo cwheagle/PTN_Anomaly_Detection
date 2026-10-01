@@ -563,6 +563,11 @@ async def add_rca_rule(rule: dict = Body(...)):
     if rule.get("track") not in ("traffic", "optical", "integrated"):
         raise HTTPException(status_code=400, detail="Invalid track. Must be 'traffic', 'optical' or 'integrated'.")
     
+    from src.rca.rule_engine import validate_rule
+    issues = validate_rule(rule)
+    if issues:
+        raise HTTPException(status_code=400, detail=f"Invalid rule: {'; '.join(issues)}")
+
     try:
         from src.rca.rule_engine import RCAEngine
         engine = RCAEngine()

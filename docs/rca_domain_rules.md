@@ -43,15 +43,15 @@ AI가 도출한 **'기여도(Contribution)'**와 **'추세 기울기(Slope)'**�
    - **Diagnosis**: 송수신 광 전력 동시 급감 (광 모듈 자체 하드웨어 Fault 또는 슬롯 전원 이상)
    - **Action**: 광 모듈 재장착(Re-seat) 및 교체, 슬롯 불량 여부 점검
 3. **[예지정비] 광 수신 신호 급격한 열화 (Priority: 60)**
-   - **조건**: `rx_avg_power` 기여도 ≥ 60%, `rx_power_trend_slope` ≤ -1.0 (JSON: `max_rx_power_trend_slope: -1.0`)
+   - **조건**: `rx_avg_power` 기여도 ≥ 60%, `rx_avg_power_trend_slope` ≤ -1.0 (JSON: `max_rx_avg_power_trend_slope: -1.0`)
    - **Diagnosis**: 광 수신 전력 급격한 저하 (패치코드 꺾임, 무거운 물체에 눌림 등 단기 내 LOS 위험)
    - **Action**: 통신실 내 광 패치코드 결선 상태 및 굴곡(Macrobending) 즉시 확인
 4. **[예지정비] 광 송신 레이저 급사 징후 (Priority: 60)**
-   - **조건**: `tx_avg_power` 기여도 ≥ 60%, `tx_power_trend_slope` ≤ -1.0 (JSON: `max_tx_power_trend_slope: -1.0`)
+   - **조건**: `tx_avg_power` 기여도 ≥ 60%, `tx_avg_power_trend_slope` ≤ -1.0 (JSON: `max_tx_avg_power_trend_slope: -1.0`)
    - **Diagnosis**: 광 송신 전력 급격한 저하 (송신 레이저 다이오드 불량 또는 과열 의심)
    - **Action**: 광 모듈 즉시 교체 준비 및 라인카드 온도 점검
 5. **[예지정비] 송수신 모듈 점진적 에이징 (Priority: 50)**
-   - **조건**: `tx_avg_power` (또는 rx_avg_power) 기여도 ≥ 60%, 해당 지표의 `power_trend_slope` < 0 (JSON: `max_rx_power_trend_slope: -0.1` 등)
+   - **조건**: `tx_avg_power` (또는 rx_avg_power) 기여도 ≥ 60%, 해당 지표의 `*_avg_power_trend_slope` < 0 (JSON: `max_rx_avg_power_trend_slope: -0.1` 등)
    - **Diagnosis**: 광 전력 점진적 저하 (레이저 바이어스 전류 노후화 또는 커넥터 오염 진행 중)
    - **Action**: 다음 계획 예방 정비(PM) 시 커넥터 클리닝 및 모듈 교체 스케줄 수립
 
@@ -67,11 +67,11 @@ AI가 도출한 **'기여도(Contribution)'**와 **'추세 기울기(Slope)'**�
    - **Diagnosis**: 광 선로 완전 단선으로 인한 수신 트래픽 100% 단절 (원인: 물리 선로)
    - **Action**: 상위 라우팅 점검 불필요. 즉시 현장 선로 복구반 출동
 3. **[예지정비] 신호 미약으로 인한 데이터 손실 (Priority: 80)**
-   - **조건**: `rx_avg_power` 기여도 ≥ 25%, `error_packet` 기여도 ≥ 25%, `rx_power_trend_slope` < 0, `error_packet_trend_slope` > 0
+   - **조건**: `rx_avg_power` 기여도 ≥ 25%, `error_packet` 기여도 ≥ 25%, `rx_avg_power_trend_slope` < 0, `error_packet_trend_slope` > 0
    - **Diagnosis**: 수신 광전력 저하로 인한 비트 오류(BER) 급증 진행 중
    - **Action**: 단순 트래픽 장애 아님. 광 선로 로스(OTDR) 측정 및 커넥터 클리닝 실시
 4. **[예지정비] 송신 열화로 인한 병목 현상 (Priority: 70)**
-   - **조건**: `tx_avg_power` 기여도 ≥ 25%, `tx_packet` 기여도 ≥ 25%, `tx_power_trend_slope` < 0, `tx_packet_ratio` ≤ 0.5
+   - **조건**: `tx_avg_power` 기여도 ≥ 25%, `tx_packet` 기여도 ≥ 25%, `tx_avg_power_trend_slope` < 0, `tx_packet_ratio` ≤ 0.5
    - **Diagnosis**: 송신 광전력 저하로 인한 송신 트래픽 병목/드랍 발생
    - **Action**: 내 장비 송신 모듈 상태 점검 및 대향국(Remote) 수신 에러 상태 크로스 체크
 

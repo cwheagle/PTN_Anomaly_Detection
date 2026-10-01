@@ -116,7 +116,7 @@
       "rx_avg_power": 60
     },
     "raw_conditions": {
-      "max_rx_power_trend_slope": -1.0
+      "max_rx_avg_power_trend_slope": -1.0
     },
     "diagnosis": "광 수신 전력 급격한 저하 (패치코드 꺾임, 무거운 물체에 눌림 등 단기 내 LOS 위험)",
     "action": "통신실 내 광 패치코드 결선 상태 및 굴곡(Macrobending) 즉시 확인"
@@ -129,7 +129,7 @@
       "tx_avg_power": 60
     },
     "raw_conditions": {
-      "max_tx_power_trend_slope": -1.0
+      "max_tx_avg_power_trend_slope": -1.0
     },
     "diagnosis": "광 송신 전력 급격한 저하 (송신 레이저 다이오드 불량 또는 과열 의심)",
     "action": "광 모듈 즉시 교체 준비 및 라인카드 온도 점검"
@@ -142,7 +142,7 @@
       "tx_avg_power": 60
     },
     "raw_conditions": {
-      "max_tx_power_trend_slope": -0.1
+      "max_tx_avg_power_trend_slope": -0.1
     },
     "diagnosis": "광 송신 전력 점진적 저하 (레이저 바이어스 전류 노후화 진행 중)",
     "action": "다음 계획 예방 정비(PM) 시 커넥터 클리닝 및 모듈 교체 스케줄 수립"
@@ -155,7 +155,7 @@
       "rx_avg_power": 60
     },
     "raw_conditions": {
-      "max_rx_power_trend_slope": -0.1
+      "max_rx_avg_power_trend_slope": -0.1
     },
     "diagnosis": "광 수신 전력 점진적 저하 (커넥터 오염 등 징후)",
     "action": "다음 계획 예방 정비(PM) 시 커넥터 클리닝 수립"
@@ -201,7 +201,7 @@
       "error_packet": 25
     },
     "raw_conditions": {
-      "max_rx_power_trend_slope": -0.1,
+      "max_rx_avg_power_trend_slope": -0.1,
       "min_error_packet_trend_slope": 0.1
     },
     "diagnosis": "수신 광전력 저하로 인한 비트 오류(BER) 급증 진행 중",
@@ -216,7 +216,7 @@
       "tx_packet": 25
     },
     "raw_conditions": {
-      "max_tx_power_trend_slope": -0.1,
+      "max_tx_avg_power_trend_slope": -0.1,
       "max_tx_packet_ratio": 0.5
     },
     "diagnosis": "송신 광전력 저하로 인한 송신 트래픽 병목/드랍 발생",
