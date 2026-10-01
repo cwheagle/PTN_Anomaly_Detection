@@ -1,8 +1,9 @@
-import sys
 import os
+import sys
 
-# 현재 디렉토리를 경로에 추가하여 src 모듈을 찾을 수 있게 함
-sys.path.append(os.getcwd())
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, root_dir)
+os.chdir(root_dir)  # data/, models/ 등 상대 경로 기준을 프로젝트 루트로 고정
 
 from run_training import run_training
 from run_inference_check import run_inference_test

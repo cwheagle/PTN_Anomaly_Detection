@@ -52,7 +52,7 @@
 - **세부 내용:**
   - **데이터 전처리 고도화**: Traffic 데이터 `log1p` 변환 및 `RobustScaler` 적용을 통한 이상치 왜곡 최소화.
   - **모델 성능 개선**: LSTM-Autoencoder 구조 최적화 및 최적의 임계치 percentile 설정.
-  - **통합 검증기**: `scripts/run_inference_check.py`(구 `test_inference.py`)를 강화하여 [추론 + CSV 저장 + 탐지 사유 리포팅] 기능을 통합.
+  - **통합 검증기**: `validation/cli/run_inference_check.py`(구 `test_inference.py`)를 강화하여 [추론 + CSV 저장 + 탐지 사유 리포팅] 기능을 통합.
 - **검증:** 
     - 과거 장애 시점 데이터를 활용한 실제 탐지 성능(Hit Rate) 평가 완료.
     - **장기 가동 테스트**: 15분 주기의 실시간 운영 시 데이터 수집 및 추론 엔진 무결성 검증 완료. (2026-05-11)
@@ -103,7 +103,8 @@
 ### Phase 10: 오프라인 모델 검증 및 성능 평가 (Complete)
 - **목표:** 예지 정비(Predictive Maintenance)의 특수성을 고려하여, 잔여 수명(TTF)을 활용한 동적 평가 지표(TTF-Aware F1-Score) 평가 프레임워크 완성.
 - **주요 작업:**
-  - 시뮬레이터가 생성한 **정답지(Ground Truth) 데이터셋**(`eval_dataset.csv`) 연동 및 검증 완료.
+  - **[2026-10-01 정정] 구 평가(`eval_dataset.csv` + DB)의 F1 0.84~0.86은 모델 성능의 근거로 부적합**: 포트×시간의 93.9%가 정답 구간이라 오탐이 구조적으로 불가능했고("항상 알람"이 F1 0.97), TP의 91%가 사후 알람이며, 평가 기간이 학습 기간과 겹치고 학습 데이터가 오염되어 있었음. 아래 *재설계된 평가*(`validation/cli/evaluate_model.py`, `validation/evaluation/`, `validation/simulator/scenario_generator.py`)로 대체.
+  - (구) 시뮬레이터가 생성한 **정답지(Ground Truth) 데이터셋**(`eval_dataset.csv`) 연동 및 검증 완료.
   - **데이터 오염 방지(Data Sanitization)**: 훈련셋 구성 시 장애 구간 데이터를 철저히 도려내어 모델 오염 방지 기능 적용 완료.
   - TTF-Aware 다이나믹 타임 윈도우 기반 Precision, Recall, F1-Score 산출 로직 구현 완료.
   - **오탐(False Positive) 억제 튜닝 완료**: 
@@ -140,6 +141,12 @@
      - 수집된 라벨링 데이터를 즉시 반영하여 다음 재학습 시 모델의 가중치를 교정하는 능동 학습(Active Learning) 파이프라인 완성.
 
 ### Backlog (이월 항목 — 완료로 오인되지 않도록 별도 관리)
+- **격리 재학습 실험 결과 반영 및 모델 개선 (최우선)**: 정상 데이터(장애 제거 + 정상 변동 포함) 재학습으로 조기 탐지율 44%→79~83%, 노이즈 환경 이벤트 F1 0.32→0.63까지 개선됨(`validation/cli/train_isolated.py`). 남은 과제:
+  1. 수렴 확인: 모든 실험 학습이 30에폭 상한에 도달(검증 손실이 계속 감소) → 에폭/조기 종료 조정 후 재평가
+  2. 오탐 감소: 이벤트 정밀도 약 50%(롤링 규칙 95%). 임계치 percentile, 댐프닝 정책 재조정(댐프닝은 오탐 4배 감소/탐지율 20%p 하락의 트레이드오프)
+  3. traffic_drop(점진적 트래픽 감소) 탐지: 모든 방법이 취약(노이즈 학습 모델 조기 탐지 5%) — 임계치가 정상 변동 때문에 높아진 영향
+  4. 다중 시드(7, 11, 23 …) 평가로 분산 확인, 롤링 규칙 + AE 하이브리드 검토
+  5. 실험 모델을 운영 모델로 승격하는 절차(학습 파이프라인에 정상 구간 정제 단계 포함) 정립
 - **Kubernetes 배포 / HPA**: Phase 12-3. 현재는 Docker Compose까지만 구현 (`docker-compose.yml`, 모델·룰은 named volume 공유).
 - **성능 하락 시 자동 모델 롤백**: Phase 11-3. 레지스트리의 `active_version`을 되돌리는 로직/API 없음.
 - **재학습 전 구버전 모델의 드리프트 baseline**: v1 메타에는 `baseline_mse`가 없어 `final_val_loss`로 fallback. 재학습 시 해소.

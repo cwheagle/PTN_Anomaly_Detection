@@ -17,8 +17,6 @@ import json
 import numpy as np
 import pytest
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-
 from src.rca.feature_contribution import FeatureContributionAnalyzer
 from src.rca.rule_engine import RCAEngine, RuleTable
 from src.rca.default_rules import DefaultRuleSet

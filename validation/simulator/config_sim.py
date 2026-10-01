@@ -2,11 +2,11 @@ import os
 
 # 시뮬레이터 구동용 DB 설정 (기본적으로 localhost에 cowptn_test 데이터베이스 사용 권장)
 DB_CONFIG_SIM = {
-    "host": "localhost",
-    "user": "root",
-    "password": "root",
-    "database": "cowptn_test",  # 테스트용 독립 스키마
-    "port": 3306
+    "host": os.getenv("SIM_DB_HOST", "localhost"),
+    "user": os.getenv("SIM_DB_USER", "root"),
+    "password": os.getenv("SIM_DB_PASS", "root"),
+    "database": os.getenv("SIM_DB_NAME", "cowptn_test"),  # 테스트용 독립 스키마
+    "port": int(os.getenv("SIM_DB_PORT", 3306))
 }
 
 # 시뮬레이터 시나리오 설정

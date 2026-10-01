@@ -73,23 +73,20 @@ PTN_Anomaly_Detection/
 │       ├── DashboardView.vue       # 실시간 이상탐지 대시보드
 │       ├── ModelManagementView.vue # 모델 파라미터 설정 및 훈련 관리
 │       └── RuleManagementView.vue  # RCA 도메인 룰 등록·수정
-├── tools/
-│   └── simulator/          # 테스트용 데이터 시뮬레이터 (이상 주입, 이력 생성)
+├── validation/             # ★ 솔루션 밖의 검증 도구 (배포 이미지에 포함되지 않음, 자세한 내용은 validation/README.md)
+│   ├── simulator/          # 시나리오 생성기(시드 고정), 실시간 DB 주입기 (파이프라인 시연용)
+│   ├── evaluation/         # 이벤트 단위 평가 지표, 베이스라인
+│   ├── cli/                # 평가·실험·수동 실행 스크립트
+│   └── runs/               # ⚡ 평가/실험 산출물 (git 제외)
 ├── tests/
-│   ├── module/                 # 모듈별 단위 동작 검증 (pytest)
-│   │   ├── test_data.py        # 데이터 수집·전처리 모듈
-│   │   ├── test_model.py       # LSTM-AE 모델 아키텍처
-│   │   └── test_trainer.py     # 학습 루프 (임시 경로, 실제 모델 미변경)
-│   ├── test_rca.py             # RCA 엔진 진단 테스트
-│   ├── test_window_state.py    # Redis 윈도우 상태 (mock)
-│   ├── test_phase12_fixes.py   # Phase 12 정합성 점검 회귀 테스트
-│   └── test_alarm_and_collector.py # 알람 발생/해제, 학습 제외 구간, SQL 바인딩
-├── scripts/
-│   ├── collect_data.py         # 데이터 수집 단독 실행
-│   ├── run_training.py         # 모델 훈련 실행 (Traffic/Optical) ※ 실제 models/ 를 갱신함
-│   ├── run_inference_check.py  # 추론 결과 CSV 저장 및 포트별 요약
-│   ├── run_full_cycle.py       # 훈련 + 추론 전체 사이클
-│   └── evaluate_model.py       # 오프라인 모델 검증 및 F1-Score 평가
+│   │                           # src/ 구조를 그대로 따르는 모듈별 배치 (pytest, pytest.ini 의 pythonpath=.)
+│   ├── api/                    # 알람 발생/해제 (포트 단위)
+│   ├── data/                   # 전처리, DataCollector(제외 구간), DBConnector(바인딩/접속 실패)
+│   ├── models/                 # LSTM-AE 구조, 학습 루프(스케일러 fit, 레지스트리; 임시 경로, 실제 모델 미변경)
+│   ├── pipeline/               # Kafka Consumer, Drift Monitor, Redis 윈도우(mock)
+│   ├── rca/                    # RCA 엔진 진단
+│   ├── validation/             # 평가 지표/시나리오 생성기/베이스라인 검증
+│   └── test_architecture.py    # 계층 규칙 (src 는 validation 을 import 하지 않음)
 ├── docs/                   # 설계 문서 및 참고 자료
 ├── models/                 # ⚡ 동적 생성 — 학습된 모델 가중치 저장소 (git 제외)
 ├── data/                   # ⚡ 동적 생성 — 추론 결과 및 평가용 CSV (git 제외)
@@ -279,25 +276,31 @@ docker-compose up -d
 
 ```bash
 # 모듈별 단위 동작 검증
-pytest tests/module/ -v
+pytest tests/models/ tests/data/ -v
 
 # 모델 훈련
-python scripts/run_training.py
+python validation/cli/run_training.py
 
 # 추론 엔진 테스트
-python scripts/run_inference_check.py
+python validation/cli/run_inference_check.py
 
-# 전체 테스트 (RCA, Redis 윈도우, 회귀 테스트 포함)
-pytest tests/ -v
+# 전체 테스트
+pytest -v
 
 # 전체 파이프라인 통합 실행
-python scripts/run_full_cycle.py
+python validation/cli/run_full_cycle.py
 
-# 데이터 수집 단독 실행
-python scripts/collect_data.py
 
-# 모델 오프라인 평가 및 F1-Score 산출
-python scripts/evaluate_model.py
+# 격리 재학습 실험 (활성 모델/DB 미변경): 정상 데이터만으로 학습 후 --models-dir 로 평가
+python validation/cli/train_isolated.py --variant noisy --out validation/runs/models_noisy
+python validation/cli/evaluate_model.py --models-dir validation/runs/models_noisy --tag noisymodel
+python validation/cli/compare_reports.py validation/runs/seed7_n6_d14 validation/runs/seed7_n6_d14_clean   # 리포트 비교표
+
+# 모델 오프라인 평가 (이벤트 중심, 시드 고정, 베이스라인 병기 — DB 불필요)
+python validation/cli/evaluate_model.py                 # 기본: seed=7, 6노드x10포트, 14일 (약 2~3분)
+python validation/cli/evaluate_model.py --clean         # 정상 노이즈를 끈 데이터 (분포 이동 영향 분리)
+python validation/cli/evaluate_model.py --seed 11       # 다른 시드로 재현성/분산 확인
+python validation/cli/evaluate_model.py --reuse-predictions   # 저장된 추론 결과로 지표만 재계산
 ```
 
 ---
@@ -317,7 +320,7 @@ python scripts/evaluate_model.py
 - Server-Sent Events (SSE) 실시간 스트리밍
 
 **개발 도구**
-- `tools/simulator` — 이상 데이터 주입, 과거 이력 생성, 실시간 주입기 (테스트 환경 구축용)
+- `validation/` — 시뮬레이터, 평가 지표, 실험 스크립트 (솔루션과 분리된 검증 도구, `validation/README.md` 참고)
 
 ---
 

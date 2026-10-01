@@ -1,7 +1,11 @@
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import random
 import math
 from datetime import datetime, timedelta
-from config_sim import SIM_CONFIG, SIGNAL_TYPES
+from validation.simulator.config_sim import SIM_CONFIG, SIGNAL_TYPES
 
 class DataGenerator:
     def __init__(self):

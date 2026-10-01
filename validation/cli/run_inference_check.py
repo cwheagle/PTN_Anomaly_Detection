@@ -1,7 +1,10 @@
-import sys
 import os
+import sys
+
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, root_dir)
+os.chdir(root_dir)  # data/, models/ 등 상대 경로 기준을 프로젝트 루트로 고정
 import pandas as pd
-sys.path.append(os.getcwd())
 from src.pipeline.inference import AnomalyDetector
 
 def diagnose_reason(port_res, ft):

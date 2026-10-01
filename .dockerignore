@@ -14,7 +14,7 @@ ui/dist
 data
 logs
 tests
-tools
+validation
 docs
 참고
 *.tar

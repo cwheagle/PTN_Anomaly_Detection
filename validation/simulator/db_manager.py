@@ -1,6 +1,10 @@
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import mysql.connector
 from mysql.connector import Error
-from config_sim import DB_CONFIG_SIM
+from validation.simulator.config_sim import DB_CONFIG_SIM
 
 class SimulatorDBManager:
     def __init__(self):

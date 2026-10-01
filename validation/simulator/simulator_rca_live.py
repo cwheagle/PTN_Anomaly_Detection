@@ -1,11 +1,15 @@
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import time
 import logging
 import random
 from apscheduler.schedulers.blocking import BlockingScheduler
 from datetime import datetime
-from config_sim import SIM_CONFIG, SIGNAL_TYPES
-from db_manager import SimulatorDBManager
-from data_generator import DataGenerator
+from validation.simulator.config_sim import SIM_CONFIG, SIGNAL_TYPES
+from validation.simulator.db_manager import SimulatorDBManager
+from validation.simulator.data_generator import DataGenerator
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -91,8 +95,8 @@ class RCATrendDataGenerator(DataGenerator):
                 
         return traffic_data, optical_data
 
-db = SimulatorDBManager()
-gen = RCATrendDataGenerator()
+db = None   # start_injector() 에서 초기화 (import 시 DB 접속 방지)
+gen = None
 
 def job_inject_data():
     now = datetime.now().replace(second=0, microsecond=0)
@@ -116,6 +120,9 @@ def job_inject_data():
     logging.info(f"Successfully injected {len(traffic_data)} records. (Active RCA Trend Ports: {len(gen.trend_states)})")
 
 def start_injector():
+    global db, gen
+    db = SimulatorDBManager()
+    gen = RCATrendDataGenerator()
     scheduler = BlockingScheduler()
     # 15분 마다 실행
     scheduler.add_job(job_inject_data, 'cron', minute=f"*/{SIM_CONFIG['interval_minutes']}")
