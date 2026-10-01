@@ -6,7 +6,7 @@
 - **개발 원칙:** AI 에이전트 기반 개발(Harness Coding) 방법론을 적용하여, 목표-조사-설계-구현-테스트-학습의 루프를 통한 코드 품질과 유지보수성 확보.
 
 ## 2. Scope & Architecture (범위 및 아키텍처)
-- **개발 언어 및 프레임워크:** Python, PyTorch (Deep Learning), Pandas/NumPy (Data Processing), SQLAlchemy (DB Connection), APScheduler (Task Scheduling).
+- **개발 언어 및 프레임워크:** Python, PyTorch (Deep Learning), Pandas/NumPy (Data Processing), mysql-connector-python (DB Connection Pool), APScheduler (Producer 스케줄링/일일 유지보수), Kafka·Redis (Phase 12 스트림 처리).
 - **데이터베이스:** MySQL (원본 성능 데이터 및 분석 결과 저장).
 - **핵심 컴포넌트:**
   1. `DataFetcher`: MySQL DB에서 주기적(15분)으로 최신 데이터를 조회.
@@ -35,7 +35,7 @@
 - **목표:** 15분 주기로 동작하는 실시간 추론 및 결과 저장 시스템 구축.
 - **세부 내용:**
   - `inference.py` 구현 (학습 모델 로드, 최신 데이터 예측, Reconstruction Error 기반 점수 및 임계치 산출).
-  - `scheduler.py` 구현 (APScheduler 적용, 15분마다 `inference.py` 핵심 함수 호출).
+  - `scheduler.py` 구현 (APScheduler 적용, 15분마다 `inference.py` 핵심 함수 호출). *(Phase 12에서 `kafka_producer.py`/`kafka_consumer.py`로 대체되어 파일은 존재하지 않음)*
   - 추론 결과를 DB에 저장하는 로직 추가.
 - **검증:** 전체 파이프라인(조회-전처리-추론-저장) 통합 테스트.
 
@@ -52,7 +52,7 @@
 - **세부 내용:**
   - **데이터 전처리 고도화**: Traffic 데이터 `log1p` 변환 및 `RobustScaler` 적용을 통한 이상치 왜곡 최소화.
   - **모델 성능 개선**: LSTM-Autoencoder 구조 최적화 및 최적의 임계치 percentile 설정.
-  - **통합 검증기**: `test_inference.py`를 강화하여 [추론 + CSV 저장 + 탐지 사유 리포팅] 기능을 통합.
+  - **통합 검증기**: `scripts/run_inference_check.py`(구 `test_inference.py`)를 강화하여 [추론 + CSV 저장 + 탐지 사유 리포팅] 기능을 통합.
 - **검증:** 
     - 과거 장애 시점 데이터를 활용한 실제 탐지 성능(Hit Rate) 평가 완료.
     - **장기 가동 테스트**: 15분 주기의 실시간 운영 시 데이터 수집 및 추론 엔진 무결성 검증 완료. (2026-05-11)
@@ -120,16 +120,16 @@
   2. **시계열 파생 변수(Feature Engineering) 고도화**:
      - 원본 15분 단위 메트릭에 이동 평균(1h/4h), 이동 변동성, 시차 데이터(Lag) 자동 생성.
   3. **모델 레지스트리 및 자동 롤백 (Advanced MLOps)**:
-     - MLflow 등 모델 버저닝 및 성능 하락 감지 시 자동 롤백(Rollback) 체계 도입.
+     - 모델 버저닝: Lightweight Model Registry(`*_registry.json`) 도입 완료. **성능 하락 감지 시 자동 롤백은 미구현 → 하단 Backlog로 이월.**
 - **검증:**
   - Phase 10의 `evaluate_model.py`를 활용하여 **심각도별 쿨다운 도입 후 Precision 90% 이상 향상** 검증.
 
-### Phase 12: 대용량 분산 처리 및 폐쇄망 배포 아키텍처 (Scalability & HA) (Complete)
+### Phase 12: 대용량 분산 처리 및 폐쇄망 배포 아키텍처 (Scalability & HA) (Complete — 3번 K8s 제외)
 - **목표:** 전국망 단위(10만 대 이상)의 노드를 지연 없이 실시간으로 분석할 수 있는 상용 엔터프라이즈 인프라 구축 및 폐쇄망 배포 환경 구성.
 - **세부 내용:**
   1. **마이크로서비스 컨테이너화 (Dockerization)**: Kubernetes에 배포하기 위한 필수 전제 조건. UI, API, Producer, 추론 엔진(Consumer)을 각각 독립된 Docker 이미지로 빌드하여 폐쇄망 오프라인 배포 파이프라인 구축.
   2. **스트림 프로세싱(Stream Processing) 도입**: 기존 DB 스케줄러 폴링(Polling) 방식을 탈피하여, Apache Kafka 기반의 실시간 데이터 파이프라인으로 마이그레이션.
-  3. **클라우드 네이티브 고가용성 (Kubernetes)**: 빌드된 도커 컨테이너들을 K8s 클러스터에 배포. 트래픽 부하에 따라 AI 추론 파드(Pod)를 HPA(오토스케일링)로 동적 확장하고, 장애 시 즉각 페일오버(Failover)하는 완벽한 HA 체계 완성.
+  3. **클라우드 네이티브 고가용성 (Kubernetes)** *(미구현 → 하단 Backlog로 이월. K8s 매니페스트/HPA 없음)*: 빌드된 도커 컨테이너들을 K8s 클러스터에 배포. 트래픽 부하에 따라 AI 추론 파드(Pod)를 HPA(오토스케일링)로 동적 확장하고, 장애 시 즉각 페일오버(Failover)하는 완벽한 HA 체계 완성.
 
 ### Phase 13: XAI(설명 가능한 AI) 및 능동 학습 (Active Learning) (Go)
 - **목표:** 현업 엔지니어의 신뢰도를 높이고, 인간의 피드백을 통해 AI가 스스로 진화하는 플라이휠(Flywheel) 완성.
@@ -138,6 +138,11 @@
   2. **Human-in-the-loop (피드백 기반 RLHF) 및 실시간 정답지 자동화 연동**: 
      - NMS UI 수동 입력(관리자의 [👍실제 장애 / 👎오탐임] 피드백) 및 장비의 Link Down/Up 원시 로그를 추적하여 실제 정답지(Ground Truth) 자동 구축.
      - 수집된 라벨링 데이터를 즉시 반영하여 다음 재학습 시 모델의 가중치를 교정하는 능동 학습(Active Learning) 파이프라인 완성.
+
+### Backlog (이월 항목 — 완료로 오인되지 않도록 별도 관리)
+- **Kubernetes 배포 / HPA**: Phase 12-3. 현재는 Docker Compose까지만 구현 (`docker-compose.yml`, 모델·룰은 named volume 공유).
+- **성능 하락 시 자동 모델 롤백**: Phase 11-3. 레지스트리의 `active_version`을 되돌리는 로직/API 없음.
+- **재학습 전 구버전 모델의 드리프트 baseline**: v1 메타에는 `baseline_mse`가 없어 `final_val_loss`로 fallback. 재학습 시 해소.
 
 ---
 

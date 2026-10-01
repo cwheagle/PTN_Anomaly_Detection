@@ -35,17 +35,22 @@
     - **MLOps 및 모델 배포 고도화 완료**:
         - 알람 피로도 억제를 위한 심각도별 차등 쿨다운(Alert Dampening) 적용.
         - 파생 변수(MA, Var, Lag)를 생성하는 모델 고도화 적용 (input_dim=15).
-        - 버전 관리를 지원하는 Lightweight Model Registry 도입 (Active/Rollback 가능).
+        - 버전 관리를 지원하는 Lightweight Model Registry 도입 (버전 저장/Active 지정. 자동 롤백은 미구현 → plan.md Backlog).
     - **대용량 분산 처리 및 고가용성 아키텍처 완료**:
         - Apache Kafka 기반 스트림 프로세싱 도입 (Producer/Consumer 완벽 분리).
         - Redis를 활용한 분산 환경에서의 시계열 Rolling Window 상태 관리 구축.
-        - API, UI, Producer, Consumer 각 서비스별 컨테이너화(Dockerization) 완료.
+        - API, UI, Producer, Consumer 각 서비스별 컨테이너화(Dockerization) 완료 (K8s/HPA는 미구현 → plan.md Backlog).
+    - **정합성 점검 및 버그 수정 (2026-10-01)**: 컨테이너 DB 호스트/모델·룰 공유 볼륨, DB silent failure 제거, 포트 필터(.any) 버그, `PATHS` 전역 오염, 레지스트리 경로, 드리프트 baseline, 결측 0-채움 제거. 낡은 테스트 정비 및 회귀 테스트 추가 (전체 36 PASS).
+
+    - **2차 점검 수정 (2026-10-01)**: 포트 단위 알람 발생/해제(`alarm_tracker`), Consumer의 CRITICAL 복구 CLEAR 전달, 학습 코드의 정답지 암묵 의존 제거(`exclude_path`/`TRAIN_EXCLUDE_CSV`로 명시 주입), SQL 파라미터 바인딩, 학습 중복 실행 409 가드, `.dockerignore`·Producer 전용 requirements, 수동 실행 스크립트를 `tests/` → `scripts/`로 분리 (전체 50 PASS).
+    - **알려진 한계**: Phase 10/11의 F1 0.86은 시뮬레이터 정답지 기준의 관대한 채점이며 모델 성능의 근거로 부족함 (광 장애 스텝 재현율 0.2%, 평가-학습 기간 중복, 학습 데이터 오염). 평가 재설계 필요.
 
 - **대기 중 (Phase 13)**:
     - **XAI (설명 가능한 AI)**: SHAP/LIME을 통한 폭포수 차트 구현.
     - **능동 학습 (Active Learning)**: 관리자 피드백 기반 실시간 라벨링 및 RLHF 파이프라인.
 
-- **최종 업데이트**: 2026-09-21
+- **최종 업데이트**: 2026-10-01
+- **참고**: 2026-10-01부터 Claude Code도 함께 사용합니다. `CLAUDE.md`가 이 파일을 import하므로 이 파일이 규범·상태의 유일한 원본입니다.
 
 ## 4. 워크플로우
 - `plan.md`를 구현 단계의 유일한 진실 공급원(Single Source of Truth)으로 참조합니다.

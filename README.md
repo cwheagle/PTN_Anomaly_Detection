@@ -64,7 +64,7 @@ PTN_Anomaly_Detection/
 │   ├── api/                # FastAPI 라우터 및 SSE 엔드포인트
 │   ├── data/               # DataFetcher, Preprocessor, DB Connector
 │   ├── models/             # LSTM-Autoencoder (model.py, trainer.py)
-│   ├── pipeline/           # InferenceEngine, Scheduler, Dynamic Threshold
+│   ├── pipeline/           # InferenceEngine, Kafka Producer/Consumer, Window State, Drift Monitor
 │   ├── rca/                # RCA 엔진, Feature Contribution, Rule Engine
 │   │   └── rules/          # 도메인 룰셋 JSON (16종 PTN 룰)
 │   └── config.py           # 중앙화된 설정 관리
@@ -79,15 +79,16 @@ PTN_Anomaly_Detection/
 │   ├── module/                 # 모듈별 단위 동작 검증 (pytest)
 │   │   ├── test_data.py        # 데이터 수집·전처리 모듈
 │   │   ├── test_model.py       # LSTM-AE 모델 아키텍처
-│   │   ├── test_trainer.py     # 학습 루프
-│   │   └── test_scheduler.py  # 스케줄러
-│   ├── test_train.py           # 모델 훈련 실행 (Traffic/Optical 전체)
-│   ├── test_inference.py       # 추론 엔진 실행 테스트
+│   │   └── test_trainer.py     # 학습 루프 (임시 경로, 실제 모델 미변경)
 │   ├── test_rca.py             # RCA 엔진 진단 테스트
-│   └── test_run.py             # 전체 파이프라인 통합 실행
+│   ├── test_window_state.py    # Redis 윈도우 상태 (mock)
+│   ├── test_phase12_fixes.py   # Phase 12 정합성 점검 회귀 테스트
+│   └── test_alarm_and_collector.py # 알람 발생/해제, 학습 제외 구간, SQL 바인딩
 ├── scripts/
 │   ├── collect_data.py         # 데이터 수집 단독 실행
-│   ├── main_scheduler.py       # 스케줄러 테스트 가동
+│   ├── run_training.py         # 모델 훈련 실행 (Traffic/Optical) ※ 실제 models/ 를 갱신함
+│   ├── run_inference_check.py  # 추론 결과 CSV 저장 및 포트별 요약
+│   ├── run_full_cycle.py       # 훈련 + 추론 전체 사이클
 │   └── evaluate_model.py       # 오프라인 모델 검증 및 F1-Score 평가
 ├── docs/                   # 설계 문서 및 참고 자료
 ├── models/                 # ⚡ 동적 생성 — 학습된 모델 가중치 저장소 (git 제외)
@@ -281,16 +282,16 @@ docker-compose up -d
 pytest tests/module/ -v
 
 # 모델 훈련
-python tests/test_train.py
+python scripts/run_training.py
 
 # 추론 엔진 테스트
-python tests/test_inference.py
+python scripts/run_inference_check.py
 
-# RCA 엔진 테스트
-python tests/test_rca.py
+# 전체 테스트 (RCA, Redis 윈도우, 회귀 테스트 포함)
+pytest tests/ -v
 
 # 전체 파이프라인 통합 실행
-python tests/test_run.py
+python scripts/run_full_cycle.py
 
 # 데이터 수집 단독 실행
 python scripts/collect_data.py
