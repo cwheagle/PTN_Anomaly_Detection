@@ -27,7 +27,7 @@
     - Rule Management 동적 폼 및 대시보드 툴팁 UI 구축 완벽 적용.
     - **16종의 PTN 도메인 RCA 룰셋 주입 (Ratio, Trend Slope 적용 완료)**
     - **3-Sigma 기반 동적 임계치(Dynamic Threshold) 파이프라인 통합 완료**
-    - **자동 재학습**: Data Drift 감지 및 백그라운드 모델 재학습 파이프라인 (완료)
+    - **자동 재학습**: Data Drift 감지 및 백그라운드 모델 재학습 파이프라인 (기능 구현 완료. 단 학습 구간·드리프트 신호·검증 없는 자동 배포 문제로 재설계 예정 → plan.md Backlog P0-1, P1-1)
     - 24시간 주기 MSE 평가, 저장된 기존 학습 파라미터(Epochs 등) 재사용 로직, UI 연동 완료.
     - **오프라인 모델 검증 및 오탐(FP) 최소화 완료**: 
         - TTF-Aware 평가 스크립트 기반 F1-Score 0.86 달성 및 정밀도 96.2% 방어 성공.
@@ -35,7 +35,7 @@
     - **MLOps 및 모델 배포 고도화 완료**:
         - 알람 피로도 억제를 위한 심각도별 차등 쿨다운(Alert Dampening) 적용.
         - 파생 변수(MA, Var, Lag)를 생성하는 모델 고도화 적용 (input_dim=15).
-        - 버전 관리를 지원하는 Lightweight Model Registry 도입 (버전 저장/Active 지정. 자동 롤백은 미구현 → plan.md Backlog).
+        - 버전 관리를 지원하는 Lightweight Model Registry 도입 (버전 저장/Active 지정. 자동 롤백은 보류, 승격 게이트 + 수동 롤백으로 대체 결정 → plan.md Backlog).
     - **대용량 분산 처리 및 고가용성 아키텍처 완료**:
         - Apache Kafka 기반 스트림 프로세싱 도입 (Producer/Consumer 완벽 분리).
         - Redis를 활용한 분산 환경에서의 시계열 Rolling Window 상태 관리 구축.
@@ -52,6 +52,8 @@
 
     - **E2E 점검 (Docker, 2026-10-01)**: 로컬(Windows, amd64)에서 7개 컨테이너를 실제 기동해 Producer → Kafka → Consumer → Redis → DB → API → UI 를 끝까지 검증. 30포트×96스텝(2,880건) 처리, 결과 2,100행 저장, ALARM 281건이 DB 의 CRITICAL 행과 일치, CLEAR 24건이 DB 의 실제 복구 시점과 24/24 일치(오해제 0), 수정한 RCA 룰(OP-006)이 실제 파이프라인에서 매칭, 룰 추가·재학습(v2 배포)이 공유 볼륨과 Redis 로 Consumer 에 리로드됨, Redis 윈도우 27건 확인. **발견·수정**: 컨테이너 시간대(UTC)가 DB(KST)와 9시간 어긋나 Producer 가 오래된 구간을 조회 → compose 에 `TZ` 추가. 미검증: arm64 이미지 빌드, GPU, 브라우저 화면 동작.
     - **E2E 후속 수정 (2026-10-01)**: (1) 댐프닝으로 억제된 `NORMAL (DAMPENED)` 행이 알람처럼 로그/웹훅 대상이던 결함 수정(직전이 CRITICAL 이면 해제 전달은 유지), (2) 지속 중인 CRITICAL 의 ALARM 이 매 스텝 반복(인시던트당 평균 10.8건)되던 것을 `ALARM_RENOTIFY_MINUTES` 로 조절 가능하게 함(기본 15 = 기존 동작 유지, 60 설정 시 281→85건, CLEAR 24/24 일치), (3) E2E 절차 문서(`docs/e2e_guide.md`)와 자동 판정 도구(`validation/cli/e2e_verify.py`, 10/10 PASS) 추가. 전체 87 테스트 통과.
+
+- **다음 우선순위 (plan.md Backlog 참고)**: P0 ① 재학습·배포 안전 스위치(후보 저장 + 수동 승격/롤백) ② 모델 개선(수렴·임계치·댐프닝 + 다중 시드) ③ 보고용 패키지(구 F1 정정 + 정직한 요약). P1 재학습 파이프라인 정상화, 실데이터 검증 *준비*(실 이력 접근이 불확실하므로 도구·합격 기준·섀도 운영 절차를 먼저 마련), 실험 모델 승격, traffic_drop. 실데이터 없이는 시뮬레이션 가정 민감도를 범위로 보고. Phase 13 은 P3.
 
 - **대기 중 (Phase 13)**:
     - **XAI (설명 가능한 AI)**: SHAP/LIME을 통한 폭포수 차트 구현.
