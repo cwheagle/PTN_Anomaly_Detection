@@ -1,6 +1,8 @@
 """
 알람 발생/해제 검증: 포트 단위로 판단 (다른 포트의 웹훅이 이 포트의 알람을 해제하면 안 됨)
 """
+import pandas as pd
+
 from src.api.alarm_tracker import plan_alarm_events
 
 
@@ -64,3 +66,67 @@ def test_state_not_mutated_by_planning():
     active = {('A', 1, 1): 't0'}
     plan_alarm_events([_row('A', 'NORMAL'), _row('B', 'CRITICAL')], active)
     assert active == {('A', 1, 1): 't0'}
+
+
+# --- 재알림 간격 (ALARM_RENOTIFY_MINUTES) ---
+
+def _steps(n, start='2026-10-01 10:00:00', label='CRITICAL', ip='A'):
+    """15분 간격 n 스텝의 행 목록"""
+    t0 = pd.Timestamp(start)
+    return [_row(ip, label, occur=str(t0 + pd.Timedelta(minutes=15 * i))) for i in range(n)]
+
+
+def _replay(rows, renotify, active=None):
+    """Consumer 가 포트 1건씩 웹훅을 보내는 방식으로 순차 재생하며 ALARM/CLEAR 건수를 센다"""
+    active = {} if active is None else active
+    counts = {'ALARM': 0, 'CLEAR': 0}
+    for r in rows:
+        ev = plan_alarm_events([r], active, renotify)
+        _apply(ev, active)
+        for e, _, _ in ev:
+            counts[e['type']] += 1
+    return counts, active
+
+
+def test_default_interval_keeps_existing_behavior_alarm_every_step():
+    """기본값(15분)은 기존 동작: 지속되는 CRITICAL 10스텝 -> ALARM 10건"""
+    assert plan_alarm_events.__defaults__ == (15,)
+    counts, _ = _replay(_steps(10), renotify=15)
+    assert counts['ALARM'] == 10
+
+
+def test_renotify_60_alarms_on_entry_then_hourly():
+    """60분: 진입(0) + 4스텝째 + 8스텝째 = 3건"""
+    counts, _ = _replay(_steps(10), renotify=60)
+    assert counts['ALARM'] == 3
+
+
+def test_renotify_zero_alarms_only_on_entry():
+    counts, _ = _replay(_steps(10), renotify=0)
+    assert counts['ALARM'] == 1
+
+
+def test_clear_is_unaffected_by_renotify_setting():
+    """재알림을 줄여도(조용히 지속 중이어도) 복구 시점의 CLEAR 는 항상 전달되어야 함"""
+    rows = _steps(6) + _steps(1, start='2026-10-01 11:30:00', label='NORMAL')
+    for renotify in (15, 60, 0):
+        counts, active = _replay(rows, renotify)
+        assert counts['CLEAR'] == 1 and active == {}, f"renotify={renotify}"
+
+
+def test_silent_steps_do_not_update_last_notified_time():
+    """재알림 간격 계산은 '마지막으로 ALARM 을 보낸 시각' 기준이어야 함 (조용한 스텝이 기준을 밀어내면 영원히 재알림이 안 감)"""
+    _, active = _replay(_steps(3), renotify=60)       # 진입 1건, 이후 2스텝은 조용함
+    assert active == {('A', 1, 1): '2026-10-01 10:00:00'}
+
+
+def test_escalation_to_critical_always_alarms_even_with_zero_interval():
+    """MAJOR 등 비CRITICAL -> CRITICAL 진입은 새 인시던트이므로 간격 설정과 무관하게 즉시 ALARM"""
+    rows = _steps(3, label='MAJOR') + _steps(1, start='2026-10-01 10:45:00', label='CRITICAL')
+    counts, _ = _replay(rows, renotify=0)
+    assert counts['ALARM'] == 1
+
+
+def test_duplicate_same_timestamp_never_realarms():
+    active = {('A', 1, 1): '2026-10-01 10:00:00'}
+    assert plan_alarm_events([_row('A', 'CRITICAL', occur='2026-10-01 10:00:00')], active, 15) == []

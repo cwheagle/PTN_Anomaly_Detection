@@ -46,6 +46,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - TZ=${PTN_TZ:-Asia/Seoul}   # DB 타임스탬프가 로컬 시각이므로 컨테이너 시간대를 맞춤 (기본 UTC 이면 최근 15분 조회가 9시간 어긋남)
       - DB_HOST=${DB_HOST:-host.docker.internal}
       - DB_USER=${DB_USER:-root}
       - DB_PASS=${DB_PASS:-root}
@@ -53,6 +54,7 @@ services:
       - DB_PORT=${DB_PORT:-3306}
       - KAFKA_BROKERS=kafka:29092
       - REDIS_HOST=redis
+      - ALARM_RENOTIFY_MINUTES=${ALARM_RENOTIFY_MINUTES:-15}   # 지속 중인 CRITICAL 재알림 간격(분). 15=매 스텝, 0=진입 시 1회
     volumes:
       - ptn_models:/app/models
       - ptn_rca_rules:/app/src/rca/rules
@@ -83,6 +85,7 @@ services:
     #image: 'ptn_anomaly_detection-consumer:latest'
     container_name: ptn_anomaly_detection-consumer
     environment:
+      - TZ=${PTN_TZ:-Asia/Seoul}   # DB 타임스탬프가 로컬 시각이므로 컨테이너 시간대를 맞춤 (기본 UTC 이면 최근 15분 조회가 9시간 어긋남)
       - DB_HOST=${DB_HOST:-host.docker.internal}
       - DB_USER=${DB_USER:-root}
       - DB_PASS=${DB_PASS:-root}
@@ -110,6 +113,7 @@ services:
     #image: 'ptn_anomaly_detection-producer:latest'
     container_name: ptn_anomaly_detection-producer
     environment:
+      - TZ=${PTN_TZ:-Asia/Seoul}   # DB 타임스탬프가 로컬 시각이므로 컨테이너 시간대를 맞춤 (기본 UTC 이면 최근 15분 조회가 9시간 어긋남)
       - DB_HOST=${DB_HOST:-host.docker.internal}
       - DB_USER=${DB_USER:-root}
       - DB_PASS=${DB_PASS:-root}

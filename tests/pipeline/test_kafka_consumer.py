@@ -96,4 +96,6 @@ def test_consumer_notifies_on_critical_recovery():
     assert notify(False, "NORMAL", 3) is True         # CRITICAL -> 정상 복구: CLEAR 전달
     assert notify(False, "NORMAL", 2) is False        # MAJOR -> 정상: 해제할 활성 알람 없음
     assert notify(True, "CRITICAL", 0) is True        # 이상 발생
-    assert notify(False, "NORMAL (DAMPENED)", 0) is True   # 기존 동작 유지
+    assert notify(False, "NORMAL (DAMPENED)", 0) is False  # 회귀: 댐프닝으로 억제된 행은 알람이 아님 (로그/웹훅 대상 아님)
+    assert notify(False, "NORMAL (DAMPENED)", 3) is True   # 단, 직전이 CRITICAL 이었다면 해제(CLEAR) 전달 필요
+    assert notify(False, "MAJOR", 0) is True

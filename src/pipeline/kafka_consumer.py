@@ -23,6 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 CRITICAL_LEVEL = 3
+NON_ALARM_LABELS = ("NORMAL", "NORMAL (DAMPENED)")
 
 METRIC_COLS = ['tx_packet', 'rx_packet', 'error_packet', 'tx_avg_power', 'rx_avg_power']
 
@@ -76,8 +77,9 @@ class PTNKafkaConsumer:
 
     @staticmethod
     def should_notify(is_anomaly, alarm_label, prev_level) -> bool:
-        """API 웹훅 전송 여부: 이상/알람 상태이거나, 직전에 CRITICAL이었다가 복구된 경우(CLEAR 전달)"""
-        return bool(is_anomaly) or alarm_label != "NORMAL" or prev_level >= CRITICAL_LEVEL
+        """API 웹훅 전송 여부: 실제 알람이거나, 직전에 CRITICAL이었다가 복구/하향된 경우(CLEAR 전달).
+        댐프닝으로 억제된 행('NORMAL (DAMPENED)')은 알람이 아니므로 직전이 CRITICAL 인 경우를 제외하고 보내지 않는다."""
+        return bool(is_anomaly) or alarm_label not in NON_ALARM_LABELS or prev_level >= CRITICAL_LEVEL
 
     def process_message(self, key_str: str, record: dict):
         """
@@ -122,7 +124,7 @@ class PTNKafkaConsumer:
             self._last_alarm_level[key_str] = level
 
             if self.should_notify(is_anomaly, alarm, prev_level):
-                if is_anomaly or alarm != "NORMAL":
+                if is_anomaly:
                     logger.info(f"[{key_str}] Anomaly Detected! Alarm: {alarm}")
                 # 웹훅을 통해 API 서버에 SSE 발송 요청
                 try:

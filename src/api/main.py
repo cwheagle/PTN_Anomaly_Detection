@@ -53,8 +53,10 @@ async def broadcast_alarm(alarm_data: dict):
         await queue.put(message)
     return True
 
-# 글로벌 알람 상태 관리: {(ip, slot, port): occur_date}
+# 글로벌 알람 상태 관리: {(ip, slot, port): 마지막으로 ALARM 을 보낸 occur_date}
 active_alarms_state = {}
+# 지속 중인 CRITICAL 의 재알림 간격(분). 15=매 스텝(기존 동작), 60=1시간마다, 0=진입 시 1회만
+ALARM_RENOTIFY_MINUTES = int(os.getenv("ALARM_RENOTIFY_MINUTES", "15"))
 
 async def alarm_callback(anomalies_df):
     """Consumer 웹훅 콜백: 포트 단위로 알람 발생/해제를 판단 (중복 방지 포함)
@@ -62,7 +64,7 @@ async def alarm_callback(anomalies_df):
     payload에 포함된 포트의 상태만 평가한다. (Consumer는 포트 1건씩 전송하므로,
     payload에 없는 포트를 '복구'로 간주하면 다른 포트의 알람이 잘못 해제된다.)
     """
-    events = plan_alarm_events(anomalies_df.to_dict(orient="records"), active_alarms_state)
+    events = plan_alarm_events(anomalies_df.to_dict(orient="records"), active_alarms_state, ALARM_RENOTIFY_MINUTES)
 
     for event, key, occur in events:
         if event["type"] == "ALARM":
