@@ -5,7 +5,21 @@ import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from src.config import MODEL_CONFIG, FEATURE_GROUPS
 
+# 파생 변수(이동평균/변동성) 윈도우 길이 (15분 단위 스텝)
+MA_SHORT = 4      # 1시간
+MA_LONG = 16      # 4시간
+VAR_WINDOW = 4    # 1시간 변동성
+# 모델 입력 윈도우의 '첫 행'도 온전한 파생 변수를 가지려면 필요한 과거 행 수.
+# (스트리밍에서 이 만큼의 이력이 없으면 학습 때와 다른, 잘린 이동평균이 입력됨)
+FEATURE_LOOKBACK = max(MA_SHORT, MA_LONG, VAR_WINDOW, 2) - 1
+
+
 class DataProcessor:
+    @staticmethod
+    def required_rows(window_size):
+        """스트리밍(Consumer)이 포트별로 보관해야 하는 최소 행 수: 모델 윈도우 + 파생 변수 이력"""
+        return window_size + FEATURE_LOOKBACK
+
     def __init__(self, feature_type='traffic', config=None):
         # 1. 설정값 우선순위: config 파라미터 > MODEL_CONFIG 기본값
         active_config = config if config else MODEL_CONFIG
@@ -19,9 +33,9 @@ class DataProcessor:
         for col in self.feature_cols:
             self.extended_feature_cols.extend([
                 col, 
-                f"{col}_ma_4",   # 1시간 (15분 * 4) 이동평균
-                f"{col}_ma_16",  # 4시간 (15분 * 16) 이동평균
-                f"{col}_var_4",  # 1시간 변동성
+                f"{col}_ma_{MA_SHORT}",   # 1시간 (15분 * 4) 이동평균
+                f"{col}_ma_{MA_LONG}",    # 4시간 (15분 * 16) 이동평균
+                f"{col}_var_{VAR_WINDOW}",  # 1시간 변동성
                 f"{col}_lag_1"   # 직전 시점 데이터
             ])
             
@@ -130,9 +144,9 @@ class DataProcessor:
             group = group.copy()
             for col in self.feature_cols:
                 # pandas rolling 연산을 통해 파생 변수 생성
-                group[f"{col}_ma_4"] = group[col].rolling(4, min_periods=1).mean()
-                group[f"{col}_ma_16"] = group[col].rolling(16, min_periods=1).mean()
-                group[f"{col}_var_4"] = group[col].rolling(4, min_periods=1).var().fillna(0)
+                group[f"{col}_ma_{MA_SHORT}"] = group[col].rolling(MA_SHORT, min_periods=1).mean()
+                group[f"{col}_ma_{MA_LONG}"] = group[col].rolling(MA_LONG, min_periods=1).mean()
+                group[f"{col}_var_{VAR_WINDOW}"] = group[col].rolling(VAR_WINDOW, min_periods=1).var().fillna(0)
                 group[f"{col}_lag_1"] = group[col].shift(1).bfill() # 첫행은 다음행 값으로 채움
             enriched_dfs.append(group)
             

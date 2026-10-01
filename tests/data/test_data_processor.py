@@ -115,3 +115,52 @@ def test_quality_filter_drops_port_with_persistent_errors():
     kept = DataProcessor('traffic')._filter_low_quality(df)
 
     assert sorted(kept['lid'].unique()) == [1]
+
+
+# --- 회귀 테스트: 스트리밍 윈도우 길이와 파생 변수 (학습·서빙 불일치) ---
+
+def _streaming_features(df, processor, n_rows):
+    """Consumer 처럼 최근 n_rows 행만 가지고 전처리한 뒤, 모델 입력 윈도우(마지막 window_size 행)의 특징을 반환"""
+    out = processor.preprocess(df.tail(n_rows), is_train=False)
+    return out.tail(processor.window_size)[processor.extended_feature_cols].reset_index(drop=True)
+
+
+def test_required_rows_formula():
+    from src.data.data_processor import FEATURE_LOOKBACK, MA_LONG
+    assert FEATURE_LOOKBACK == MA_LONG - 1
+    assert DataProcessor.required_rows(12) == 12 + 15 == 27
+
+
+def test_streaming_window_of_required_rows_matches_full_history():
+    """필요 길이(27행)면 스트리밍으로 계산한 파생 변수가 전체 이력 기반 계산과 동일해야 함"""
+    rng = np.random.default_rng(0)
+    n = 120
+    df = pd.DataFrame({
+        'occur_date': pd.date_range('2026-04-27', periods=n, freq='15min'),
+        'ip_addr': '1.1.1.1', 'cid': 1, 'lid': 1,
+        'tx_packet': rng.integers(900, 2000, n), 'rx_packet': rng.integers(900, 2000, n),
+        'error_packet': rng.integers(0, 5, n),
+    })
+    proc = DataProcessor('traffic')
+    full = _streaming_features(df, proc, n)
+    window = _streaming_features(df, proc, DataProcessor.required_rows(proc.window_size))
+
+    pd.testing.assert_frame_equal(full, window, check_exact=False, rtol=1e-9)
+
+
+def test_too_short_streaming_window_gives_truncated_moving_average():
+    """회귀: 예전 Consumer 값(window_size+4=16행)은 ma_16 이 잘려 전체 이력 기반 값과 달라진다"""
+    rng = np.random.default_rng(1)
+    n = 120
+    df = pd.DataFrame({
+        'occur_date': pd.date_range('2026-04-27', periods=n, freq='15min'),
+        'ip_addr': '1.1.1.1', 'cid': 1, 'lid': 1,
+        'tx_packet': rng.integers(900, 2000, n), 'rx_packet': rng.integers(900, 2000, n),
+        'error_packet': 0,
+    })
+    proc = DataProcessor('traffic')
+    full = _streaming_features(df, proc, n)
+    short = _streaming_features(df, proc, proc.window_size + 4)
+
+    ma16 = [c for c in proc.extended_feature_cols if c.endswith('_ma_16')]
+    assert not np.allclose(full[ma16].values, short[ma16].values)

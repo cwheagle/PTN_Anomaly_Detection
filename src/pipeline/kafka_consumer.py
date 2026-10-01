@@ -13,6 +13,7 @@ import requests
 import redis
 import numpy as np
 from confluent_kafka import Consumer, KafkaError
+from src.data.data_processor import DataProcessor
 from src.pipeline.window_state import WindowStateManager
 from src.pipeline.inference import AnomalyDetector
 from src.data.db_connector import DBConnector
@@ -35,8 +36,9 @@ class PTNKafkaConsumer:
         self.detector = AnomalyDetector()
         self.window_manager = WindowStateManager()
         
-        # 모델의 window_size(기본 12) + 추세 분석용 과거 4시점 = 총 16시점 필요
-        self.required_size = MODEL_CONFIG.get('window_size', 12) + 4
+        # 모델 윈도우(기본 12) + 파생 변수(ma_16 등)가 온전히 계산되기 위한 과거 이력 = 27행.
+        # 부족하면 학습 때와 다른 '잘린 이동평균'이 모델에 입력됨 (배치 평가와 스트리밍 결과가 어긋남)
+        self.required_size = DataProcessor.required_rows(MODEL_CONFIG.get('window_size', 12))
 
         # 포트별 직전 알람 레벨 (CRITICAL -> 정상 복구 시 CLEAR 웹훅을 보내기 위함, 프로세스 메모리)
         self._last_alarm_level = {}
@@ -140,7 +142,7 @@ class PTNKafkaConsumer:
             except Exception as e:
                 logger.error(f"DB Save Error: {e}")
         else:
-            if current_size == 16 and key_str.endswith("0:1"):
+            if current_size == self.required_size and key_str.endswith("0:1"):
                 logger.info(f"[{key_str}] Debug: DataFrame shape before detect={df.shape}, head=\n{df[['occur_date', 'tx_packet', 'rx_avg_power']].head(3)}")
             logger.info(f"[{key_str}] Results empty or None")
 
