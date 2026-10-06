@@ -2,7 +2,7 @@
 
 > 작성: 2026-10-01 · 근거: plan.md Backlog **결정 사항 2)**, P1-1 행, lessons #19·#22·#24·#25·#28·#30·#31
 > 선행: P0-1 (`src/models/registry.py` — 후보 저장/승격/롤백) 완료. 이 설계는 그 위에 얹는다.
-> 상태: **확정(2026-10-06)** — 10장 결정 사항 확정, 5장 기본값 그대로. 구현은 dev.
+> 상태: **구현 완료·검증(2026-10-06)** — 10장 결정 사항 확정, 5장 기본값 그대로(+ `gate_min_port_days`). 구현 team/dev `0e84cfd`·`d6a4307`, 전체 pytest 355 passed·reviewer PASS, 컨테이너 E2E 6.3 PASS. 미검증 항목은 6.3 결과 참고.
 
 ## 0. 요약
 | 문제 (결정 사항 2) | 이 설계의 해법 |
@@ -320,7 +320,7 @@ def run_gate(model_dir, ft, version, window: TrainWindow, policy: RetrainPolicy,
 | `min_hours_since_activation` | 24 | F2 |
 | `cooldown_hours` | 72 | |
 | `gate_max_alarm_ratio` / `gate_alarm_floor` / `gate_max_incidents_per_port_day` | 1.5 / 0.01 / 0.05 | 보고 패키지 C1 과 정합 |
-| `gate_min_port_days` | 150 | 2026-10-06 확정. 미달 시 G3 SKIP + 종합 WARN (2.6). 1건 = 0.0067 < 하한 0.01, 섀도 최소 500포트에서 판정 가능 |
+| `gate_min_port_days` | 150 | 2026-10-06 확정 (6.3 E2E 발견 B). 미달 시 G3 SKIP + 종합 WARN (2.6). 1건 = 0.0067 < 하한 0.01, 섀도 최소 500포트에서 판정 가능 |
 | `gate_canary_auprc_drop` | 0.05 | |
 | `gate_threshold_trend_versions` / `gate_threshold_trend_factor` | 3 / 2.0 | |
 
@@ -351,6 +351,14 @@ C(명시 구간)는 전 시드 PASS. A 가 B 에 더하는 효과 약 +0.7%p, �
 4. mode=auto + PASS 후보 → 자동 승격 + Consumer reload, 이력 `auto-gate`
 5. 비정상 후보(2에폭) → G2/G3 FAIL → 승격 409, force 시 진행
 6. 활성화 직후 드리프트 체크 → warming_up
+
+**결과 (2026-10-06, dev 수행·lead 보고 기준)**: 시나리오 PASS. 시나리오 4(mode=auto 자동 승격) PASS. 미검증: 광역 드리프트의 실시간 3일 경과(픽스처로 시뮬레이션), 운영 규모에서의 G3, arm64/GPU.
+- E2E 발견과 처리 경위 (lead 승인 후 설계 반영, dev 구현):
+  - **A** 의심 비율 초과로 중단돼도 쿨다운 72h 가 시작되고 지속성이 초기화됨 → 중단·수집 오류는 쿨다운 미적용·지속성 유지·24h 백오프, 학습 시작 후 실패는 쿨다운 유지 (2.5).
+  - **B** 소규모 홀드아웃(4포트 × 3일)에서 G3 가 학습 난수만으로 PASS/FAIL 이 갈림 → 사용자 확정으로 `gate_min_port_days`=150, 미달 시 G3 SKIP + 종합 WARN (2.6, 5장, 8장).
+  - **C** 게이트 메시지가 감소 배율을 `0.0배` 로 표기 → G2·G3 공통 포맷, 감소는 `1/N` (2.6).
+  - 구현 중 추가 판단: 카나리 라벨을 트랙 기준으로(2.10), G3 보조 수치를 `GateCheck.detail` 로 분리(2.6, 2.7).
+- 별건(P2-1 로 이관): compose 기동 직후 Producer 없이 Consumer 가 토픽(`ptn_metrics`) 없음으로 재시작 루프 (시나리오 4 에서 관찰).
 
 ---
 
