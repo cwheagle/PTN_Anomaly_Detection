@@ -19,11 +19,15 @@ U4(C3 를 게이트에 구현)를 하게 되면 두 함수를 src/models/promoti
   select (V2 후속)   V2 미달 시 개발 시드 7·11 로만 정책 재선택 (선택 규칙: 조기 탐지 >= 70% 이고 오탐 <= 0.02 중 F1 최대)
   confirm (V2 후속)  선택된 후보 정책을 검증 시드에서 **한 번만** 확인 (기본 / 기존 오탐억제형 / 후보 병기)
 
+근거 실행(검증 시드 23·31·47)의 1회 보장: 시드는 **전체 집합만** 허용(부분집합·개발 시드 혼입 거부)하고, 측정 전에 잠금 파일을
+만든다 (V3 = <모델 폴더>/v3_evidence.json, confirm = <정책 JSON 폴더>/v2_confirm.json). --record 를 바꿔도 우회할 수 없다.
+**한계**: 잠금 파일을 직접 지우거나 다른 모델 폴더를 쓰는 것은 막을 수 없다 — 운영자 규율이다 (lessons #30).
+
 사용법:
   python validation/cli/check_promotion.py train --out validation/runs/promo_s101 --data-seed 101 --train-seed 0
   python validation/cli/check_promotion.py eval --models s101=validation/runs/promo_s101,s103=validation/runs/promo_s103
   python validation/cli/check_promotion.py gate --model validation/runs/promo_s101 --seeds 7,11            # 탐색
-  python validation/cli/check_promotion.py gate --model validation/runs/promo_s101 --seeds 23,31,47 --record out.json   # 근거(1회)
+  python validation/cli/check_promotion.py gate --model validation/runs/promo_s101 --seeds 23,31,47                     # 근거(1회, 전체 시드)
   python validation/cli/check_promotion.py vs-v1 --models s101=...,s103=... [--v1-models models]
 """
 import argparse
@@ -48,6 +52,11 @@ from validation.simulator.scenario_generator import ScenarioConfig, generate
 
 TRACKS = ("traffic", "optical")
 KEY = ["ip_addr", "cid", "lid"]
+# 근거 실행(검증 시드 23·31·47 전체)의 1회 잠금 파일: 사용자 지정 파일명에 의존하지 않도록 위치를 고정한다.
+#   V3 근거  = <모델 폴더>/v3_evidence.json,  confirm = <정책 JSON 과 같은 폴더>/v2_confirm.json
+# 근거 실행은 측정을 시작하기 전에 이 파일을 배타적으로 만들고(이미 있으면 거부), 실행이 도중에 실패해도 잠금은 남는다
+# (검증 시드를 한 번 열었기 때문, lessons #30). **한계: 잠금 파일을 직접 지우는 것은 막을 수 없다 — 운영자 규율.**
+V3_LOCK, CONFIRM_LOCK = "v3_evidence.json", "v2_confirm.json"
 DEV_SEEDS = (7, 11)                 # 선택(정책·식)은 개발 시드로만
 VAL_SEEDS = (23, 31, 47)            # 확인은 검증 전용 시드로만
 TRAIN_SEEDS = (101, 103)            # 학습 시드 (학습 난수·데이터 영향)
@@ -337,13 +346,27 @@ def c0_status(cand, active, rp=None):
 
 
 def v3_phase(seeds):
-    """개발 시드 7·11 은 식을 확인하는 '탐색'(판정 근거 아님), 검증 시드 23·31·47 은 1회만 쓰는 '근거'. 섞으면 거부."""
+    """개발 시드 7·11(부분집합 가능)은 식을 확인하는 '탐색'(판정 근거 아님), 검증 시드 23·31·47 **전체**는 1회만 쓰는 '근거'.
+    섞거나 검증 시드의 일부만 주면 거부한다 (시드를 쪼개 여러 번 보는 우회 차단)."""
     ss = {int(x) for x in seeds}
-    if ss <= set(DEV_SEEDS):
+    if ss and ss <= set(DEV_SEEDS):
         return "탐색"
-    if ss <= set(VAL_SEEDS):
+    if ss == set(VAL_SEEDS):
         return "근거"
-    raise ValueError(f"V3 시드는 개발 {DEV_SEEDS}(탐색) 또는 검증 {VAL_SEEDS}(근거) 중 한쪽만: {sorted(ss)}")
+    raise ValueError(f"V3 시드는 개발 {DEV_SEEDS}(탐색, 일부 가능) 또는 검증 {VAL_SEEDS} 전체(근거, 1회) 중 하나여야 합니다: {sorted(ss)}")
+
+
+def evidence_lock(path, info):
+    """근거 실행의 1회 잠금을 측정 전에 만든다 (고정 위치, 배타적 생성). 이미 있으면 SystemExit — 측정은 시작되지 않는다."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    try:
+        fh = open(path, "x", encoding="utf-8")
+    except FileExistsError:
+        raise SystemExit(f"[!] {path} 가 이미 있습니다 — 검증 시드(근거) 실행은 1회만 허용합니다. 기준·식·정책을 다시 고르지 않습니다.")
+    import json
+    with fh:
+        json.dump({"status": "started", **info}, fh, ensure_ascii=False)
+    return path
 
 
 def v3_table(model_dir, active_models_dir, seeds, nodes=6, densities=None, tracks=TRACKS, weights=None, final="오탐억제형"):
@@ -440,11 +463,9 @@ def cmd_gate(a):
     import json
     seeds = [int(x) for x in a.seeds.split(",")]
     phase = v3_phase(seeds)
-    if phase == "근거":                                   # 검증 시드는 1회만: 결과 기록 파일이 이미 있으면 거부
-        if not a.record:
-            raise SystemExit("[!] 근거 실행(검증 시드)은 --record 로 결과 파일을 지정해야 합니다 (1회만 사용, 기존 파일이 있으면 거부).")
-        if os.path.exists(a.record):
-            raise SystemExit(f"[!] {a.record} 가 이미 있습니다 — 검증 시드 판정은 1회만 사용합니다. 기준·식을 다시 고르지 않습니다.")
+    lock = None
+    if phase == "근거":                                   # 검증 시드: 전체 집합만, 잠금은 모델 폴더 안 고정 파일(--record 와 무관), 측정 전에 잠금
+        lock = evidence_lock(os.path.join(a.model, V3_LOCK), {"kind": "V3", "seeds": seeds, "model": a.model, "final_policy": a.final_policy})
     weights = (0.0, 0.0, 1.0) if a.traffic_drop_only else None
     t = v3_table(a.model, a.active_models, seeds, a.nodes, weights=weights, final=a.final_policy)
     pd.set_option("display.width", 220)
@@ -454,14 +475,19 @@ def cmd_gate(a):
     j = judge_v3(t)
     print(f"\n[V3 {phase}] 정상 행 {j['normal_rows']}건 중 G3 FAIL {j['normal_violations']}건 / 과다 행(a) {j['excess_rows_a']}건 중 PASS {j['excess_a_violations']}건 / "
           f"과다 행(b) {j['excess_rows_b']}건 중 FAIL 아님 {j['excess_b_violations']}건")
+    for ft in sorted(t.track.unique()):                  # 트랙별 정상·과다 라벨 수 (후보 x 활성 행 기준이 아니라 후보 단위)
+        lab = t[(t.track == ft) & (t.active == V3_ACTIVES[0][0])].label.value_counts().to_dict()
+        print(f"        {ft}: 정상 {lab.get('정상', 0)} / 과다 {lab.get('과다', 0)} / 중간 {lab.get('중간', 0)} (후보 x 시드 x 밀도 단위)")
     print(f"        과다 라벨이 없는 조건(판정 불가) {len(j['conditions_without_excess'])}/{j['conditions']}: {j['conditions_without_excess']}")
-    print("        판정: " + ("판정 불가(과다 라벨 없음)" if j["pass"] is None else ("PASS" if j["pass"] else "FAIL")))
+    print("        판정: " + ("판정 불가(과다 라벨 없음)" if j["pass"] is None else ("PASS" if j["pass"] else "FAIL")) +
+          ("   ※ 탐색 결과이며 판정 근거가 아닙니다" if phase == "탐색" else ""))
     print("C0·C3 열은 참고용입니다 (판정은 src check_g3 = C4').")
-    if a.record:
-        rec = {"phase": phase, "seeds": seeds, "final_policy": a.final_policy, "judgement": {k: v for k, v in j.items() if k != "conditions_without_excess"},
-               "conditions_without_excess": [list(map(str, x)) for x in j["conditions_without_excess"]]}
-        json.dump(rec, open(a.record, "w", encoding="utf-8"), ensure_ascii=False, indent=2, default=str)
-        t.to_csv(a.record + ".csv", index=False)
+    rec = {"phase": phase, "seeds": seeds, "final_policy": a.final_policy, "judgement": {k: v for k, v in j.items() if k != "conditions_without_excess"},
+           "conditions_without_excess": [list(map(str, x)) for x in j["conditions_without_excess"]]}
+    for out in (lock, a.record):                          # 잠금 파일에 결과를 기록하고, --record 는 사본 출력용
+        if out:
+            json.dump(rec, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2, default=str)
+            t.to_csv(out + ".csv", index=False)
 
 
 def cmd_vs_v1(a):
@@ -504,17 +530,28 @@ def cmd_select(a):
 
 def cmd_confirm(a):
     import json
+    seeds = [int(x) for x in a.seeds.split(",")]
+    if set(seeds) != set(VAL_SEEDS):                      # 근거 실행: 검증 시드 전체만 (부분집합·개발 시드 혼입 거부)
+        raise SystemExit(f"[!] confirm 은 검증 시드 {VAL_SEEDS} 전체로만 실행합니다 (받은 값: {sorted(seeds)}).")
     models = _models_arg(a.models)
     sel = json.load(open(a.policy_json, encoding="utf-8"))
+    lock = evidence_lock(os.path.join(os.path.dirname(os.path.abspath(a.policy_json)), CONFIRM_LOCK),
+                         {"kind": "confirm", "seeds": seeds, "models": a.models, "policy": sel})
     cand = policy_from_row(sel)
     policies = {"기본": POLICIES["기본"], "오탐억제형(기존)": POLICIES["오탐억제형"], "후보": cand}
-    df = evaluate_models(models, [int(s) for s in a.seeds.split(",")], a.nodes, a.days, policies=policies)
+    df = evaluate_models(models, seeds, a.nodes, a.days, policies=policies)
     print(f"== 검증 시드 {a.seeds} 평균±표준편차 (모델 {list(models)}) | 후보 = 배율 {sel['scale']:g}/σ {sel['sigma']:g}/{sel['damping']} ==")
     print(_fmt(df, ["auprc", "f1", "early", "fp", "prec", "lead"]))
+    judged = {}
     for name in ("오탐억제형(기존)", "후보"):
         j = judge_v2(df, list(models), policy=name)
+        judged[name] = j
         print(f"[V2 판정 — {name}] 오탐 {j['fp_precision']:.3f} (<= {V2_MAX_FP}), F1 {j['f1_precision']:.3f} > 기본 {j['f1_default']:.3f}; "
               f"조기 {j['early_precision']:.1%} (기본 {j['early_default']:.1%}), 리드 {j['lead_precision']:.0f}분 (기본 {j['lead_default']:.0f}분) -> {'PASS' if j['pass'] else 'FAIL'}")
+    for out in (lock, a.record):                          # 잠금 파일에 결과를 기록하고, --record 는 사본 출력용
+        if out:
+            json.dump({"status": "done", "kind": "confirm", "seeds": seeds, "policy": sel, "judgement": judged},
+                      open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2, default=str)
 
 
 def main():
@@ -531,6 +568,7 @@ def main():
     cf.add_argument("--models", required=True)
     cf.add_argument("--policy-json", required=True)
     cf.add_argument("--seeds", default=",".join(map(str, VAL_SEEDS)))
+    cf.add_argument("--record", default=None, help="결과 사본 저장 파일(선택). 1회 잠금은 정책 JSON 옆 v2_confirm.json")
     cf.add_argument("--nodes", type=int, default=6)
     cf.add_argument("--days", type=int, default=14)
     t = sub.add_parser("train")
@@ -553,7 +591,7 @@ def main():
     g.add_argument("--nodes", type=int, default=6)
     g.add_argument("--traffic-drop-only", action="store_true", help="추가 기록용(판정 아님): traffic_drop 위주 조건")
     g.add_argument("--final-policy", default="오탐억제형", choices=list(POLICIES), help="후보 풀의 '최종 정책' (V2 에서 확정된 정책)")
-    g.add_argument("--record", default=None, help="결과 기록 파일(JSON). 검증 시드(근거) 실행은 필수이며 1회만 허용")
+    g.add_argument("--record", default=None, help="결과 사본을 추가로 저장할 파일(선택). 1회 잠금은 --record 와 무관하게 모델 폴더의 v3_evidence.json")
     v = sub.add_parser("vs-v1")
     v.add_argument("--models", required=True)
     v.add_argument("--v1-models", default="models")

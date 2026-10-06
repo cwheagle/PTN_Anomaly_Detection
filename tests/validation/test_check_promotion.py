@@ -174,11 +174,10 @@ def test_pool_and_actives_are_the_fixed_five_and_two():
 
 
 def test_v3_phase_guards_dev_vs_evidence_seeds():
-    assert cp.v3_phase([7, 11]) == "탐색" and cp.v3_phase([23, 31, 47]) == "근거" and cp.v3_phase([23]) == "근거"
-    with pytest.raises(ValueError):
-        cp.v3_phase([7, 23])                                      # 섞으면 거부
-    with pytest.raises(ValueError):
-        cp.v3_phase([5])
+    assert cp.v3_phase([7, 11]) == "탐색" and cp.v3_phase([7]) == "탐색" and cp.v3_phase([47, 23, 31]) == "근거"
+    for bad in ([23], [23, 31], [31, 47], [7, 23], [7, 11, 23, 31, 47], [5], []):    # 부분집합·혼입·임의 시드는 거부
+        with pytest.raises(ValueError):
+            cp.v3_phase(bad)
 
 
 def _v3_rows(label, active, g3, cond=(7, "기준", "traffic"), name="후보"):
@@ -253,17 +252,92 @@ def test_v3_table_structure_and_g3_equals_src_check_g3_independently(tiny_env):
                 assert row["C0"] in ("PASS", "FAIL") and row["C3"] in ("PASS", "FAIL", "SKIP")
 
 
-def test_gate_cli_refuses_a_second_evidence_run_and_requires_record(tmp_path, monkeypatch, capsys):
-    """검증 시드(근거) 판정은 1회만: --record 필수, 기록 파일이 이미 있으면 도구를 돌리기 전에 거부"""
+def _gate_args(model, seeds, record=None, nodes=1):
     import types
-    args = dict(model="x", active_models="y", seeds="23,31,47", nodes=1, traffic_drop_only=False, final_policy="오탐억제형", record=None)
-    with pytest.raises(SystemExit, match="--record"):
-        cp.cmd_gate(types.SimpleNamespace(**args))
-    done = tmp_path / "evidence.json"
-    done.write_text("{}")
+    return types.SimpleNamespace(model=str(model), active_models=str(model), seeds=seeds, nodes=nodes, traffic_drop_only=False,
+                                 final_policy="오탐억제형", record=record)
+
+
+def _boom(*a, **k):
+    raise AssertionError("측정이 실행되면 안 됨")
+
+
+@pytest.mark.parametrize("seeds", ["23", "23,31", "31,47", "7,23", "7,11,23,31,47", "5"])
+def test_gate_evidence_run_rejects_partial_or_mixed_seeds_before_any_measurement(tmp_path, monkeypatch, seeds):
+    monkeypatch.setattr(cp, "v3_table", _boom)
+    with pytest.raises(ValueError):
+        cp.cmd_gate(_gate_args(tmp_path, seeds))
+    assert not (tmp_path / cp.V3_LOCK).exists()                        # 거부된 요청은 잠금도 남기지 않음
+
+
+def test_gate_evidence_lock_is_fixed_per_model_and_cannot_be_bypassed_with_another_record_name(tmp_path, monkeypatch):
+    """1회 잠금은 모델 폴더의 v3_evidence.json — --record 이름을 바꿔도 우회 불가, 잠금이 있으면 측정 전에 거부"""
+    monkeypatch.setattr(cp, "v3_table", _boom)
+    (tmp_path / cp.V3_LOCK).write_text("{}")                          # 이미 근거 실행을 한 모델
+    for record in (None, str(tmp_path / "other_name.json"), str(tmp_path / "x" / "y.json")):
+        with pytest.raises(SystemExit, match="1회만"):
+            cp.cmd_gate(_gate_args(tmp_path, "23,31,47", record=record))
+    assert not (tmp_path / "other_name.json").exists()
+
+
+def test_gate_evidence_run_creates_the_lock_before_measuring_and_keeps_it_when_the_run_fails(tmp_path, monkeypatch):
+    seen = {}
+
+    def failing(*a, **k):
+        seen["lock_exists_at_measure_time"] = (tmp_path / cp.V3_LOCK).exists()
+        raise RuntimeError("중간 실패")
+    monkeypatch.setattr(cp, "v3_table", failing)
+    with pytest.raises(RuntimeError):
+        cp.cmd_gate(_gate_args(tmp_path, "23,31,47"))
+    assert seen["lock_exists_at_measure_time"] is True                 # 측정 시작 전에 잠금 생성
+    assert (tmp_path / cp.V3_LOCK).exists()                            # 실패해도 잠금은 남음 (검증 시드를 한 번 열었음)
+    monkeypatch.setattr(cp, "v3_table", _boom)
     with pytest.raises(SystemExit, match="1회만"):
-        cp.cmd_gate(types.SimpleNamespace(**{**args, "record": str(done)}))
-    monkeypatch.setattr(cp, "v3_table", lambda *a, **k: (_ for _ in ()).throw(AssertionError("측정이 실행되면 안 됨")))
+        cp.cmd_gate(_gate_args(tmp_path, "23,31,47"))                  # 재시도 거부
+
+
+def test_gate_evidence_success_writes_result_into_lock_and_record_copy(tmp_path, monkeypatch, capsys):
+    t = pd.DataFrame([{"seed": 23, "density": "기준", "track": "traffic", "candidate": c[0], "active": a[0], "label": "정상",
+                       "truth_fp": 0.0, "base_fp": 0.0, "total": 0.0, "active_total": 0.0, "port_days": 180, "G3": "PASS",
+                       "G3_value": 0.0, "G3_limit": 0.05, "C0": "PASS", "C3": "PASS"} for c in cp.V3_POOL for a in cp.V3_ACTIVES])
+    monkeypatch.setattr(cp, "v3_table", lambda *a, **k: t)
+    copy = tmp_path / "copy.json"
+    cp.cmd_gate(_gate_args(tmp_path, "23,31,47", record=str(copy)))
+    out = capsys.readouterr().out
+    assert "근거 판정(1회)" in out and "탐색 결과이며" not in out
+    lock = json.load(open(tmp_path / cp.V3_LOCK, encoding="utf-8"))
+    assert lock["phase"] == "근거" and lock["seeds"] == [23, 31, 47] and json.load(open(copy, encoding="utf-8")) == lock
+
+
+def _confirm_args(tmp_path, seeds, record=None):
+    import types
+    pj = tmp_path / "selected_policy.json"
+    pj.write_text(json.dumps({"scale": 3.0, "sigma": 2.0, "damping": "heavy(6/4/3)"}))
+    return types.SimpleNamespace(models=f"m={tmp_path}", policy_json=str(pj), seeds=seeds, nodes=1, days=4, record=record)
+
+
+@pytest.mark.parametrize("seeds", ["23", "23,31", "7,11", "7,23,31,47", "5"])
+def test_confirm_rejects_partial_dev_or_mixed_seeds_before_measuring(tmp_path, monkeypatch, seeds):
+    monkeypatch.setattr(cp, "evaluate_models", _boom)
+    with pytest.raises(SystemExit, match="전체로만"):
+        cp.cmd_confirm(_confirm_args(tmp_path, seeds))
+    assert not (tmp_path / cp.CONFIRM_LOCK).exists()
+
+
+def test_confirm_runs_once_lock_beside_policy_json_and_record_name_is_no_bypass(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def fake_eval(models, seeds, nodes, days, policies=None, baselines=True):
+        calls.append(seeds)
+        return pd.DataFrame([_rows("m", n, fp=0.01) for n in ("기본", "오탐억제형(기존)", "후보")])
+    monkeypatch.setattr(cp, "evaluate_models", fake_eval)
+    cp.cmd_confirm(_confirm_args(tmp_path, "23,31,47", record=str(tmp_path / "copy1.json")))
+    assert calls == [[23, 31, 47]] and (tmp_path / cp.CONFIRM_LOCK).exists() and (tmp_path / "copy1.json").exists()
+    assert json.load(open(tmp_path / cp.CONFIRM_LOCK, encoding="utf-8"))["status"] == "done"
+    for record in (None, str(tmp_path / "copy2.json")):                # 두 번째 실행은 다른 --record 이름으로도 거부
+        with pytest.raises(SystemExit, match="1회만"):
+            cp.cmd_confirm(_confirm_args(tmp_path, "23,31,47", record=record))
+    assert calls == [[23, 31, 47]] and not (tmp_path / "copy2.json").exists()
 
 
 def test_gate_cli_explore_mode_prints_judgement_and_writes_record(tiny_env, tmp_path, capsys):
@@ -275,6 +349,8 @@ def test_gate_cli_explore_mode_prints_judgement_and_writes_record(tiny_env, tmp_
     out = capsys.readouterr().out
     assert "[탐색 — 판정 근거 아님]" in out and "C0·C3 열은 참고용입니다 (판정은 src check_g3 = C4')" in out
     assert "[V3 탐색]" in out and "과다 라벨이 없는 조건(판정 불가)" in out
+    assert "※ 탐색 결과이며 판정 근거가 아닙니다" in out and "traffic: 정상" in out and "optical: 정상" in out     # 탐색 표시, 트랙별 라벨 수
+    assert not (tiny_env / cp.V3_LOCK).exists()                                                              # 탐색은 잠금을 만들지 않음 (반복 가능)
     saved = json.load(open(rec, encoding="utf-8"))
     assert saved["phase"] == "탐색" and saved["seeds"] == [7] and saved["final_policy"] == "오탐억제형"
     assert "pass" in saved["judgement"] and os.path.exists(str(rec) + ".csv")

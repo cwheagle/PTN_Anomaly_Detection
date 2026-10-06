@@ -147,7 +147,7 @@ def test_run_gate_end_to_end_with_two_tiny_models(tiny_env, tiny_scenario):
     by = {c.id: c for c in res.checks}
     assert by["G1"].status == pg.PASS
     assert by["G2"].status in (pg.PASS, pg.FAIL) and by["G2"].value > 0          # 활성 v1 과 비교됨
-    assert by["G3"].status in (pg.PASS, pg.WARN, pg.FAIL) and by["G3"].value is not None   # 게이트 데이터로 계산됨 (C4': 절대 상한 초과는 WARN)
+    assert by["G3"].status != pg.SKIP and by["G3"].value is not None   # 게이트 데이터로 계산됨 (SKIP 이 아님; C4' 에서 절대 상한 초과는 WARN 이 될 수 있음)
     assert by["G4"].status == pg.SKIP                                             # 카나리 파일 없음
     assert by["G5"].status == pg.SKIP                                             # 활성 이력 부족
     assert res.data["against"] == "v1" and res.data["ports"] == 6
