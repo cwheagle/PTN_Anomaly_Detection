@@ -277,7 +277,7 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. 기�
 1. **카나리 생성(선행 필수)**: `python validation/cli/build_canary.py --out-dir <모델 볼륨>` (두 트랙). 없으면 G4 SKIP.
 2. **학습 요청**(트랙별): `/api/model/train` 에 `training_config={"epochs":30,"batch_size":64,"patience":5}`, `alert_policy="precision"`, `exclude_suspect=true`.
 3. **게이트 확인**(UI 모델 관리): G1~G5 값·기준·`detail`. traffic 의 G2 FAIL 이 "활성 v1 비정상(val_loss 3.01)" 때문인지 메시지로 확인.
-4. **승격**: `/api/model/promote`. G2 만 FAIL(활성 비정상)이고 G1·G4 PASS, G3 FAIL 아님(WARN 이면 `detail` 검토)이면 `force=true`, 승격 이력 사유에 "v1 비정상 기준(G2), P1-3 V1~V4 합격" 기록. 그 외 FAIL 이면 승격하지 않는다. **G3 는 정보·보조 신호**(V3 근거 FAIL): WARN 이면 force 없이 승격되므로, 승격자는 G3 `detail`(후보·활성 인시던트 수)을 보고 판단 근거를 이력 사유에 남긴다.
+4. **승격**: `/api/model/promote`. G2 만 FAIL(활성 비정상)이고 G1·G4 PASS, G3 FAIL 아님(WARN 이면 `detail` 검토)이면 `force=true`, 승격 이력 사유에 "v1 비정상 기준(G2), P1-3 V1~V4 합격" 기록. 그 외 FAIL 이면 승격하지 않는다. **G3 는 정보·보조 신호**(V3 근거 FAIL): WARN 이면 force 없이 승격되므로, 승격자는 G3 `detail`(후보·활성 인시던트 수)을 보고 판단 근거를 이력 사유에 남긴다. **사유 기록 수단**: `/api/model/promote` 의 `reason` 쿼리 인자(최대 100자, 앞뒤 공백 제거·비면 `manual`, `force=true` 에도 적용) → 레지스트리 활성화 이력 `history[].reason` (dev `4c38797`, `docs/api_spec.md` 2.4.5). 예: `reason=v1 비정상 기준(G2), P1-3 V1~V4 합격`. 100자를 넘는 판단 근거(G3 `detail` 수치 등)는 요약해 넣는다. 한계: `reason=rollback` 을 직접 넣어도 막지 않아 이력만으로 실제 롤백과 구분할 수 없다.
 5. **확인**: Consumer 리로드, 정책 적용, `baseline_legacy=False`, 24h `warming_up`.
 6. **롤백(필요 시)**: `/api/model/rollback` → v1. 정책도 기본으로 함께 복귀(B3).
 7. `DRIFT_RETRAIN_MODE` 는 `candidate` 유지. auto 는 P1-1 설계서 8장 조건 충족 후 별도 결정.
@@ -371,3 +371,4 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. 기�
 | 2026-10-06 | **V3 근거 실행 전 고정**: 집계 규칙(`promo_s101`·`promo_s103` 둘 다 충족해야 PASS, 모델을 고르지 않음), 결과별 후속(PASS → G3 판정 유지 / FAIL·판정 불가 → G3 는 정보·보조 신호, 승격 판단은 V1·V2·V4·G4·사람 검토, 재설계 없이 필요 시 별도 과제), V3 탐색 결과 기록(s101 과다(b) 위반 3, s103 과다(a) 위반 1 경계) | 사용자 결정 A: 식(C4')·V3 기준을 바꾸지 않고 검증 시드 23·31·47 근거 실행 1회. 탐색 결과를 본 뒤 정한 것은 집계·후속 규칙뿐이며 합격 기준 값과 V3 정의는 변경 없음 |
 | 2026-10-06 | V3 도구 해석 확정(F① 측정 단위, truth-FP = event_metrics false incident 재사용·트랙 무구분 한계, 라벨 없는 조건 처리), U4' 기존 테스트 기대값 변경 3건으로 정정, 9장 T-P3-V2 를 2차 재정의에 맞춤 | dev 구현 중 해석한 사항을 문서에 확정 |
 | 2026-10-06 | **V3 정상·과다 기준 2차 재정의** (정상 = 후보 ① 과 그 이하, 과다 ≥ max(3 × F①, 0.04)) | 이전 정의(정상 ≤ 0.02)로는 사용자가 채택한 구성(오탐 0.029~0.039)이 정상으로 분류되지 않아 정상 후보가 없음. U3(V1·V2) 결과를 본 뒤 바꾼 정의이므로 V3 개발 시드 판정은 탐색으로만 표시하고, 근거는 미개봉 검증 시드 23·31·47 의 V3 게이트 데이터 1회 판정만 씀. 그 결과로 기준·식을 다시 고르지 않음. 상수(3배, 0.04)는 기존 상수 재사용 |
+| 2026-10-07 | 7장 4단계 "사유 기록" 수단 명시: `/api/model/promote` 의 `reason` 인자 → 활성화 이력 `history[].reason` (최대 100자, 공백 제거·빈 값 `manual`, force 에도 적용), `reason=rollback` 직접 입력과 실제 롤백 구분 불가 한계 | dev `4c38797` 구현 반영, `docs/api_spec.md` 2.4.5 갱신 |
