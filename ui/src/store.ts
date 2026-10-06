@@ -10,6 +10,7 @@ export const store = reactive({
   modelStatus: {} as Record<string, any>,
   modelVersions: {} as Record<string, any>,
   driftStatus: null as any,
+  retrainState: {} as Record<string, any>,        // 트랙별 재학습 상태 (연속 드리프트 일수, 쿨다운)
   isCheckingDrift: false,
   isRefreshingAnomalies: false,
   isRefreshingWatchlist: false,
@@ -110,13 +111,21 @@ export const store = reactive({
     return res.data
   },
 
+  async rerunGate(ft: string, version: string) {
+    const res = await axios.post('/api/model/gate', null, { params: { ft, version } })
+    await this.fetchModelVersions()
+    return res.data
+  },
+
   async rollbackModel(ft: string) {
     const res = await axios.post('/api/model/rollback', null, { params: { ft } })
     await this.fetchModelVersions()
     return res.data
   },
 
-  async trainModel(ft: string, training_config: any = {}, date_params: any = {}) {
+  // date_params 가 비어 있으면 서버가 최근 구간을 포트 단위 홀드아웃으로 나눠 학습한다 (권장 기본).
+  // exclude_suspect=false 이면 장애 의심 구간 자동 제외를 끈다.
+  async trainModel(ft: string, training_config: any = {}, date_params: any = {}, exclude_suspect = true) {
     try {
       const res = await axios.post(`/api/model/train`, training_config, {
         params: {
@@ -124,7 +133,8 @@ export const store = reactive({
           train_start: date_params.train_start,
           train_end: date_params.train_end,
           test_start: date_params.test_start,
-          test_end: date_params.test_end
+          test_end: date_params.test_end,
+          exclude_suspect
         }
       })
       return res.data
@@ -182,6 +192,7 @@ export const store = reactive({
     try {
       const res = await axios.get('/api/drift/status')
       this.driftStatus = res.data.last_result
+      this.retrainState = res.data.retrain_state || {}
     } catch (err) {
       console.error('Failed to fetch drift status', err)
     }
@@ -192,6 +203,7 @@ export const store = reactive({
     try {
       const res = await axios.post('/api/drift/check')
       this.driftStatus = res.data
+      await this.fetchDriftStatus()           // 지속 일수/쿨다운 갱신 (last_result 는 방금 결과와 같음)
       return res.data
     } catch (err) {
       console.error('Failed to check drift', err)

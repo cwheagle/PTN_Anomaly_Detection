@@ -25,6 +25,10 @@ from src.data.data_collector import DataCollector
 from src.models.trainer import Trainer
 from src.models import registry as model_registry
 from src.pipeline.drift_monitor import DriftMonitor
+from src.models import promotion_gate
+from src.pipeline import alerting, retrain_policy
+from src.pipeline.retrain_policy import load_retrain_policy
+from src.data import train_window
 from src.config import PATHS, MODEL_CONFIG, API_VERSION, REDIS_CONFIG, RETENTION_DAYS
 import redis
 
@@ -38,7 +42,7 @@ training_status = {
     "optical": {"is_training": False, "current_epoch": 0, "total_epochs": 0, "loss": 0, "val_loss": None, "last_error": None, "success_msg": None}
 } 
 active_trainers = {} # 현재 실행 중인 Trainer 인스턴스 (중지용)
-drift_monitor = DriftMonitor(drift_factor=1.5)
+drift_monitor = DriftMonitor()
 last_drift_result = None # 가장 최근의 Drift Check 결과 캐싱
 redis_client = redis.Redis(**REDIS_CONFIG) # Redis Client for Pub/Sub
 
@@ -80,6 +84,59 @@ async def alarm_callback(anomalies_df):
             active_alarms_state.pop(key, None)
             print(f"[SSE] Broadcasted CLEAR: {key}")
 
+
+def _model_dir(ft: str) -> str:
+    return os.path.dirname(PATHS[ft]['model'])
+
+
+def _saved_training_config(ft: str) -> dict:
+    """활성 모델이 학습 때 쓴 설정(epochs, lr 등)을 재학습에 재사용"""
+    _, meta_path = get_active_model_info(ft)
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, 'r') as f:
+                return json.load(f).get("config", {})
+        except Exception as e:
+            print(f"[*] [Drift] Failed to load previous config for {ft}: {e}")
+    return {}
+
+
+def _launch_thread(fn, *args):
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def handle_drift(result: dict, trigger_source: str, launcher=_launch_thread) -> dict:
+    """드리프트 판정 결과를 재학습 결정으로 연결 (일일 유지보수와 /api/drift/check 가 공유).
+
+    트랙마다 지속성 카운트를 갱신하고 `retrain_policy.decide` 로 none/notify/train 을 정한다.
+    train 이면 후보 학습을 시작한다 (launcher 로 스레드/BackgroundTasks 선택). result 에 `retrain`,
+    `auto_retrain_triggered` 를 덧붙이고 트랙별 결정을 반환한다.
+    """
+    policy = load_retrain_policy()
+    now = datetime.now()
+    decisions = {}
+    for ft in ('traffic', 'optical'):
+        track_result = result.get(ft)
+        if not isinstance(track_result, dict):
+            continue
+        model_dir = _model_dir(ft)
+        state = retrain_policy.record_check(retrain_policy.load_state(model_dir, ft), track_result, now)
+        pending = retrain_policy.pending_drift_candidate(model_registry.load(model_dir, ft))
+        decision = retrain_policy.decide(track_result, state, now, policy, pending_candidate=pending,
+                                         is_training=training_status.get(ft, {}).get("is_training", False), track=ft)
+        if decision.action == "train":
+            # 쿨다운·지속성 초기화는 여기가 아니라 Trainer 시작 시점에 기록 (수집 단계 중단은 쿨다운을 걸지 않음)
+            training_status[ft]["is_training"] = True        # 파이프라인 시작 전 중복 트리거 방지
+            print(f"[*] [Drift] ({trigger_source}) Triggering candidate retraining for {ft}: {decision.reason}")
+            launcher(run_training_pipeline, ft, _saved_training_config(ft), None, "drift")
+        else:
+            print(f"[*] [Drift] ({trigger_source}) {ft}: {decision.action} — {decision.reason}")
+        retrain_policy.save_state(model_dir, ft, state)
+        decisions[ft] = {"action": decision.action, "reason": decision.reason}
+    result["retrain"] = decisions
+    result["auto_retrain_triggered"] = any(d["action"] == "train" for d in decisions.values())
+    return decisions
+
 maintenance_scheduler = BackgroundScheduler()
 
 def run_daily_maintenance():
@@ -95,28 +152,8 @@ def run_daily_maintenance():
         result = drift_monitor.check_drift()
         last_drift_result = result
         
-        if result.get("drift_detected"):
-            now = datetime.now()
-            date_params = {
-                'train_start': (now - timedelta(days=37)).strftime('%Y-%m-%d'),
-                'train_end': (now - timedelta(days=7)).strftime('%Y-%m-%d'),
-                'test_start': (now - timedelta(days=7)).strftime('%Y-%m-%d'),
-                'test_end': now.strftime('%Y-%m-%d')
-            }
-            
-            for ft in result.get("drifted_tracks", []):
-                if training_status.get(ft, {}).get("is_training"):
-                    continue
-                saved_config = {}
-                _, meta_path = get_active_model_info(ft)  # 레지스트리의 Active 버전 메타데이터
-                if os.path.exists(meta_path):
-                    try:
-                        with open(meta_path, 'r') as f:
-                            saved_config = json.load(f).get("config", {})
-                    except: pass
-                
-                print(f"[*] [Drift] Triggering Auto-Retraining for {ft} due to Data Drift.")
-                threading.Thread(target=run_training_pipeline, args=(ft, saved_config, date_params), daemon=True).start()
+        if result.get("status") != "error":
+            handle_drift(result, "maintenance")
     except Exception as e:
         print(f"[!] [Maintenance] Error during daily maintenance: {e}")
 
@@ -247,10 +284,36 @@ async def get_model_status():
 
 
 
-def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
-    """백그라운드 학습 실행 (스레드에서 실행되어 이벤트 루프 차단 방지)"""
-    print(f"[*] [BG] Starting training pipeline for {ft}...")
-    
+def _fetch_raw_for_gate(ft: str, start, end):
+    return (db.fetch_traffic if ft == 'traffic' else db.fetch_optical)(start, end)
+
+
+def run_gate_for(ft: str, version: str, now: datetime = None) -> dict:
+    """후보 `version` 에 승격 게이트를 실행하고 결과를 레지스트리에 기록 (게이트 실패는 ERROR 결과로 기록되며 예외로 올라가지 않음)"""
+    policy = load_retrain_policy()
+    window = train_window.plan_window(now or datetime.now(), policy)
+    result = promotion_gate.run_gate(_model_dir(ft), ft, version, window, policy, _fetch_raw_for_gate,
+                                     alerting.load_policy())
+    gate = result.to_dict()
+    model_registry.set_gate(_model_dir(ft), ft, version, gate)
+    return gate
+
+
+def run_training_pipeline(ft: str, training_config: dict, date_params: dict = None, trigger: str = "manual",
+                          exclude_suspect: bool = True):
+    """백그라운드 학습 실행 (스레드에서 실행되어 이벤트 루프 차단 방지)
+
+    date_params 가 없으면 **포트 분할 모드**: 최근까지 포함한 구간 [T-train_days, T] 을 포트 단위 홀드아웃으로
+    학습/검증에 나눈다. 있으면 사용자가 지정한 날짜 분할(기존 UI 호환).
+    exclude_suspect: 자기 알람 이력·규칙으로 찾은 장애 의심 구간을 학습에서 제외 (의심 비율이 한도를 넘으면 학습 중단).
+    결과는 후보로만 저장되며, 드리프트 트리거(trigger='drift')의 결과는 재학습 상태 파일에도 기록된다.
+    """
+    print(f"[*] [BG] Starting training pipeline for {ft} (trigger={trigger})...")
+    policy = load_retrain_policy()
+    started = datetime.now()
+    outcome, trained_version = "failed", None
+    trainer_started = False   # 수집을 통과해 Trainer 가 시작됐는가 (드리프트 상태 기록 방식이 갈림)
+
     # 상태 초기화
     training_status[ft] = {
         "is_training": True, 
@@ -259,7 +322,9 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
         "loss": 0, 
         "val_loss": None,
         "last_error": None,
-        "success_msg": None
+        "success_msg": None,
+        "suspect_fraction": None,
+        "gate_status": None,
     }
     
     def on_progress(epoch, total, loss, val_loss):
@@ -277,39 +342,71 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
         # 데이터 수집 전 중지 요청 확인
         if active_trainers[ft]["stop_requested"]:
             print(f"[*] [BG] {ft} training cancelled before data collection.")
+            outcome = "stopped"
             return
 
-        # 데이터 수집 (날짜 파라미터 기반, 요청된 ft만 수집)
+        # 데이터 수집 (요청된 ft만 수집)
+        collect_kwargs = {"suspect_policy": policy if exclude_suspect else None}
+        if date_params:
+            window_info = {"mode": "date", **date_params}
+            collect_kwargs.update(train_start=date_params['train_start'], train_end=date_params['train_end'],
+                                  test_start=date_params['test_start'], test_end=date_params['test_end'])
+        else:
+            window = train_window.plan_window(started, policy)
+            window_info = {"mode": "port_split", "start": window.start.strftime('%Y-%m-%d %H:%M:%S'),
+                           "end": window.end.strftime('%Y-%m-%d %H:%M:%S'),
+                           "val_port_fraction": policy.val_port_fraction, "salt": policy.split_salt}
+            collect_kwargs.update(train_start=window.start, train_end=window.end,
+                                  val_port_fraction=policy.val_port_fraction, split_salt=policy.split_salt)
         results = collector.collect_and_save(
-            train_start=date_params['train_start'],
-            train_end=date_params['train_end'],
-            test_start=date_params['test_start'],
-            test_end=date_params['test_end'],
-            feature_type=ft,
-            stop_checker=lambda: active_trainers[ft]["stop_requested"]
-        )
+            feature_type=ft, stop_checker=lambda: active_trainers[ft]["stop_requested"], **collect_kwargs)
         
         # 데이터 수집 후 중지 요청 확인
         if active_trainers[ft]["stop_requested"]:
             print(f"[*] [BG] {ft} training cancelled after data collection.")
+            outcome = "stopped"
+            return
+
+        track_result = (results or {}).get(ft, {})
+        suspect_stats = track_result.get("suspect_stats")
+        if suspect_stats:
+            training_status[ft]["suspect_fraction"] = suspect_stats["fraction"]
+
+        # 의심 구간 비율이 한도를 넘으면 중단 (대규모 장애 중에는 재학습하지 않는다)
+        if "skipped" in track_result:
+            err_msg = (f"학습 중단: 장애 의심 구간이 학습 데이터의 {suspect_stats['fraction']:.1%} "
+                       f"(한도 {policy.max_excluded_fraction:.0%}). 장애가 해소된 뒤 다시 시도하세요.")
+            training_status[ft]["last_error"] = err_msg
+            outcome = f"skipped: {track_result['skipped']}"
+            print(f"[!] [BG] {ft} training skipped: {err_msg}")
             return
 
         # 데이터 수집 결과 검증
         min_samples = MODEL_CONFIG.get('window_size', 12)
-        if not results or ft not in results or results[ft]['train'] < min_samples:
-            count = results.get(ft, {}).get('train', 0) if results else 0
+        if ft not in (results or {}) or track_result['train'] < min_samples:
+            count = track_result.get('train', 0)
             err_msg = f"Insufficient train data: {count} datas found. (Min required: {min_samples})"
             training_status[ft]["last_error"] = err_msg
+            outcome = "failed: insufficient data"
             print(f"[!] [BG] {ft} training failed: {err_msg}")
             return
 
         # 학습 실행
         # activate=False: 학습 결과는 '후보'로만 저장. 사람이 승격(/api/model/promote)해야 Consumer 에 반영된다.
         # (활성 모델이 아직 없는 최초 학습만 자동 활성화)
-        trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress, activate=False)
+        if trigger == "drift":
+            # 후보를 만들기 시작한 시점: 쿨다운 시작 + 지속성 초기화 (이후 학습 예외·게이트 ERROR 도 쿨다운 적용)
+            model_dir = _model_dir(ft)
+            retrain_policy.save_state(model_dir, ft, retrain_policy.record_training(
+                retrain_policy.load_state(model_dir, ft), datetime.now(), outcome="started"))
+        trainer_started = True
+        trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress, activate=False,
+                          trigger=trigger, window_info=window_info, suspect_stats=suspect_stats)
         active_trainers[ft]["trainers"] = [trainer]
         
-        if active_trainers[ft]["stop_requested"]: return
+        if active_trainers[ft]["stop_requested"]:
+            outcome = "stopped"
+            return
         success = trainer.train()
         early_stopped = trainer.early_stopped
         reload_fts = [ft]
@@ -320,10 +417,31 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
                 msg = f"Training finished early at epoch {training_status[ft]['current_epoch']} (Optimal weights saved)."
             
             training_status[ft]["candidate_version"] = trainer.version
+            trained_version, outcome = trainer.version, "candidate"
+
+            # 승격 게이트: 결과를 후보에 기록해 두고(승격 API 가 사용), 실행이 실패해도 학습 결과는 후보로 남긴다
+            gate = None
+            try:
+                gate = run_gate_for(ft, trainer.version, started)
+                training_status[ft]["gate_status"] = gate["status"]
+                print(f"[*] [BG] {ft} {trainer.version} gate: {gate['status']}")
+            except Exception as e:
+                training_status[ft]["gate_status"] = "ERROR"
+                print(f"[!] [BG] {ft} gate could not be recorded: {e}")
             if trainer.activated:
                 # 최초 학습(활성 모델 없음): 즉시 반영
+                outcome = "activated"
                 msg += f" ({trainer.version} activated; reload broadcasted to Consumers via Redis)"
                 redis_client.publish('ptn_control', json.dumps({'action': 'reload', 'track': ft}))
+            elif trigger == "drift" and policy.mode == "auto" and gate and gate["status"] == "PASS":
+                # auto 모드: 드리프트 재학습 결과가 게이트(PASS)를 통과하면 자동 활성화
+                try:
+                    model_registry.promote(_model_dir(ft), ft, trainer.version, reason="auto-gate")
+                    _broadcast_model_reload(ft)
+                    outcome = "auto-promoted"
+                    msg += f" Gate PASS — {trainer.version} auto-promoted (mode=auto); reload broadcasted."
+                except model_registry.RegistryError as e:
+                    msg += f" Gate PASS but auto-promotion failed: {e}. Saved as candidate {trainer.version}."
             else:
                 msg += f" Saved as candidate {trainer.version} (NOT active). Review and promote it in Model Management to deploy."
                 
@@ -337,12 +455,24 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict):
         full_error = traceback.format_exc()
         err_msg = f"Runtime Error: {str(e)}"
         training_status[ft]["last_error"] = err_msg
+        outcome = f"failed: {e}"
         print(f"[!] [BG] Training Error: {err_msg}")
         print(full_error)
     finally:
         training_status[ft]["is_training"] = False
         if ft in active_trainers:
             del active_trainers[ft]
+        if trigger == "drift":
+            try:
+                model_dir = _model_dir(ft)
+                state, now = retrain_policy.load_state(model_dir, ft), datetime.now()
+                if trainer_started or outcome == "stopped":
+                    state = retrain_policy.record_training(state, now, trained_version, outcome)
+                else:   # 수집 단계 중단(의심 비율 초과)·수집 오류: 쿨다운 없이 24h 재시도 보류만 기록
+                    state = retrain_policy.record_skip(state, now, outcome)
+                retrain_policy.save_state(model_dir, ft, state)
+            except Exception as e:
+                print(f"[!] [BG] Failed to record retrain state: {e}")
 
 @app.post("/api/model/train")
 async def train_model(
@@ -352,37 +482,42 @@ async def train_model(
     train_start: str = Query(None),
     train_end: str = Query(None),
     test_start: str = Query(None),
-    test_end: str = Query(None)
+    test_end: str = Query(None),
+    exclude_suspect: bool = Query(True)
 ):
-    """사용자가 지정한 훈련 설정 및 날짜 범위를 기반으로 모델 재학습 시작"""
+    """모델 후보 학습 시작.
+
+    날짜를 하나도 지정하지 않으면 최근 train_days 일을 포트 단위 홀드아웃으로 나눠 학습(권장 기본).
+    날짜를 지정하면 기존처럼 날짜 분할(누락된 값은 이전 기본값으로 채움).
+    exclude_suspect=false 이면 장애 의심 구간 제외를 끈다.
+    """
     if training_status.get(ft, {}).get("is_training"):
         raise HTTPException(status_code=409, detail=f"{ft} training is already in progress.")
 
-    # 날짜 파라미터가 없으면 기본값 생성
-    now = datetime.now()
-    if not train_start: train_start = (now - timedelta(days=37)).strftime('%Y-%m-%d')
-    if not train_end:   train_end   = (now - timedelta(days=7)).strftime('%Y-%m-%d')
-    if not test_start:  test_start  = (now - timedelta(days=7)).strftime('%Y-%m-%d')
-    if not test_end:    test_end    = now.strftime('%Y-%m-%d')
-
-    date_params = {
-        'train_start': train_start,
-        'train_end': train_end,
-        'test_start': test_start,
-        'test_end': test_end
-    }
+    if any((train_start, train_end, test_start, test_end)):
+        now = datetime.now()
+        date_params = {
+            'train_start': train_start or (now - timedelta(days=37)).strftime('%Y-%m-%d'),
+            'train_end': train_end or (now - timedelta(days=7)).strftime('%Y-%m-%d'),
+            'test_start': test_start or (now - timedelta(days=7)).strftime('%Y-%m-%d'),
+            'test_end': test_end or now.strftime('%Y-%m-%d'),
+        }
+        range_info = date_params
+    else:
+        policy = load_retrain_policy()
+        date_params = None
+        window = train_window.plan_window(datetime.now(), policy)
+        range_info = {'mode': 'port_split', 'start': window.start.strftime('%Y-%m-%d %H:%M:%S'),
+                      'end': window.end.strftime('%Y-%m-%d %H:%M:%S'), 'val_port_fraction': policy.val_port_fraction}
     # 백그라운드 작업이 시작되기 전의 연타도 막기 위해 즉시 학습 중으로 표시
     training_status[ft]["is_training"] = True
-    background_tasks.add_task(run_training_pipeline, ft, training_config, date_params)
+    background_tasks.add_task(run_training_pipeline, ft, training_config, date_params, "manual", exclude_suspect)
     return {
         "status": "started", 
         "message": f"{ft} model training task queued.",
-        "range": date_params
+        "range": range_info,
+        "exclude_suspect": exclude_suspect,
     }
-
-def _model_dir(ft: str) -> str:
-    return os.path.dirname(PATHS[ft]['model'])
-
 
 def _broadcast_model_reload(ft: str):
     """승격/롤백 후 Consumer 들이 새 활성 모델을 읽도록 Redis 로 알림 (실패해도 API 응답에는 영향 없음)"""
@@ -406,14 +541,25 @@ async def promote_model(ft: str = Query(..., pattern="^(traffic|optical)$"), ver
     try:
         result = model_registry.promote(_model_dir(ft), ft, version, force=force)
     except model_registry.PromotionWarning as e:
-        raise HTTPException(status_code=409, detail={"message": "후보가 현재 활성 모델과 크게 다릅니다. 확인 후 force=true 로 다시 요청하세요.",
-                                                     "warnings": e.warnings})
+        raise HTTPException(status_code=409, detail={"message": "승격 검증에서 문제가 발견되었습니다. 확인 후 force=true 로 다시 요청하세요.",
+                                                     "warnings": e.warnings, "checks": e.checks})
     except model_registry.VersionNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except model_registry.RegistryError as e:
         raise HTTPException(status_code=409, detail=str(e))
     _broadcast_model_reload(ft)
     return {"status": "success", "track": ft, **result}
+
+
+@app.post("/api/model/gate")
+async def run_model_gate(ft: str = Query(..., pattern="^(traffic|optical)$"), version: str = Query(...)):
+    """후보 모델의 승격 게이트를 (재)실행하고 결과를 레지스트리에 기록. 학습 중이면 409."""
+    if training_status.get(ft, {}).get("is_training"):
+        raise HTTPException(status_code=409, detail=f"{ft} training is in progress.")
+    if model_registry.find(model_registry.load(_model_dir(ft), ft), version) is None:
+        raise HTTPException(status_code=404, detail=f"버전 '{version}' 이(가) 없습니다.")
+    gate = await asyncio.to_thread(run_gate_for, ft, version)
+    return {"status": "success", "track": ft, "version": version, "gate": gate}
 
 
 @app.post("/api/model/rollback")
@@ -531,64 +677,29 @@ async def trigger_sse_alarm(data: list = Body(...)):
 
 @app.get("/api/drift/status")
 async def get_drift_status():
-    """최근 수행된 Data Drift 감지 결과를 반환"""
+    """최근 수행된 Data Drift 감지 결과와 트랙별 재학습 상태(지속 일수/쿨다운)를 반환"""
+    policy = load_retrain_policy()
+    now = datetime.now()
     return {
         "status": "success",
-        "last_result": last_drift_result
+        "last_result": last_drift_result,
+        "retrain_state": {ft: retrain_policy.describe_state(retrain_policy.load_state(_model_dir(ft), ft), now, policy)
+                          for ft in ('traffic', 'optical')},
     }
 
 @app.post("/api/drift/check")
 async def check_drift_and_retrain(background_tasks: BackgroundTasks):
-    """수동으로 Drift 감지를 즉시 실행하고, 필요시 자동 재학습을 트리거"""
+    """수동으로 Drift 감지를 즉시 실행. 재학습 여부는 retrain_policy 가 결정 (지속성·쿨다운·mode 적용)"""
     global last_drift_result
-    
+
     print("[*] [Drift] Running Data Drift check...")
     result = drift_monitor.check_drift()
-    
+
     if "status" in result and result["status"] == "error":
         raise HTTPException(status_code=500, detail=result["message"])
-        
+
+    handle_drift(result, "manual", launcher=background_tasks.add_task)
     last_drift_result = result
-    
-    # Drift가 감지된 트랙이 있다면 자동 재학습 파이프라인 트리거
-    if result.get("drift_detected"):
-        now = datetime.now()
-        # 최근 30일을 훈련셋으로(37일 전 ~ 7일 전), 마지막 7일을 검증/테스트셋으로 분할
-        train_start = (now - timedelta(days=37)).strftime('%Y-%m-%d')
-        train_end = (now - timedelta(days=7)).strftime('%Y-%m-%d')
-        test_start = (now - timedelta(days=7)).strftime('%Y-%m-%d')
-        test_end = now.strftime('%Y-%m-%d')
-        
-        date_params = {
-            'train_start': train_start,
-            'train_end': train_end,
-            'test_start': test_start,
-            'test_end': test_end
-        }
-        
-        for ft in result.get("drifted_tracks", []):
-            if training_status.get(ft, {}).get("is_training"):
-                print(f"[*] [Drift] {ft} is already training. Skipping auto-retrain.")
-                continue
-                
-            # 기존에 저장된 모델 설정(epochs, lr 등)을 불러옴
-            saved_config = {}
-            _, meta_path = get_active_model_info(ft)  # 레지스트리의 Active 버전 메타데이터
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f:
-                        meta = json.load(f)
-                        saved_config = meta.get("config", {})
-                except Exception as e:
-                    print(f"[*] [Drift] Failed to load previous config for {ft}: {e}")
-                    
-            print(f"[*] [Drift] Triggering Auto-Retraining for {ft} due to Data Drift.")
-            background_tasks.add_task(run_training_pipeline, ft, saved_config, date_params)
-            
-        result["auto_retrain_triggered"] = True
-    else:
-        result["auto_retrain_triggered"] = False
-        
     return result
 
 # --- [Phase 8] RCA Rules API ---

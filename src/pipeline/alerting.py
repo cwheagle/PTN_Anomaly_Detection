@@ -13,10 +13,13 @@
 from dataclasses import dataclass, field, replace
 
 import numpy as np
+import pandas as pd
 
 # 경보 등급 하한 (SEVERITY_CONFIG 와 동일: MINOR 50 / MAJOR 70 / CRITICAL 90)
 LEVEL_MIN_SEVERITY = {1: 50.0, 2: 70.0, 3: 90.0}
 LEVEL_LABEL = {0: "NORMAL", 1: "MINOR", 2: "MAJOR", 3: "CRITICAL"}
+KEY = ["ip_addr", "cid", "lid"]
+STEP = pd.Timedelta(minutes=15)
 
 
 @dataclass(frozen=True)
@@ -89,3 +92,66 @@ def dampening_step(state: dict, level: int, policy: AlertPolicy):
         state["count"] = 1
     need = policy.dampening_steps.get(state["level"], 1)
     return state["count"] >= need
+
+
+# ─────────────────────────────────────────────
+# 저장된 점수 -> 알람 (튜닝 도구 · 승격 게이트 공용)
+# ─────────────────────────────────────────────
+def _track_frame(scores, global_th, policy, ft):
+    df = scores.copy()
+    th = dynamic_threshold(df["past_mean"].values, df["past_std"].values, global_th, policy)
+    df[f"{ft}_flag"] = df["mse"].values > th
+    df[f"{ft}_sev"] = severity_from_ratio(df["mse"].values, th, policy)
+    return df[KEY + ["occur_date", f"{ft}_flag", f"{ft}_sev"]]
+
+
+def alarms_from_track_scores(track_scores, policy: AlertPolicy):
+    """
+    트랙별 원시 점수(`AnomalyDetector.track_scores`)에 정책을 적용해 최종 알람을 계산.
+    detect() 와 같은 순서(트랙별 임계치/심각도/플래그 -> 트랙 병합 -> 우세 트랙의 심각도 -> 등급 -> 포트별 댐프닝)를
+    따르며, 일치는 tests/pipeline/test_alerting.py · test_tuning_equivalence.py 가 검증한다.
+
+    track_scores: {'traffic': (df[occur_date, ip_addr, cid, lid, mse, past_mean, past_std], 전역 임계치), 'optical': ...}
+    Returns: DataFrame(KEY, occur_date, alarm, alarm_raw, severity, level)
+      alarm     : 댐프닝까지 통과한 최종 알람 (detect() 의 is_anomaly)
+      alarm_raw : 댐프닝 전 (트랙 플래그 or)
+    """
+    frames = [_track_frame(sc, th, policy, ft) for ft, (sc, th) in track_scores.items()]
+    final = frames[0]
+    for f in frames[1:]:
+        final = final.merge(f, on=KEY + ["occur_date"], how="outer")
+    for ft in ("traffic", "optical"):
+        if f"{ft}_flag" not in final:
+            final[f"{ft}_flag"], final[f"{ft}_sev"] = False, 0.0
+        final[f"{ft}_flag"] = final[f"{ft}_flag"].fillna(False).astype(bool)
+        final[f"{ft}_sev"] = final[f"{ft}_sev"].fillna(0.0)
+
+    final = final.sort_values(KEY + ["occur_date"]).reset_index(drop=True)
+    final["severity"] = np.maximum(final["traffic_sev"].values, final["optical_sev"].values)   # 우세 트랙의 심각도
+    final["level"] = level_from_severity(final["severity"].values)
+    final["alarm_raw"] = final["traffic_flag"].values | final["optical_flag"].values
+
+    levels, raw = final["level"].values, final["alarm_raw"].values
+    gid = final.groupby(KEY, sort=False).ngroup().values
+    alarm = np.zeros(len(final), dtype=bool)
+    start = 0
+    for i in range(1, len(final) + 1):
+        if i == len(final) or gid[i] != gid[start]:             # 포트가 바뀌면 상태 초기화 (포트별 독립 상태)
+            state = {"level": 0, "count": 0}
+            for j in range(start, i):
+                lv = int(levels[j])
+                passed = dampening_step(state, lv, policy)
+                alarm[j] = lv > 0 and passed and bool(raw[j])
+            start = i
+    final["alarm"] = alarm
+    return final[KEY + ["occur_date", "alarm", "alarm_raw", "severity", "level"]]
+
+
+def count_incidents(alarms: pd.DataFrame, gap_steps: int = 4) -> int:
+    """포트별로 연속된 알람(간격 gap_steps 이하)을 하나의 인시던트로 묶어 개수를 센다 (알람 폭주를 1건으로 계수).
+    alarms: KEY + occur_date + alarm(bool) 컬럼. 평가 도구의 make_incidents 와 같은 묶음 규칙."""
+    a = alarms[alarms["alarm"].astype(bool)].sort_values(KEY + ["occur_date"])
+    if a.empty:
+        return 0
+    gap = a.groupby(KEY)["occur_date"].diff()
+    return int((gap.isna() | (gap > STEP * gap_steps)).sum())

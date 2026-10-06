@@ -101,3 +101,91 @@ def test_load_policy_ignores_unknown_keys(monkeypatch):
     import src.config as cfg
     monkeypatch.setattr(cfg, "ALERT_POLICY", {"no_such_option": 1, "sigma_k": 2.5}, raising=False)
     assert load_policy().sigma_k == 2.5
+
+
+# ──────────────────────────────────────────────
+# P1-1: 저장된 점수 -> 알람 (튜닝 도구 · 승격 게이트 공용)
+# ──────────────────────────────────────────────
+KEY = ["ip_addr", "cid", "lid", "occur_date"]
+
+
+def test_alarms_from_track_scores_matches_detect_with_real_inference(tiny_env, tiny_scenario):
+    """T-A1: 소형 모델로 detect() 와 alarms_from_track_scores 의 알람/등급이 한 건도 다르지 않음 (models/ 없이도 검증)"""
+    from src.pipeline.alerting import alarms_from_track_scores
+    from src.pipeline.inference import AnomalyDetector
+
+    for policy in (AlertPolicy(), AlertPolicy(threshold_scale=0.6, dampening_steps={1: 1, 2: 1, 3: 1}),
+                   AlertPolicy(sigma_k=2.0, dampening_steps={1: 6, 2: 4, 3: 3})):
+        det = AnomalyDetector(policy=policy)
+        res = det.detect(df_traffic=tiny_scenario["traffic"], df_optical=tiny_scenario["optical"], latest_only=False)
+        scores = {}
+        for ft, df in (("traffic", tiny_scenario["traffic"]), ("optical", tiny_scenario["optical"])):
+            sc, th = det.track_scores(df, ft)
+            scores[ft] = (sc, th)
+        sim = alarms_from_track_scores(scores, policy)
+        m = res[KEY + ["is_anomaly", "alarm_level"]].merge(sim, on=KEY, how="outer", indicator=True)
+        assert (m["_merge"] == "both").all()
+        assert (m["is_anomaly"].astype(bool) == m["alarm"]).all()
+        assert (m["alarm_level"] == m["level"].where(m["alarm"], 0)).all()
+        assert int(sim["alarm"].sum()) >= 0
+
+
+def test_validation_tuning_reexports_the_same_functions():
+    """tuning 도구는 운영과 같은 함수를 쓴다 (lessons #31) — 복제본이 아니라 동일 객체"""
+    from src.pipeline import alerting
+    from validation.evaluation import tuning
+    assert tuning.simulate_alarms is alerting.alarms_from_track_scores
+    assert tuning._track_frame is alerting._track_frame
+
+
+def _synthetic_scores(seed=0, ports=6, n=300):
+    import pandas as pd
+    rng = np.random.default_rng(seed)
+    parts = []
+    for p in range(ports):
+        mse = rng.gamma(2.0, 0.05, n)
+        mse[100:115] *= 10
+        mse[200:203] *= 20
+        s = pd.Series(mse)
+        parts.append(pd.DataFrame({
+            "occur_date": pd.date_range("2026-03-01", periods=n, freq="15min"), "ip_addr": "1.1.1.1", "cid": 0, "lid": p,
+            "mse": mse, "past_mean": s.rolling(11, min_periods=1).mean().shift(1).fillna(0.1).values,
+            "past_std": s.rolling(11, min_periods=1).std().shift(1).fillna(0.05).values}))
+    return {"traffic": (pd.concat(parts, ignore_index=True), 0.2)}
+
+
+# 이동 전(git HEAD 의 validation/evaluation/tuning.py simulate_alarms)에서 계산한 값
+GOLDEN_SYNTH = {"default": 62, "relaxed": 151, "strict": 20}
+
+
+def test_alarms_from_track_scores_golden_for_synthetic_scores():
+    """이동 전 simulate_alarms 의 출력을 고정한 골든: 합성 점수(시드 고정)로 정책별 알람 수가 이동 전과 같아야 함"""
+    from src.pipeline.alerting import alarms_from_track_scores
+    counts = {name: int(alarms_from_track_scores(_synthetic_scores(), pol).alarm.sum())
+              for name, pol in (("default", AlertPolicy()), ("relaxed", AlertPolicy(dampening_steps={1: 1, 2: 1, 3: 1})),
+                                ("strict", AlertPolicy(dampening_steps={1: 6, 2: 4, 3: 3})))}
+    assert counts == GOLDEN_SYNTH
+
+
+def test_count_incidents_groups_consecutive_alarms_per_port():
+    import pandas as pd
+    from src.pipeline.alerting import count_incidents
+    t = pd.date_range("2026-03-01", periods=40, freq="15min")
+    flags = np.zeros(40, dtype=bool)
+    flags[[2, 3, 4, 8, 20]] = True               # 2~4, 8(간격 4 이하 -> 같은 인시던트), 20(분리)
+    a = pd.DataFrame({"ip_addr": "1.1.1.1", "cid": 0, "lid": 1, "occur_date": t, "alarm": flags})
+    b = a.assign(lid=2)
+    assert count_incidents(a) == 2
+    assert count_incidents(pd.concat([a, b])) == 4                 # 포트별로 따로 센다
+    assert count_incidents(a.assign(alarm=False)) == 0
+
+
+def test_count_incidents_equals_evaluation_make_incidents():
+    """T-A2: 게이트가 쓰는 개수 == 평가 도구의 make_incidents 개수"""
+    from src.pipeline.alerting import alarms_from_track_scores, count_incidents
+    from validation.evaluation.metrics import make_incidents
+    for seed in (0, 1, 2):
+        sim = alarms_from_track_scores(_synthetic_scores(seed), AlertPolicy(dampening_steps={1: 1, 2: 1, 3: 1}))
+        ev = sim.assign(nuisance=False)
+        inc, _ = make_incidents(ev)
+        assert count_incidents(sim) == len(inc) > 0

@@ -1,7 +1,7 @@
 """
 모델 버전 API 검증: 후보/승격/롤백 (실제 FastAPI 앱 + 임시 레지스트리)
 
-main.py 는 import 시 MySQL 에 접속하므로 DB 가 없으면 건너뛴다.
+main.py 는 import 시 MySQL 풀을 만들므로 conftest 의 api_main 픽스처(풀 목 대체)로 불러온다.
 
 실행 방법:
   pytest tests/api/test_model_endpoints.py -v
@@ -14,11 +14,8 @@ from src.models import registry as reg_mod
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    try:
-        import src.api.main as main
-    except Exception as e:                                  # DB 미접속 등
-        pytest.skip(f"API 앱을 불러올 수 없음 (DB 필요): {str(e)[:60]}")
+def client(tmp_path, monkeypatch, api_main):
+    main = api_main                                         # DB 없이 import (tests/api/conftest.py)
     from fastapi.testclient import TestClient
 
     # 임시 폴더를 모델 폴더로 사용: v1(활성, 정상), v2(후보, 임계치 비정상), v3(후보, 정상)

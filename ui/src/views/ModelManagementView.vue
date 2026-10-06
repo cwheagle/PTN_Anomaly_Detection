@@ -27,7 +27,7 @@
             </div>
             <div>
               <h3 class="text-lg font-bold text-slate-200">Data Drift Monitor</h3>
-              <p class="text-xs text-slate-400">Detects baseline distribution shift (24H Average Score vs Training Baseline MSE) and automatically triggers retraining.</p>
+              <p class="text-xs text-slate-400">포트별 24H 평균 점수의 분포를 학습 시 기준 분포와 비교합니다. 다수 포트가 함께 이동하면(광역) 후보 모델 학습, 소수 포트만 급등하면(국소) 장애 의심으로 보고 재학습하지 않습니다.</p>
             </div>
           </div>
           <button @click="handleCheckDrift"
@@ -42,23 +42,40 @@
           <div v-for="ft in ['traffic', 'optical']" :key="ft" class="p-4 bg-slate-800 rounded-xl border border-slate-700">
             <div class="flex justify-between items-center mb-4">
               <span class="uppercase font-bold text-xs tracking-wider text-slate-400">{{ ft }} Track</span>
-              <span :class="['px-2 py-0.5 rounded text-[10px] font-bold uppercase', 
-                            store.driftStatus[ft]?.status === 'drifted' ? 'bg-rose-500/20 text-rose-400' : 'bg-emerald-500/20 text-emerald-400']">
-                {{ store.driftStatus[ft]?.status === 'drifted' ? 'Drift Detected' : 'Normal' }}
+              <span :class="['px-2 py-0.5 rounded text-[10px] font-bold uppercase', driftBadge(ft as string).cls]">
+                {{ driftBadge(ft as string).text }}
               </span>
             </div>
             <div class="flex justify-between items-end">
               <div>
-                <div class="text-xs text-slate-500 mb-1">Drift Ratio</div>
+                <div class="text-xs text-slate-500 mb-1">Median Ratio (포트 중앙값 / 기준)</div>
                 <div class="text-2xl font-mono text-slate-200 font-bold">
-                  {{ store.driftStatus[ft]?.drift_ratio?.toFixed(2) }}<span class="text-sm text-slate-500">x</span>
+                  {{ (store.driftStatus[ft]?.median_ratio ?? store.driftStatus[ft]?.drift_ratio)?.toFixed(2) }}<span class="text-sm text-slate-500">x</span>
                 </div>
               </div>
               <div class="text-right">
-                <div class="text-[10px] text-slate-500 mb-1">Baseline MSE</div>
-                <div class="font-mono text-xs text-slate-400">{{ store.driftStatus[ft]?.baseline_mse?.toFixed(5) }}</div>
-                <div class="text-[10px] text-slate-500 mb-1 mt-1">24H Average MSE</div>
-                <div class="font-mono text-xs text-slate-400">{{ store.driftStatus[ft]?.mean_mse?.toFixed(5) }}</div>
+                <div class="text-[10px] text-slate-500 mb-1">Drifted Ports (기준 p90 초과)</div>
+                <div class="font-mono text-xs text-slate-400">
+                  {{ store.driftStatus[ft]?.drifted_port_fraction !== undefined ? (store.driftStatus[ft].drifted_port_fraction * 100).toFixed(1) + '%' : '-' }}
+                  <span class="text-slate-600">/ {{ store.driftStatus[ft]?.ports ?? '-' }} ports</span>
+                </div>
+                <div class="text-[10px] text-slate-500 mb-1 mt-1">Baseline / 24H Average MSE</div>
+                <div class="font-mono text-xs text-slate-400">{{ store.driftStatus[ft]?.baseline_mse?.toFixed(5) }} / {{ store.driftStatus[ft]?.mean_mse?.toFixed(5) }}</div>
+              </div>
+            </div>
+            <!-- 재학습 결정: 지속성(연속 일수) · 쿨다운 · 사유 -->
+            <div class="mt-4 pt-3 border-t border-slate-700/60 text-[11px] space-y-1">
+              <div class="flex justify-between">
+                <span class="text-slate-500">Decision</span>
+                <span :class="['font-bold uppercase', store.driftStatus.retrain?.[ft]?.action === 'train' ? 'text-amber-400' : 'text-slate-300']">{{ store.driftStatus.retrain?.[ft]?.action || '-' }}</span>
+              </div>
+              <div class="text-slate-400 leading-relaxed">{{ store.driftStatus.retrain?.[ft]?.reason || store.driftStatus[ft]?.message || '' }}</div>
+              <div v-if="store.retrainState[ft]" class="flex justify-between text-slate-500">
+                <span>Persistence {{ store.retrainState[ft].streak_days }}/{{ store.retrainState[ft].persist_required }} days · mode {{ store.retrainState[ft].mode }}</span>
+                <span v-if="store.retrainState[ft].cooldown_remaining_hours > 0">Cooldown {{ store.retrainState[ft].cooldown_remaining_hours }}h left</span>
+              </div>
+              <div v-if="store.driftStatus[ft]?.kind === 'localized' && store.driftStatus[ft]?.top_ports?.length" class="text-amber-400/80">
+                Top ports: {{ store.driftStatus[ft].top_ports.slice(0, 3).map((p: any) => `${p.ip_addr}/${p.cid}/${p.lid}`).join(', ') }}
               </div>
             </div>
           </div>
@@ -72,7 +89,7 @@
         
         <div v-if="store.driftStatus?.auto_retrain_triggered" class="mt-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-center gap-3">
           <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
-          <span class="text-sm text-amber-400 font-bold">Auto-Retraining triggered due to drift detection! Models are retraining in the background.</span>
+          <span class="text-sm text-amber-400 font-bold">광역 드리프트가 지속되어 후보 모델 학습을 시작했습니다. 완료 후 Model Versions 에서 Gate 결과를 확인하고 Promote 하세요.</span>
         </div>
       </div>
 
@@ -184,7 +201,15 @@
                     <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Dataset Range</span>
                   </div>
                   
-                  <div class="grid grid-cols-2 gap-6 bg-slate-900/50 p-4 rounded-xl border border-slate-700/50">
+                  <label class="flex items-start gap-3 text-xs text-slate-300 cursor-pointer">
+                    <input type="checkbox" v-model="useRecentWindow[ft as string]" class="mt-0.5" />
+                    <span>최근 구간 자동 (권장) — 최근 28일을 <b>포트 단위 홀드아웃</b>으로 학습/검증에 나눕니다. 날짜를 직접 지정하려면 해제하세요.</span>
+                  </label>
+                  <label class="flex items-start gap-3 text-xs text-slate-300 cursor-pointer">
+                    <input type="checkbox" v-model="excludeSuspect[ft as string]" class="mt-0.5" />
+                    <span>장애 의심 구간 자동 제외 (자기 알람 이력 + 지속 오류/광 하락/트래픽 급감 규칙). 의심 구간이 20% 를 넘으면 학습을 중단합니다.</span>
+                  </label>
+                  <div :class="['grid grid-cols-2 gap-6 bg-slate-900/50 p-4 rounded-xl border border-slate-700/50', useRecentWindow[ft as string] ? 'opacity-40 pointer-events-none' : '']">
                     <div class="space-y-3">
                       <span class="text-xs font-bold text-blue-400 uppercase block border-b border-blue-500/20 pb-1">Training</span>
                       <div class="space-y-2">
@@ -267,7 +292,7 @@
                 </button>
               </div>
               <p class="text-xs text-slate-500 leading-relaxed">
-                재학습 결과는 <span class="text-amber-400 font-bold">Candidate</span> 로만 저장됩니다. 임계치·검증 손실을 확인한 뒤 <span class="text-blue-400 font-bold">Promote</span> 해야 실시간 엔진에 반영됩니다.
+                재학습 결과는 <span class="text-amber-400 font-bold">Candidate</span> 로만 저장됩니다. 승격 게이트(Gate) 결과와 임계치·검증 손실을 확인한 뒤 <span class="text-blue-400 font-bold">Promote</span> 해야 실시간 엔진에 반영됩니다. FAIL 은 경고를 확인하고 강제 승격할 수 있으나, G1(깨진 모델)은 승격할 수 없습니다.
               </p>
               <div class="overflow-x-auto bg-slate-800/30 rounded-xl border border-slate-700/50">
                 <table class="w-full text-left text-xs">
@@ -278,32 +303,60 @@
                       <th class="px-3 py-2">Threshold</th>
                       <th class="px-3 py-2">Val Loss</th>
                       <th class="px-3 py-2">Samples</th>
+                      <th class="px-3 py-2">Trigger</th>
+                      <th class="px-3 py-2">Gate</th>
                       <th class="px-3 py-2">Status</th>
                       <th class="px-3 py-2 text-right"></th>
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-slate-700/50">
-                    <tr v-for="ver in versionsOf(ft as string)" :key="ver.version" class="hover:bg-slate-700/20">
+                    <template v-for="ver in versionsOf(ft as string)" :key="ver.version">
+                    <tr class="hover:bg-slate-700/20">
                       <td class="px-3 py-2 font-mono font-bold text-slate-200">{{ ver.version }}</td>
                       <td class="px-3 py-2 font-mono text-slate-400">{{ ver.trained_at || '-' }}</td>
                       <td class="px-3 py-2 font-mono text-slate-300">{{ fmtNum(ver.threshold) }}</td>
                       <td class="px-3 py-2 font-mono text-slate-300">{{ fmtNum(ver.final_val_loss) }}</td>
                       <td class="px-3 py-2 font-mono text-slate-400">{{ ver.samples_used ? ver.samples_used.toLocaleString() : '-' }}</td>
+                      <td class="px-3 py-2 text-slate-400">{{ ver.trigger || '-' }}</td>
+                      <td class="px-3 py-2">
+                        <button v-if="ver.gate" @click="toggleGate(ft as string, ver.version)"
+                                :class="['px-2 py-0.5 rounded text-[10px] font-bold uppercase border', gateClass(ver.gate_status)]">{{ ver.gate_status }}</button>
+                        <span v-else class="text-slate-600">—</span>
+                      </td>
                       <td class="px-3 py-2">
                         <span :class="['px-2 py-0.5 rounded text-[10px] font-bold uppercase',
                                        ver.status === 'active' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
                                        ver.status === 'candidate' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
                                        'bg-slate-500/20 text-slate-400 border border-slate-500/30']">{{ ver.status }}</span>
                       </td>
-                      <td class="px-3 py-2 text-right">
+                      <td class="px-3 py-2 text-right whitespace-nowrap">
+                        <button v-if="ver.status !== 'active'" @click="handleRerunGate(ft as string, ver.version)"
+                                class="mr-2 px-2 py-1 text-[11px] font-bold rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors">
+                          Gate
+                        </button>
                         <button v-if="ver.status !== 'active'" @click="handlePromote(ft as string, ver.version)"
                                 class="px-3 py-1 text-[11px] font-bold rounded-lg bg-blue-600/20 border border-blue-500/30 text-blue-300 hover:bg-blue-600/30 transition-colors">
                           Promote
                         </button>
                       </td>
                     </tr>
+                    <!-- 게이트 검사별 값 / 한계 / 메시지 -->
+                    <tr v-if="ver.gate && isGateOpen(ft as string, ver.version)" class="bg-slate-900/50">
+                      <td colspan="9" class="px-4 py-3">
+                        <div class="text-[10px] text-slate-500 mb-2">
+                          evaluated {{ ver.gate.evaluated_at }} · vs {{ ver.gate.data?.against || 'no active model' }}
+                          <span v-if="ver.suspect_stats"> · suspect {{ (ver.suspect_stats.fraction * 100).toFixed(1) }}% of training rows</span>
+                        </div>
+                        <div v-for="c in ver.gate.checks" :key="c.id" class="flex items-start gap-3 py-0.5">
+                          <span :class="['px-1.5 py-0.5 rounded text-[10px] font-bold border w-14 text-center', gateClass(c.status)]">{{ c.id }} {{ c.status }}</span>
+                          <span class="text-slate-300">{{ c.message }}</span>
+                          <span v-if="c.value !== null && c.value !== undefined" class="ml-auto font-mono text-slate-500">{{ fmtNum(c.value) }}<span v-if="c.limit !== null && c.limit !== undefined"> / {{ fmtNum(c.limit) }}</span></span>
+                        </div>
+                      </td>
+                    </tr>
+                    </template>
                     <tr v-if="versionsOf(ft as string).length === 0">
-                      <td colspan="7" class="px-3 py-6 text-center text-slate-500 italic">No versions yet.</td>
+                      <td colspan="9" class="px-3 py-6 text-center text-slate-500 italic">No versions yet.</td>
                     </tr>
                   </tbody>
                 </table>
@@ -351,6 +404,8 @@ const getPastDate = (days: number) => {
   return d.toISOString().split('T')[0]
 }
 
+const useRecentWindow = ref<Record<string, boolean>>({ traffic: true, optical: true })   // true: 날짜 미지정 -> 서버가 최근 구간 포트 분할
+const excludeSuspect = ref<Record<string, boolean>>({ traffic: true, optical: true })
 const dateConfigs = ref<Record<string, any>>({
   traffic: { train_start: getPastDate(37), train_end: getPastDate(7), test_start: getPastDate(7), test_end: getPastDate(0) },
   optical: { train_start: getPastDate(37), train_end: getPastDate(7), test_start: getPastDate(7), test_end: getPastDate(0) }
@@ -429,12 +484,12 @@ const startPolling = () => {
 }
 
 const handleTrain = async (ft: string) => {
-  const dates = dateConfigs.value[ft]
-  if (!confirm(`설정한 파라미터로 모델을 훈련하시겠습니까?`)) return
+  const dates = useRecentWindow.value[ft] ? {} : dateConfigs.value[ft]
+  if (!confirm(`설정한 파라미터로 후보 모델을 학습하시겠습니까?\n(결과는 Candidate 로 저장되며 승격 전에는 실시간 엔진에 반영되지 않습니다)`)) return
   
   isTraining[ft] = true 
   try {
-    await store.trainModel(ft, trainConfigs.value[ft], dates)
+    await store.trainModel(ft, trainConfigs.value[ft], dates, excludeSuspect.value[ft])
     showNotification(`${ft.toUpperCase()} training task started.`, 'success')
     await store.fetchModelStatus()
     startPolling() // 학습 시작 시 폴링 시작
@@ -456,6 +511,39 @@ const canRollback = (ft: string) => {
   return list.some((x: any) => x.status === 'retired')
 }
 
+// --- Drift / Gate 표시 ---
+const driftBadge = (ft: string) => {
+  const st = store.driftStatus?.[ft]?.status
+  if (st === 'drifted') return { text: 'Widespread Drift', cls: 'bg-rose-500/20 text-rose-400' }
+  if (st === 'localized') return { text: 'Localized (fault?)', cls: 'bg-amber-500/20 text-amber-400' }
+  if (st === 'warming_up') return { text: 'Warming up', cls: 'bg-sky-500/20 text-sky-400' }
+  if (st && st !== 'normal') return { text: st.replace('_', ' '), cls: 'bg-slate-500/20 text-slate-400' }
+  return { text: 'Normal', cls: 'bg-emerald-500/20 text-emerald-400' }
+}
+
+const gateClass = (status: string | null | undefined) => {
+  if (status === 'PASS') return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+  if (status === 'WARN') return 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+  if (status === 'FAIL' || status === 'ERROR') return 'bg-rose-500/20 text-rose-400 border-rose-500/30'
+  return 'bg-slate-500/20 text-slate-400 border-slate-500/30'          // SKIP / 미실행
+}
+
+const openGates = ref<Record<string, boolean>>({})
+const gateKey = (ft: string, version: string) => `${ft}:${version}`
+const toggleGate = (ft: string, version: string) => { openGates.value[gateKey(ft, version)] = !openGates.value[gateKey(ft, version)] }
+const isGateOpen = (ft: string, version: string) => !!openGates.value[gateKey(ft, version)]
+
+const handleRerunGate = async (ft: string, version: string) => {
+  try {
+    const r = await store.rerunGate(ft, version)
+    openGates.value[gateKey(ft, version)] = true
+    showNotification(`${ft.toUpperCase()} ${version} 게이트: ${r.gate.status}`, r.gate.status === 'PASS' ? 'success' : 'error')
+  } catch (err: any) {
+    const detail = err.response?.data?.detail
+    showNotification((typeof detail === 'string' ? detail : null) || err.message || '게이트 실행 실패', 'error')
+  }
+}
+
 const fmtNum = (n: number | null | undefined) => (n === null || n === undefined) ? '-' : Number(n).toPrecision(4)
 
 const handlePromote = async (ft: string, version: string) => {
@@ -469,7 +557,7 @@ const handlePromote = async (ft: string, version: string) => {
     if (err.response?.status === 409 && detail?.warnings) {
       // 서버가 현재 모델과 크게 다른 후보라고 경고: 내용을 보여주고 한 번 더 확인
       const list = detail.warnings.map((w: string) => `- ${w}`).join('\n')
-      if (!confirm(`경고: 이 후보는 현재 활성 모델과 크게 다릅니다.\n\n${list}\n\n그래도 활성화하시겠습니까?`)) return
+      if (!confirm(`경고: 승격 검증에서 문제가 발견되었습니다.\n\n${list}\n\n그래도 활성화하시겠습니까?`)) return
       try {
         await store.promoteModel(ft, version, true)
         showNotification(`${ft.toUpperCase()} ${version} 활성화 완료 (경고 무시)`, 'success')

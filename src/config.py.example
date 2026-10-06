@@ -102,3 +102,22 @@ RETENTION_DAYS = 30
 #     "sigma_k": 2.0,
 #     "dampening_steps": {1: 6, 2: 4, 3: 3},   # MINOR / MAJOR / CRITICAL 이 알람이 되기 위한 연속 스텝 수
 # }
+
+# ---------------------------------------------------------------------------
+# 재학습 정책 (선택, P1-1). 모든 키는 코드 기본값(src/pipeline/retrain_policy.py)을 가지며, 여기서는 바꿀 것만 적는다.
+# mode 는 환경변수 DRIFT_RETRAIN_MODE 가 우선한다 (docker-compose 의 api 서비스).
+#   off       : 드리프트를 감지·알림만 하고 재학습하지 않음
+#   candidate : (기본) 후보 모델로만 학습, 사람이 게이트 결과를 보고 승격
+#   auto      : 승격 게이트 통과 시 자동 활성화 (후보 3회 이상에서 게이트 판정과 사람의 판단이 일치한 뒤에만 검토)
+# 근거: docs/design/p1_1_retrain_pipeline.md (5장 기본값)
+# RETRAIN_POLICY = {
+#     "mode": "candidate",
+#     "train_days": 28,                  # 학습 구간 [T-28d, T]. 알람 이력 보존(RETENTION_DAYS=30) 안쪽이어야 함
+#     "val_port_fraction": 0.10,         # 검증용으로 남겨두는 포트 비율 (포트 단위 홀드아웃)
+#     "max_excluded_fraction": 0.20,     # 장애 의심 구간이 학습 데이터의 이 비율을 넘으면 학습 중단
+#     "drift_persist_checks": 3,         # 광역 드리프트가 연속 며칠 지속돼야 재학습을 시작하는지
+#     "cooldown_hours": 72,              # 재학습 트리거 후 다음 트리거까지 최소 간격
+#     "drift_median_factor": 1.5,        # 포트별 평균 score 중앙값이 기준의 이 배수를 넘으면 광역 드리프트
+#     "drift_port_fraction": 0.30,       # 기준 p90 을 넘는 포트가 이 비율을 넘으면 광역 드리프트 (정상 기대치 0.10)
+#     "gate_min_port_days": 150,         # 게이트 홀드아웃 포트 x 일수가 이보다 작으면 G3 판정 불가(SKIP) -> 종합 WARN (auto 비승격)
+# }

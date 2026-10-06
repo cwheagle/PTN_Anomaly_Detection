@@ -19,8 +19,8 @@ import pandas as pd
 from validation.evaluation.baselines import BASELINES
 from validation.evaluation.metrics import summarize
 from validation.simulator.scenario_generator import load
-from src.pipeline.alerting import (AlertPolicy, dampening_step, dynamic_threshold, level_from_severity,
-                                   severity_from_ratio)
+from src.pipeline.alerting import AlertPolicy, alarms_from_track_scores
+from src.pipeline.alerting import _track_frame as _alerting_track_frame
 
 KEY = ["ip_addr", "cid", "lid"]
 
@@ -36,50 +36,9 @@ def compute_track_scores(detector, traffic, optical):
     return out
 
 
-def _track_frame(scores, global_th, policy, ft):
-    df = scores.copy()
-    th = dynamic_threshold(df["past_mean"].values, df["past_std"].values, global_th, policy)
-    df[f"{ft}_flag"] = df["mse"].values > th
-    df[f"{ft}_sev"] = severity_from_ratio(df["mse"].values, th, policy)
-    return df[KEY + ["occur_date", f"{ft}_flag", f"{ft}_sev"]]
-
-
-def simulate_alarms(track_scores, policy: AlertPolicy):
-    """
-    정책을 적용해 최종 알람을 계산.
-    Returns: DataFrame(KEY, occur_date, alarm, alarm_raw, severity, level)
-      alarm     : 댐프닝까지 통과한 최종 알람 (detect() 의 is_anomaly)
-      alarm_raw : 댐프닝 전 (트랙 플래그 or)
-    """
-    frames = [_track_frame(sc, th, policy, ft) for ft, (sc, th) in track_scores.items()]
-    final = frames[0]
-    for f in frames[1:]:
-        final = final.merge(f, on=KEY + ["occur_date"], how="outer")
-    for ft in ("traffic", "optical"):
-        if f"{ft}_flag" not in final:
-            final[f"{ft}_flag"], final[f"{ft}_sev"] = False, 0.0
-        final[f"{ft}_flag"] = final[f"{ft}_flag"].fillna(False).astype(bool)
-        final[f"{ft}_sev"] = final[f"{ft}_sev"].fillna(0.0)
-
-    final = final.sort_values(KEY + ["occur_date"]).reset_index(drop=True)
-    final["severity"] = np.maximum(final["traffic_sev"].values, final["optical_sev"].values)   # 우세 트랙의 심각도
-    final["level"] = level_from_severity(final["severity"].values)
-    final["alarm_raw"] = final["traffic_flag"].values | final["optical_flag"].values
-
-    levels, raw = final["level"].values, final["alarm_raw"].values
-    gid = final.groupby(KEY, sort=False).ngroup().values
-    alarm = np.zeros(len(final), dtype=bool)
-    start = 0
-    for i in range(1, len(final) + 1):
-        if i == len(final) or gid[i] != gid[start]:             # 포트가 바뀌면 상태 초기화 (포트별 독립 상태)
-            state = {"level": 0, "count": 0}
-            for j in range(start, i):
-                lv = int(levels[j])
-                passed = dampening_step(state, lv, policy)
-                alarm[j] = lv > 0 and passed and bool(raw[j])
-            start = i
-    final["alarm"] = alarm
-    return final[KEY + ["occur_date", "alarm", "alarm_raw", "severity", "level"]]
+# 알람 계산은 운영·승격 게이트와 같은 코드를 쓰도록 src/pipeline/alerting.py 로 이동했다 (기존 이름으로 재노출).
+_track_frame = _alerting_track_frame
+simulate_alarms = alarms_from_track_scores
 
 
 def policy_grid(threshold_scales=(1.0,), sigma_ks=(3.0,), damping_presets=None, severity_decays=(0.5,)):

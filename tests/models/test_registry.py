@@ -183,3 +183,115 @@ def test_concurrent_transactions_do_not_lose_versions(d):
     reg = reg_mod.load(str(d), FT)
     assert not errors
     assert len({v["version"] for v in reg["versions"]}) == 20
+
+
+# ──────────────────────────────────────────────
+# P1-1: 승격 게이트 결과 연동
+# ──────────────────────────────────────────────
+def _gate(status, checks=None, against="v1"):
+    return {"status": status, "checks": checks or [], "evaluated_at": "2026-10-01 10:00:00", "data": {"against": against}}
+
+
+def _chk(cid, status, msg="m"):
+    return {"id": cid, "status": status, "message": msg}
+
+
+def _setup_gated(d, gate, threshold=0.3):
+    _add(d, "v1", activate=True)
+    _add(d, "v2", activate=False, threshold=threshold)
+    reg_mod.set_gate(str(d), FT, "v2", gate)
+
+
+def test_gate_fail_blocks_promotion_until_force_and_carries_checks(d):
+    """T-R1: gate FAIL -> PromotionWarning(검사 목록 포함), force 로 승격"""
+    _setup_gated(d, _gate("FAIL", [_chk("G1", "PASS"), _chk("G3", "FAIL", "알람 과다")]))
+    with pytest.raises(PromotionWarning) as e:
+        reg_mod.promote(str(d), FT, "v2")
+    assert e.value.warnings == ["[G3] 알람 과다"] and [c["id"] for c in e.value.checks] == ["G1", "G3"]
+    assert reg_mod.load(str(d), FT)["active_version"] == "v1"
+    out = reg_mod.promote(str(d), FT, "v2", force=True)
+    assert out["active"] == "v2" and out["warnings"] == ["[G3] 알람 과다"]
+
+
+def test_gate_g1_fail_cannot_be_forced(d):
+    """T-R1: 깨진 모델(G1)은 force 로도 승격 불가"""
+    _setup_gated(d, _gate("FAIL", [_chk("G1", "FAIL", "threshold 가 NaN")]))
+    with pytest.raises(RegistryError) as e:
+        reg_mod.promote(str(d), FT, "v2", force=True)
+    assert not isinstance(e.value, PromotionWarning) and "G1" in str(e.value)
+    assert reg_mod.load(str(d), FT)["active_version"] == "v1"
+
+
+def test_gate_error_blocks_without_force(d):
+    _setup_gated(d, _gate("ERROR", [_chk("ERROR", "ERROR", "게이트 실행 실패: db down")]))
+    with pytest.raises(PromotionWarning):
+        reg_mod.promote(str(d), FT, "v2")
+    assert reg_mod.promote(str(d), FT, "v2", force=True)["active"] == "v2"
+
+
+def test_gate_warn_promotes_and_returns_notes(d):
+    """T-R2"""
+    _setup_gated(d, _gate("WARN", [_chk("G1", "PASS"), _chk("G5", "WARN", "임계치 연속 상승")]))
+    out = reg_mod.promote(str(d), FT, "v2")
+    assert out["active"] == "v2" and out["warnings"] == ["[G5] 임계치 연속 상승"]
+
+
+def test_gate_pass_promotes_cleanly_even_if_thresholds_differ_a_lot(d):
+    """게이트가 있으면 그 결과가 판정 기준 (임계치 비교는 게이트의 G2 가 이미 수행)"""
+    _setup_gated(d, _gate("PASS", [_chk("G2", "PASS")]), threshold=9.0)
+    assert reg_mod.promote(str(d), FT, "v2")["warnings"] == []
+
+
+def test_candidate_without_gate_keeps_threshold_comparison(d):
+    """T-R3: 게이트 이전 후보 / 게이트 미기록 후보는 기존 compare_with_active 동작"""
+    _add(d, "v1", activate=True)
+    _add(d, "v2", activate=False, threshold=9.0)
+    with pytest.raises(PromotionWarning) as e:
+        reg_mod.promote(str(d), FT, "v2")
+    assert "임계치" in e.value.warnings[0] and e.value.checks == []
+
+
+def test_stale_gate_for_different_active_version_is_rechecked_against_current_active(d):
+    """게이트가 v1 기준으로 계산됐는데 그 사이 활성 버전이 바뀌었으면, 임계치 비교는 현재 활성 기준으로 다시 하고 메모"""
+    _add(d, "v1", activate=True)
+    _add(d, "v2", activate=True, threshold=0.3)
+    _add(d, "v3", activate=False, threshold=0.3)
+    reg_mod.set_gate(str(d), FT, "v3", _gate("PASS", [_chk("G2", "PASS")], against="v1"))
+    out = reg_mod.promote(str(d), FT, "v3")
+    assert out["active"] == "v3" and any("게이트는 v1 기준" in w for w in out["warnings"])
+    _add(d, "v4", activate=False, threshold=9.0)
+    reg_mod.set_gate(str(d), FT, "v4", _gate("PASS", [_chk("G2", "PASS")], against="v1"))
+    with pytest.raises(PromotionWarning):
+        reg_mod.promote(str(d), FT, "v4")
+
+
+def test_set_gate_unknown_version_and_list_versions_expose_gate(d):
+    _add(d, "v1", activate=True)
+    with pytest.raises(reg_mod.VersionNotFound):
+        reg_mod.set_gate(str(d), FT, "v9", _gate("PASS"))
+    _add(d, "v2", activate=False)
+    reg_mod.set_gate(str(d), FT, "v2", _gate("WARN", [_chk("G5", "WARN")]))
+    items = {v["version"]: v for v in reg_mod.list_versions(str(d), FT)["versions"]}
+    assert items["v2"]["gate_status"] == "WARN" and items["v2"]["gate"]["checks"][0]["id"] == "G5"
+    assert items["v1"]["gate_status"] is None and "trigger" in items["v1"]
+
+
+def test_promote_reason_auto_gate_is_recorded_in_history(d):
+    _setup_gated(d, _gate("PASS"))
+    reg_mod.promote(str(d), FT, "v2", reason="auto-gate")
+    assert reg_mod.load(str(d), FT)["history"][-1]["reason"] == "auto-gate"
+
+
+# 발견 C: G2/G3 공통 배율 표기
+@pytest.mark.parametrize("ratio,text", [(37.5, "×37.5"), (1.0, "×1.0"), (0.5, "1/2.0"), (0.4399 / 16.48, "1/37.5"),
+                                         (None, "-"), (0, "-"), (float("inf"), "-"), (float("nan"), "-")])
+def test_format_ratio(ratio, text):
+    assert reg_mod.format_ratio(ratio) == text
+
+
+def test_compare_with_active_messages_show_inverse_ratio_with_values_and_limits():
+    reg = {"active_version": "v1", "versions": [{"version": "v1", "threshold": 16.48, "final_val_loss": 0.01}]}
+    w = reg_mod.compare_with_active(reg, {"version": "v2", "threshold": 0.4399, "final_val_loss": 0.05})
+    assert w[0] == "임계치 16.48 → 0.4399 (1/37.5, 기준 1/3 ~ ×3)"
+    assert w[1] == "검증 손실 0.01 → 0.05 (×5.0, 기준 ≤ ×3)"
+    assert not any("0.0배" in m for m in w)

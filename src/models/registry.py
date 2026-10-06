@@ -20,9 +20,11 @@ Lightweight Model Registry (버전 저장 / 후보 / 승격 / 롤백)
     (활성 버전이 아직 없는 최초 학습만 자동 활성화)
   - 레지스트리는 Consumer 등 다른 프로세스가 읽으므로 임시 파일에 쓴 뒤 교체(원자적)한다.
   - 승격 시 후보가 현재 모델과 크게 어긋나면(임계치/검증 손실) 경고하고, force 없이는 거부한다.
-    (본격적인 승격 게이트는 별도 과제이며 여기서는 명백히 비정상인 경우만 거른다)
+    승격 게이트(src/models/promotion_gate.py)의 결과가 엔트리의 `gate` 에 있으면 그것으로 판정하고,
+    없으면(게이트 이전 후보 등) 임계치/검증 손실 비교만 한다.
 """
 import json
+import math
 import os
 import threading
 from contextlib import contextmanager
@@ -44,10 +46,11 @@ class VersionNotFound(RegistryError):
 
 
 class PromotionWarning(RegistryError):
-    """후보가 현재 활성 모델과 크게 달라 force 없이는 승격할 수 없음"""
-    def __init__(self, warnings):
+    """후보가 현재 활성 모델과 크게 달라 force 없이는 승격할 수 없음 (checks: 게이트 검사 결과가 있으면 함께 전달)"""
+    def __init__(self, warnings, checks=None):
         super().__init__("; ".join(warnings))
         self.warnings = warnings
+        self.checks = checks or []
 
 
 def registry_path(model_dir, ft):
@@ -142,10 +145,20 @@ def list_versions(model_dir, ft):
     reg = load(model_dir, ft)
     out = []
     for v in reg["versions"]:
-        item = {k: v.get(k) for k in ("version", "trained_at", "threshold", "final_val_loss", "baseline_mse", "samples_used")}
+        item = {k: v.get(k) for k in ("version", "trained_at", "threshold", "final_val_loss", "baseline_mse", "samples_used",
+                                      "trigger", "suspect_stats")}
         item["status"] = status_of(reg, v["version"])
+        item["gate"] = v.get("gate")                                  # 승격 게이트 결과 (없으면 None)
+        item["gate_status"] = (v.get("gate") or {}).get("status")
         out.append(item)
     return {"active_version": reg["active_version"], "versions": out}
+
+
+def format_ratio(ratio) -> str:
+    """배율 표기 (G2·G3 공통): 1 이상은 `×37.5`, 1 미만은 역수로 `1/37.5`. 계산 불가면 `-`."""
+    if not isinstance(ratio, (int, float)) or not math.isfinite(ratio) or ratio <= 0:
+        return "-"
+    return f"×{ratio:.1f}" if ratio >= 1 else f"1/{1 / ratio:.1f}"
 
 
 def compare_with_active(reg, entry):
@@ -158,11 +171,46 @@ def compare_with_active(reg, entry):
     if ta and tc and ta > 0 and tc > 0:
         ratio = tc / ta
         if ratio > THRESHOLD_RATIO_LIMIT or ratio < 1 / THRESHOLD_RATIO_LIMIT:
-            warnings.append(f"임계치가 현재 모델 대비 {ratio:.1f}배 ({ta:.4g} -> {tc:.4g})")
+            warnings.append(f"임계치 {ta:.4g} → {tc:.4g} ({format_ratio(ratio)}, "
+                            f"기준 1/{THRESHOLD_RATIO_LIMIT:g} ~ ×{THRESHOLD_RATIO_LIMIT:g})")
     va, vc = active.get("final_val_loss"), entry.get("final_val_loss")
     if va and vc and va > 0 and vc / va > VAL_LOSS_RATIO_LIMIT:
-        warnings.append(f"검증 손실이 현재 모델 대비 {vc / va:.1f}배 ({va:.4g} -> {vc:.4g})")
+        warnings.append(f"검증 손실 {va:.4g} → {vc:.4g} ({format_ratio(vc / va)}, 기준 ≤ ×{VAL_LOSS_RATIO_LIMIT:g})")
     return warnings
+
+
+def set_gate(model_dir, ft, version, gate):
+    """승격 게이트 결과(dict)를 버전 엔트리에 저장"""
+    with transaction(model_dir, ft) as reg:
+        entry = find(reg, version)
+        if entry is None:
+            raise VersionNotFound(f"버전 '{version}' 이(가) 없습니다.")
+        entry["gate"] = gate
+
+
+def _gate_findings(reg, entry):
+    """게이트 결과를 승격 판정으로 해석: (차단 사유, 참고 메모, 검사 목록)
+
+    - G1 FAIL(깨진 모델)은 force 로도 승격 불가 -> RegistryError
+    - 그 외 FAIL / ERROR 는 차단 사유 (force 로 진행 가능), WARN 은 승격하되 메모로 반환
+    - 게이트가 계산된 시점의 비교 대상(against)이 현재 활성 버전과 다르면 결과가 낡은 것 -> 임계치 비교(G2)는 현재 활성 기준으로 다시 하고 메모
+    """
+    gate = entry.get("gate")
+    if not gate:
+        return compare_with_active(reg, entry), [], []
+    checks = gate.get("checks", [])
+    for c in checks:
+        if c.get("id") == "G1" and c.get("status") == "FAIL":
+            raise RegistryError(f"{entry.get('version')} 은(는) 아티팩트 검증(G1)에 실패해 승격할 수 없습니다: {c.get('message')}")
+    blocking = [f"[{c.get('id')}] {c.get('message')}" for c in checks if c.get("status") in ("FAIL", "ERROR")]
+    notes = [f"[{c.get('id')}] {c.get('message')}" for c in checks if c.get("status") == "WARN"]
+    against, active = (gate.get("data") or {}).get("against"), reg.get("active_version")
+    if against != active:
+        notes.append(f"게이트는 {against or '활성 모델 없음'} 기준으로 계산됨 — 현재 활성 {active}. 게이트 재실행을 권장합니다.")
+        blocking = [b for b in blocking if not b.startswith("[G2]")] + compare_with_active(reg, entry)
+    if gate.get("status") == "ERROR" and not blocking:
+        blocking = ["게이트 실행 오류"]
+    return blocking, notes, checks
 
 
 def _check_files(model_dir, entry):
@@ -181,12 +229,12 @@ def promote(model_dir, ft, version, force=False, reason="manual"):
         if reg["active_version"] == version:
             raise RegistryError(f"'{version}' 은(는) 이미 활성 버전입니다.")
         _check_files(model_dir, entry)
-        warnings = compare_with_active(reg, entry)
-        if warnings and not force:
-            raise PromotionWarning(warnings)
+        blocking, notes, checks = _gate_findings(reg, entry)
+        if blocking and not force:
+            raise PromotionWarning(blocking, checks)
         previous = reg["active_version"]
         _activate(reg, version, reason)
-    return {"previous": previous, "active": version, "warnings": warnings}
+    return {"previous": previous, "active": version, "warnings": blocking + notes}
 
 
 def rollback(model_dir, ft):
