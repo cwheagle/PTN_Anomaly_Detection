@@ -20,7 +20,8 @@ def test_acceptance_constants_are_the_pre_registered_values():
     assert cp.V2_MAX_FP == 0.02 and cp.V4_MIN_DIFF == 0.03
     assert cp.RECIPE == {"epochs": 30, "batch_size": 64, "patience": 5}
     assert cp.DEV_SEEDS == (7, 11) and cp.VAL_SEEDS == (23, 31, 47) and cp.TRAIN_SEEDS == (101, 103)
-    assert cp.EXCESS_THRESHOLD_FACTOR == 0.5 and cp.GATE_DAYS == 3
+    assert cp.GATE_DAYS == 3
+    assert (cp.V3_EXCESS_FACTOR, cp.V3_EXCESS_MIN) == (3.0, 0.04)             # 과다 = max(3 x 후보①, 0.04) (설계서 6장 2차 재정의)
     assert cp.POLICIES["오탐억제형"].dampening_steps == {1: 6, 2: 4, 3: 3} and cp.POLICIES["기본"].dampening_steps == {1: 3, 2: 2, 3: 1}
 
 
@@ -87,13 +88,6 @@ def test_c3_status_rule(cand_total, cand_fp, active, port_days, expected):
     assert cp.c3_status(cand, {"incidents_per_port_day": active}, cand_fp, RetrainPolicy()) == expected
 
 
-def test_judge_v3_requires_normal_pass_and_excess_fail_everywhere():
-    t = pd.DataFrame({"candidate": ["정상", "정상", "과다", "과다"], "C0": ["PASS", "FAIL", "FAIL", "FAIL"],
-                      "C3": ["PASS", "PASS", "FAIL", "FAIL"]})
-    assert cp.judge_v3(t, "C0") == {"normal_all_pass": False, "excess_all_fail": True, "pass": False}
-    assert cp.judge_v3(t, "C3")["pass"] is True
-
-
 # ── 끝까지 동작 (소형 시드) ──
 @pytest.fixture(scope="module")
 def trained(tmp_path_factory, tiny_model_dir):
@@ -122,42 +116,6 @@ def test_evaluate_models_and_judgements_run_end_to_end(trained, tiny_model_dir):
     # 오탐 억제형은 같은 점수에서 알람이 줄어드는 정책 -> 오탐이 늘어나지 않는다
     new = df[df.model == "new"].set_index("policy")
     assert new.loc["오탐억제형", "fp"] <= new.loc["기본", "fp"]
-
-
-def test_gate_table_skips_below_min_port_days(trained, tiny_model_dir):
-    """1노드 = 10포트 x 3일 = 30포트·일 < 150 -> 두 식 모두 최소 포트·일 가드로 SKIP"""
-    out, _ = trained
-    t = cp.gate_table(str(out), str(tiny_model_dir), seeds=[7], nodes=1, densities={"기준": 7.0})
-    assert len(t) == 4 and set(t.candidate) == {"정상", "과다"} and set(t.track) == set(cp.TRACKS)
-    assert (t.port_days == 30).all() and (t.C0 == "SKIP").all() and (t.C3 == "SKIP").all()
-
-
-def test_gate_table_values_equal_independent_src_calculation(tiny_env):
-    """5노드(50포트) x 3일 = 150포트·일: 표의 인시던트율·판정이 src 함수로 따로 계산한 값과 같다 (T-P3-V1)"""
-    import pandas as pd
-    from src.pipeline.inference import AnomalyDetector
-    from validation.simulator.scenario_generator import ScenarioConfig
-
-    seed, gap = 7, 7.0
-    t = cp.gate_table(str(tiny_env), str(tiny_env), seeds=[seed], nodes=5, densities={"기준": gap})
-    assert len(t) == 4 and (t.port_days == 150).all()
-
-    data = cp.make_data(seed, 5, cp.GATE_DAYS + 1, mean_gap_days=gap)
-    since = pd.Timestamp(ScenarioConfig().start) + pd.Timedelta(days=1)
-    det = AnomalyDetector()                                         # tiny_env 가 PATHS 를 그 폴더로 돌려 둠
-    rp = RetrainPolicy()
-    for ft in cp.TRACKS:
-        scores, th = det.track_scores(data[ft], ft)
-        scores = scores[pd.to_datetime(scores["occur_date"]) >= since]
-        active, _ = promotion_gate.alarm_stats(scores, th, cp.POLICIES["기본"], cp.GATE_DAYS, ft)
-        for kind, factor in (("정상", 1.0), ("과다", 0.5)):
-            cand, _ = promotion_gate.alarm_stats(scores, th * factor, cp.POLICIES["오탐억제형"], cp.GATE_DAYS, ft)
-            row = t[(t.track == ft) & (t.candidate == kind)].iloc[0]
-            assert row["total"] == pytest.approx(cand["incidents_per_port_day"])
-            assert row["active"] == pytest.approx(active["incidents_per_port_day"])
-            assert row["C0"] == promotion_gate.check_g3(cand, active, rp).status
-            assert row["C0"] in ("PASS", "FAIL") and row["C3"] in ("PASS", "FAIL")       # 150포트·일 -> 가드 통과, 판정이 나옴
-            assert 0 <= row["fp"] <= row["total"] + 1e-12                                  # 추정 오탐은 전체 인시던트의 부분
 
 
 # ── V2 후속: 정책 재선택 ──
@@ -192,3 +150,131 @@ def test_reselect_runs_on_dev_seeds_and_chosen_row_satisfies_the_rule(tiny_model
     if chosen is not None:
         assert chosen["early"] >= 0.70 and chosen["fp"] <= 0.02
         assert cp.policy_from_row(chosen).threshold_scale == chosen["scale"]
+
+
+# ──────────────────────────────────────────────
+# V3 (설계서 6장 2차 재정의): truth-FP 라벨, 후보 풀 5개 x 활성 2가지, 판정은 src check_g3(C4')
+# ──────────────────────────────────────────────
+@pytest.mark.parametrize("fp,base,label", [
+    (0.000, 0.000, "정상"), (0.039, 0.000, "중간"), (0.040, 0.000, "과다"),       # 기준 0 이면 하한 0.04 가 과다 경계
+    (0.030, 0.030, "정상"), (0.020, 0.030, "정상"), (0.031, 0.030, "중간"),         # 정상 = 기준 이하(같으면 정상)
+    (0.089, 0.030, "중간"), (0.090, 0.030, "과다"),                                  # 3 x 0.03 = 0.09
+    (0.039, 0.005, "중간"), (0.040, 0.005, "과다"),                                  # 3 x 0.005 = 0.015 < 0.04 -> 하한 0.04
+])
+def test_truth_fp_label_boundaries(fp, base, label):
+    assert cp.truth_fp_label(fp, base) == label
+
+
+def test_pool_and_actives_are_the_fixed_five_and_two():
+    names = [c[0] for c in cp.V3_POOL]
+    assert names == ["①V1모델+최종정책", "②V1모델+기본정책", "③V1모델x0.25+최종정책", "④V1모델x0.1+최종정책", "⑤v1+기본정책"]
+    assert [(c[1], c[2], c[3]) for c in cp.V3_POOL] == [("new", 1.0, "final"), ("new", 1.0, "default"), ("new", 0.25, "final"),
+                                                         ("new", 0.1, "final"), ("v1", 1.0, "default")]
+    assert [a[1] for a in cp.V3_ACTIVES] == ["⑤v1+기본정책", "①V1모델+최종정책"]       # (a) 첫 승격 = v1+기본, (b) 이후 = 정상 v2+최종 정책
+
+
+def test_v3_phase_guards_dev_vs_evidence_seeds():
+    assert cp.v3_phase([7, 11]) == "탐색" and cp.v3_phase([23, 31, 47]) == "근거" and cp.v3_phase([23]) == "근거"
+    with pytest.raises(ValueError):
+        cp.v3_phase([7, 23])                                      # 섞으면 거부
+    with pytest.raises(ValueError):
+        cp.v3_phase([5])
+
+
+def _v3_rows(label, active, g3, cond=(7, "기준", "traffic"), name="후보"):
+    return {"seed": cond[0], "density": cond[1], "track": cond[2], "candidate": name, "active": active, "label": label, "G3": g3}
+
+
+A, B = cp.V3_ACTIVES[0][0], cp.V3_ACTIVES[1][0]
+
+
+def test_judge_v3_criteria():
+    ok = pd.DataFrame([_v3_rows("정상", A, "PASS"), _v3_rows("정상", B, "WARN"),            # 정상: FAIL 이 아니면 됨(PASS·WARN)
+                       _v3_rows("과다", A, "WARN"), _v3_rows("과다", A, "FAIL"), _v3_rows("과다", B, "FAIL")])
+    j = cp.judge_v3(ok)
+    assert j["pass"] is True and (j["normal_violations"], j["excess_a_violations"], j["excess_b_violations"]) == (0, 0, 0)
+    bad_normal = pd.concat([ok, pd.DataFrame([_v3_rows("정상", B, "FAIL")])])
+    assert cp.judge_v3(bad_normal)["pass"] is False and cp.judge_v3(bad_normal)["normal_violations"] == 1
+    bad_a = pd.concat([ok, pd.DataFrame([_v3_rows("과다", A, "PASS")])])                      # 과다가 첫 승격에서 PASS
+    assert cp.judge_v3(bad_a)["excess_a_violations"] == 1 and cp.judge_v3(bad_a)["pass"] is False
+    bad_b = pd.concat([ok, pd.DataFrame([_v3_rows("과다", B, "WARN")])])                      # 과다가 이후 재학습에서 FAIL 이 아님
+    assert cp.judge_v3(bad_b)["excess_b_violations"] == 1 and cp.judge_v3(bad_b)["pass"] is False
+    mid = pd.concat([ok, pd.DataFrame([_v3_rows("중간", A, "PASS"), _v3_rows("중간", B, "FAIL")])])   # 중간은 판정 제외
+    assert cp.judge_v3(mid)["pass"] is True
+
+
+def test_judge_v3_records_conditions_without_excess_and_undecidable_when_none():
+    t = pd.DataFrame([_v3_rows("정상", A, "PASS", cond=(7, "기준", "traffic")), _v3_rows("과다", B, "FAIL", cond=(7, "잦음", "optical")),
+                      _v3_rows("정상", B, "PASS", cond=(7, "잦음", "optical"))])
+    j = cp.judge_v3(t)
+    assert j["conditions"] == 2 and j["conditions_without_excess"] == [(7, "기준", "traffic")]
+    none = t[t.label != "과다"]
+    assert cp.judge_v3(none)["pass"] is None                                                # 과다 라벨 전무 -> 판정 불가
+
+
+def test_c0_reference_column_is_the_pre_c4prime_rule():
+    c = lambda x: {"incidents_per_port_day": x, "port_days": 180}
+    assert cp.c0_status(c(0.06), c(0.20)) == "FAIL"           # 구 식: 절대 상한 초과는 FAIL (C4' 에서는 WARN)
+    assert cp.c0_status(c(0.05), c(0.20)) == "PASS"
+    assert cp.c0_status({"incidents_per_port_day": 0.0, "port_days": 149}, c(0.0)) == "SKIP"
+
+
+def test_v3_table_structure_and_g3_equals_src_check_g3_independently(tiny_env):
+    """5노드(50포트) x 3일 = 150포트·일: 후보 5 x 활성 2 x 트랙 2 = 20행. G3 열과 truth-FP 는 src·평가 함수로 따로 계산한 값과 같다"""
+    from src.pipeline.inference import AnomalyDetector
+    from validation.evaluation.tuning import evaluate_alarms, simulate_alarms
+    from validation.simulator.scenario_generator import ScenarioConfig
+
+    t = cp.v3_table(str(tiny_env), str(tiny_env), seeds=[7], nodes=5, densities={"기준": 7.0})
+    assert len(t) == 20 and (t.port_days == 150).all()
+    assert set(t.candidate) == {c[0] for c in cp.V3_POOL} and set(t.active) == {a[0] for a in cp.V3_ACTIVES}
+    assert (t[t.candidate == cp.V3_BASE].label == "정상").all()                              # ① 은 정의상 정상
+
+    data = cp.make_data(7, 5, cp.GATE_DAYS + 1, mean_gap_days=7.0)
+    since = pd.Timestamp(ScenarioConfig().start) + pd.Timedelta(days=1)
+    det = AnomalyDetector()                                                                  # tiny_env 가 PATHS 를 그 폴더로 돌려 둠
+    rp = RetrainPolicy()
+    for ft in cp.TRACKS:
+        scores, th = det.track_scores(data[ft], ft)
+        scores = scores[pd.to_datetime(scores["occur_date"]) >= since]
+        built = {}
+        for name, which, factor, pol in cp.V3_POOL:
+            policy = cp.POLICIES["오탐억제형"] if pol == "final" else cp.POLICIES["기본"]
+            stats, alarms = promotion_gate.alarm_stats(scores, th * factor, policy, cp.GATE_DAYS, ft)
+            n_false = evaluate_alarms(alarms, data)["event"]["false_incidents"]
+            built[name] = (stats, n_false / stats["port_days"])
+        for name, *_ in cp.V3_POOL:
+            for aname, aref in cp.V3_ACTIVES:
+                row = t[(t.track == ft) & (t.candidate == name) & (t.active == aname)].iloc[0]
+                want = promotion_gate.check_g3(built[name][0], built[aref][0], rp)
+                assert (row["G3"], row["G3_value"], row["G3_limit"]) == (want.status, want.value, want.limit)
+                assert row["truth_fp"] == pytest.approx(built[name][1]) and row["base_fp"] == pytest.approx(built[cp.V3_BASE][1])
+                assert row["label"] == ("정상" if name == cp.V3_BASE else cp.truth_fp_label(built[name][1], built[cp.V3_BASE][1]))
+                assert row["C0"] in ("PASS", "FAIL") and row["C3"] in ("PASS", "FAIL", "SKIP")
+
+
+def test_gate_cli_refuses_a_second_evidence_run_and_requires_record(tmp_path, monkeypatch, capsys):
+    """검증 시드(근거) 판정은 1회만: --record 필수, 기록 파일이 이미 있으면 도구를 돌리기 전에 거부"""
+    import types
+    args = dict(model="x", active_models="y", seeds="23,31,47", nodes=1, traffic_drop_only=False, final_policy="오탐억제형", record=None)
+    with pytest.raises(SystemExit, match="--record"):
+        cp.cmd_gate(types.SimpleNamespace(**args))
+    done = tmp_path / "evidence.json"
+    done.write_text("{}")
+    with pytest.raises(SystemExit, match="1회만"):
+        cp.cmd_gate(types.SimpleNamespace(**{**args, "record": str(done)}))
+    monkeypatch.setattr(cp, "v3_table", lambda *a, **k: (_ for _ in ()).throw(AssertionError("측정이 실행되면 안 됨")))
+
+
+def test_gate_cli_explore_mode_prints_judgement_and_writes_record(tiny_env, tmp_path, capsys):
+    """소형 임시 모델로 탐색(개발 시드) 경로의 출력·기록 파일을 확인 (실제 모델·시드 측정이 아님 — 코드 경로가 끝까지 동작하는지만)"""
+    import types
+    rec = tmp_path / "explore.json"
+    cp.cmd_gate(types.SimpleNamespace(model=str(tiny_env), active_models=str(tiny_env), seeds="7", nodes=5,
+                                      traffic_drop_only=False, final_policy="오탐억제형", record=str(rec)))
+    out = capsys.readouterr().out
+    assert "[탐색 — 판정 근거 아님]" in out and "C0·C3 열은 참고용입니다 (판정은 src check_g3 = C4')" in out
+    assert "[V3 탐색]" in out and "과다 라벨이 없는 조건(판정 불가)" in out
+    saved = json.load(open(rec, encoding="utf-8"))
+    assert saved["phase"] == "탐색" and saved["seeds"] == [7] and saved["final_policy"] == "오탐억제형"
+    assert "pass" in saved["judgement"] and os.path.exists(str(rec) + ".csv")

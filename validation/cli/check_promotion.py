@@ -13,7 +13,8 @@ U4(C3 를 게이트에 구현)를 하게 되면 두 함수를 src/models/promoti
   train  (V1 학습)   운영 레시피로 학습: 규칙 B + 자기 알람(활성 모델 v1 의 알람) 의심 구간 제외 + 포트 홀드아웃 10%,
                      DataCollector·train_window·Trainer 를 그대로 사용 (DB 대신 시뮬레이터 데이터를 주입)
   eval   (V1·V2)     학습한 모델을 검증 시드에서 평가: AUPRC·이벤트 지표, 정책 기본 ↔ 오탐 억제형
-  gate   (V3)        게이트 G3 판정식 비교: 현재 식(C0) ↔ 추정 오탐 보정 식(C3), 정상/과다 알람 후보
+  gate   (V3)        게이트 G3(C4') 판별력: 후보 풀 5개 x 활성 2가지, truth-FP(시뮬레이터 정답) 기준 정상/과다 라벨.
+                     C0·C3 는 참고 열. 개발 시드 7·11 = 탐색(근거 아님), 검증 시드 23·31·47 = 근거 판정 1회
   vs-v1  (V4)        v1 + 기본 정책 ↔ 새 모델 + 오탐 억제형, 기준선 병기
   select (V2 후속)   V2 미달 시 개발 시드 7·11 로만 정책 재선택 (선택 규칙: 조기 탐지 >= 70% 이고 오탐 <= 0.02 중 F1 최대)
   confirm (V2 후속)  선택된 후보 정책을 검증 시드에서 **한 번만** 확인 (기본 / 기존 오탐억제형 / 후보 병기)
@@ -21,7 +22,8 @@ U4(C3 를 게이트에 구현)를 하게 되면 두 함수를 src/models/promoti
 사용법:
   python validation/cli/check_promotion.py train --out validation/runs/promo_s101 --data-seed 101 --train-seed 0
   python validation/cli/check_promotion.py eval --models s101=validation/runs/promo_s101,s103=validation/runs/promo_s103
-  python validation/cli/check_promotion.py gate --model validation/runs/promo_s101 --seeds 7,11
+  python validation/cli/check_promotion.py gate --model validation/runs/promo_s101 --seeds 7,11            # 탐색
+  python validation/cli/check_promotion.py gate --model validation/runs/promo_s101 --seeds 23,31,47 --record out.json   # 근거(1회)
   python validation/cli/check_promotion.py vs-v1 --models s101=...,s103=... [--v1-models models]
 """
 import argparse
@@ -55,7 +57,6 @@ RECIPE = {"epochs": 30, "batch_size": 64, "patience": 5}     # D1: 실험 레시
 V1_MIN_AUPRC, V1_MIN_F1 = 0.587, 0.755
 V2_MAX_FP = 0.02                    # 오탐 억제형의 오탐 평균 상한 (건/포트·일)
 V4_MIN_DIFF = 0.03                  # v1 대비 AUPRC·F1 상승, 오탐 감소 폭 (각각 > 0.03)
-EXCESS_THRESHOLD_FACTOR = 0.5       # V3 과다 알람 후보 = 임계치 x 0.5
 GATE_DAYS = 3                       # 판정 3일 + 규칙 B 기준선 1일 (설계서 V3 세부)
 
 # 정책 재선택(V2 후속): 선택 규칙은 performance_report.md 3장과 같고, 탐색 공간은 그 선택에 쓴 P0-2 격자
@@ -299,40 +300,109 @@ def c3_status(cand, active, fp_rate, rp=None):
     return "PASS" if ok else "FAIL"
 
 
-def gate_table(model_dir, active_models_dir, seeds, nodes=6, densities=None, tracks=TRACKS, weights=None):
-    """V3 표: 시드 x 장애 밀도 x 트랙 x 후보(정상/과다)의 C0·C3 판정.
-    정상 후보 = 새 모델 + 오탐억제형, 과다 알람 후보 = 같은 모델의 임계치 x0.5 + 오탐억제형, 활성 = v1 + 기본 정책."""
+# V3 정상·과다 라벨 (설계서 6장, 2026-10-06 2차 재정의): 게이트 식과 독립인 시뮬레이터 정답 기준(truth-FP)
+V3_EXCESS_FACTOR, V3_EXCESS_MIN = 3.0, 0.04       # 과다 = truth-FP >= max(3 x 후보① 의 truth-FP, 0.04)
+# 후보 풀 5개 (이름, 모델: new=새 모델 / v1=현재 활성, 임계치 배율, 정책: final=최종 정책 / default=기본 정책)
+V3_POOL = (("①V1모델+최종정책", "new", 1.0, "final"), ("②V1모델+기본정책", "new", 1.0, "default"),
+           ("③V1모델x0.25+최종정책", "new", 0.25, "final"), ("④V1모델x0.1+최종정책", "new", 0.1, "final"),
+           ("⑤v1+기본정책", "v1", 1.0, "default"))
+V3_ACTIVES = (("a 첫승격(v1+기본)", "⑤v1+기본정책"), ("b 이후(정상v2+최종정책)", "①V1모델+최종정책"))
+V3_BASE = V3_POOL[0][0]
+
+
+def truth_fp_label(fp, base_fp):
+    """정상 = truth-FP <= 후보①(기준 구성)의 truth-FP, 과다 = >= max(3 x 기준, 0.04), 그 외 중간(판정 제외, 값만 기록).
+    게이트의 상대 기준(1.5배)은 일부러 쓰지 않는다 — 라벨이 판정 식을 그대로 따라가지 않도록."""
+    if fp <= base_fp:
+        return "정상"
+    if fp >= max(V3_EXCESS_FACTOR * base_fp, V3_EXCESS_MIN):
+        return "과다"
+    return "중간"
+
+
+def truth_fp_per_port_day(alarms, data, port_days):
+    """시뮬레이터 정답 에피소드의 활성 구간 밖 알람 인시던트 / 포트·일 (정답은 검증에서만 쓰고 게이트는 쓰지 않음).
+    정의·묶음 규칙은 평가 도구(event_metrics)의 false incident 와 같고, 분모는 게이트와 같은 포트·일이다."""
+    n = evaluate_alarms(alarms, data)["event"]["false_incidents"]
+    return n / port_days if port_days else 0.0
+
+
+def c0_status(cand, active, rp=None):
+    """참고 열(판정 아님): P1-1 의 식 — 후보 <= min(0.05, max(활성 x 1.5, 0.01)) 이면 PASS, 아니면 FAIL (U4' 이전의 check_g3)"""
+    rp = rp or RetrainPolicy()
+    if cand["port_days"] < rp.gate_min_port_days:
+        return "SKIP"
+    limit = min(rp.gate_max_incidents_per_port_day, max(active["incidents_per_port_day"] * rp.gate_max_alarm_ratio, rp.gate_alarm_floor))
+    return "PASS" if cand["incidents_per_port_day"] <= limit else "FAIL"
+
+
+def v3_phase(seeds):
+    """개발 시드 7·11 은 식을 확인하는 '탐색'(판정 근거 아님), 검증 시드 23·31·47 은 1회만 쓰는 '근거'. 섞으면 거부."""
+    ss = {int(x) for x in seeds}
+    if ss <= set(DEV_SEEDS):
+        return "탐색"
+    if ss <= set(VAL_SEEDS):
+        return "근거"
+    raise ValueError(f"V3 시드는 개발 {DEV_SEEDS}(탐색) 또는 검증 {VAL_SEEDS}(근거) 중 한쪽만: {sorted(ss)}")
+
+
+def v3_table(model_dir, active_models_dir, seeds, nodes=6, densities=None, tracks=TRACKS, weights=None, final="오탐억제형"):
+    """V3 표: (시드 x 장애 밀도 x 트랙) 게이트 데이터마다 후보 풀 5개 x 활성 2가지의 G3 판정.
+    판정 열(G3)은 src 의 promotion_gate.check_g3(C4') 를 그대로 호출한다. truth-FP 라벨은 게이트와 독립(시뮬레이터 정답).
+    C0·C3 는 참고 열이다 (C3 는 도구 구현값)."""
     densities = densities or {"기준(7일 간격)": 7.0, "잦음(2일 간격)": 2.0}
     rp = RetrainPolicy()
+    policies = {"final": POLICIES[final], "default": POLICIES["기본"]}
     rows = []
     for seed in seeds:
         for dname, gap in densities.items():
             extra = {"scenario_weights": weights} if weights else {}
             data = make_data(seed, nodes, GATE_DAYS + 1, mean_gap_days=gap, **extra)
             since = pd.Timestamp(ScenarioConfig().start) + pd.Timedelta(days=1)
-            cand_scores, act_scores = score_data(data, model_dir), score_data(data, active_models_dir)
+            scored = {"new": score_data(data, model_dir), "v1": score_data(data, active_models_dir)}
             for ft in tracks:
-                raw = data[ft]
-                for kind, factor in (("정상", 1.0), ("과다", EXCESS_THRESHOLD_FACTOR)):
-                    sc, th = cand_scores[ft]
+                cand = {}
+                for name, which, factor, pol in V3_POOL:
+                    sc, th = scored[which][ft]
                     sc = sc[pd.to_datetime(sc["occur_date"]) >= since]
-                    cand, alarms = gate_stats(sc, th * factor, POLICIES["오탐억제형"], ft)
-                    a_sc, a_th = act_scores[ft]
-                    a_sc = a_sc[pd.to_datetime(a_sc["occur_date"]) >= since]
-                    active, _ = gate_stats(a_sc, a_th, POLICIES["기본"], ft)
-                    fp = fp_incidents_per_port_day(alarms, raw, cand["port_days"], rp)
-                    rows.append({"seed": seed, "density": dname, "track": ft, "candidate": kind,
-                                 "total": cand["incidents_per_port_day"], "fp": fp, "active": active["incidents_per_port_day"],
-                                 "port_days": cand["port_days"],
-                                 "C0": promotion_gate.check_g3(cand, active, rp).status, "C3": c3_status(cand, active, fp, rp)})
+                    stats, alarms = gate_stats(sc, th * factor, policies[pol], ft)
+                    fp = truth_fp_per_port_day(alarms, data, stats["port_days"])
+                    cand[name] = {"stats": stats, "alarms": alarms, "truth_fp": fp}
+                base = cand[V3_BASE]["truth_fp"]
+                for name, *_ in V3_POOL:
+                    c = cand[name]
+                    label = "정상" if name == V3_BASE else truth_fp_label(c["truth_fp"], base)
+                    cfp = fp_incidents_per_port_day(c["alarms"], data[ft], c["stats"]["port_days"], rp)
+                    for aname, aref in V3_ACTIVES:
+                        act = cand[aref]["stats"]
+                        g3 = promotion_gate.check_g3(c["stats"], act, rp)
+                        rows.append({"seed": seed, "density": dname, "track": ft, "candidate": name, "active": aname,
+                                     "label": label, "truth_fp": c["truth_fp"], "base_fp": base,
+                                     "total": c["stats"]["incidents_per_port_day"], "active_total": act["incidents_per_port_day"],
+                                     "port_days": c["stats"]["port_days"], "G3": g3.status, "G3_value": g3.value, "G3_limit": g3.limit,
+                                     "C0": c0_status(c["stats"], act, rp), "C3": c3_status(c["stats"], act, cfp, rp)})
     return pd.DataFrame(rows)
 
 
-def judge_v3(table, formula):
-    """식(C0 또는 C3)이 모든 조건에서 정상 후보 PASS, 과다 알람 후보 FAIL 인가"""
-    ok_normal = bool((table[table.candidate == "정상"][formula] == "PASS").all())
-    ok_excess = bool((table[table.candidate == "과다"][formula] == "FAIL").all())
-    return {"normal_all_pass": ok_normal, "excess_all_fail": ok_excess, "pass": ok_normal and ok_excess}
+def judge_v3(table):
+    """V3 합격 기준 (설계서 6장). 정상 후보: 모든 조건·활성에서 G3 가 FAIL 이 아님. 과다 후보: 활성 a(첫 승격)에서 PASS 가 아님,
+    활성 b(이후 재학습)에서 FAIL. 조건(시드 x 밀도 x 트랙)에 과다 라벨이 하나도 없으면 그 조건은 과다 기준의 판정 불가로 기록하고
+    정상 기준은 그대로 적용한다. 과다 라벨이 전 조건에 없으면 pass=None(판정 불가)."""
+    normal = table[table.label == "정상"]
+    excess = table[table.label == "과다"]
+    a, b = excess[excess.active == V3_ACTIVES[0][0]], excess[excess.active == V3_ACTIVES[1][0]]
+    out = {"normal_rows": len(normal), "excess_rows_a": len(a), "excess_rows_b": len(b),
+           "normal_violations": int((normal.G3 == "FAIL").sum()),
+           "excess_a_violations": int((a.G3 == "PASS").sum()),
+           "excess_b_violations": int((b.G3 != "FAIL").sum())}
+    cond = ["seed", "density", "track"]
+    has_excess = table.groupby(cond)["label"].apply(lambda s: bool((s == "과다").any()))
+    out["conditions"] = int(len(has_excess))
+    out["conditions_without_excess"] = [tuple(k) for k, v in has_excess.items() if not v]
+    out["normal_ok"] = out["normal_violations"] == 0
+    out["excess_ok"] = (out["excess_a_violations"] == 0 and out["excess_b_violations"] == 0) if len(excess) else None
+    out["pass"] = None if not len(excess) else bool(out["normal_ok"] and out["excess_ok"])
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -367,15 +437,31 @@ def cmd_eval(a):
 
 
 def cmd_gate(a):
-    seeds = [int(s) for s in a.seeds.split(",")]
+    import json
+    seeds = [int(x) for x in a.seeds.split(",")]
+    phase = v3_phase(seeds)
+    if phase == "근거":                                   # 검증 시드는 1회만: 결과 기록 파일이 이미 있으면 거부
+        if not a.record:
+            raise SystemExit("[!] 근거 실행(검증 시드)은 --record 로 결과 파일을 지정해야 합니다 (1회만 사용, 기존 파일이 있으면 거부).")
+        if os.path.exists(a.record):
+            raise SystemExit(f"[!] {a.record} 가 이미 있습니다 — 검증 시드 판정은 1회만 사용합니다. 기준·식을 다시 고르지 않습니다.")
     weights = (0.0, 0.0, 1.0) if a.traffic_drop_only else None
-    t = gate_table(a.model, a.active_models, seeds, a.nodes, weights=weights)
-    pd.set_option("display.width", 200)
-    print(t.round(4).to_string(index=False))
-    for f in ("C0", "C3"):
-        j = judge_v3(t, f)
-        print(f"[V3 {f}] 정상 후보 전부 PASS: {j['normal_all_pass']}, 과다 알람 후보 전부 FAIL: {j['excess_all_fail']} -> {'만족' if j['pass'] else '불만족'}")
-    print("선택 규칙: 개발 시드(7,11)에서 C0 가 만족하면 C0(보정 없음), 아니면 C3. 확인 시드(23,31,47)로 식을 다시 고르지 않는다.")
+    t = v3_table(a.model, a.active_models, seeds, a.nodes, weights=weights, final=a.final_policy)
+    pd.set_option("display.width", 220)
+    show = ["seed", "density", "track", "candidate", "active", "label", "truth_fp", "base_fp", "total", "G3", "C0", "C3"]
+    print(f"== V3 [{phase}{' — 판정 근거 아님' if phase == '탐색' else ' — 근거 판정(1회)'}] 시드 {seeds}, 최종 정책 = {a.final_policy} ==")
+    print(t[show].round(4).to_string(index=False))
+    j = judge_v3(t)
+    print(f"\n[V3 {phase}] 정상 행 {j['normal_rows']}건 중 G3 FAIL {j['normal_violations']}건 / 과다 행(a) {j['excess_rows_a']}건 중 PASS {j['excess_a_violations']}건 / "
+          f"과다 행(b) {j['excess_rows_b']}건 중 FAIL 아님 {j['excess_b_violations']}건")
+    print(f"        과다 라벨이 없는 조건(판정 불가) {len(j['conditions_without_excess'])}/{j['conditions']}: {j['conditions_without_excess']}")
+    print("        판정: " + ("판정 불가(과다 라벨 없음)" if j["pass"] is None else ("PASS" if j["pass"] else "FAIL")))
+    print("C0·C3 열은 참고용입니다 (판정은 src check_g3 = C4').")
+    if a.record:
+        rec = {"phase": phase, "seeds": seeds, "final_policy": a.final_policy, "judgement": {k: v for k, v in j.items() if k != "conditions_without_excess"},
+               "conditions_without_excess": [list(map(str, x)) for x in j["conditions_without_excess"]]}
+        json.dump(rec, open(a.record, "w", encoding="utf-8"), ensure_ascii=False, indent=2, default=str)
+        t.to_csv(a.record + ".csv", index=False)
 
 
 def cmd_vs_v1(a):
@@ -466,6 +552,8 @@ def main():
     g.add_argument("--seeds", required=True, help=f"개발 {DEV_SEEDS} 로 식을 고르고, 확인 {VAL_SEEDS} 로 확인")
     g.add_argument("--nodes", type=int, default=6)
     g.add_argument("--traffic-drop-only", action="store_true", help="추가 기록용(판정 아님): traffic_drop 위주 조건")
+    g.add_argument("--final-policy", default="오탐억제형", choices=list(POLICIES), help="후보 풀의 '최종 정책' (V2 에서 확정된 정책)")
+    g.add_argument("--record", default=None, help="결과 기록 파일(JSON). 검증 시드(근거) 실행은 필수이며 1회만 허용")
     v = sub.add_parser("vs-v1")
     v.add_argument("--models", required=True)
     v.add_argument("--v1-models", default="models")
