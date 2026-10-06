@@ -64,14 +64,14 @@
         - **드리프트/결정**: 포트별 score 분포 기반 광역/국소 판정, `retrain_policy.decide`(지속성 3일·쿨다운 72h·`DRIFT_RETRAIN_MODE` off/**candidate(기본)**/auto). 중단·수집 오류는 쿨다운 없이 24h 재시도 보류, 쿨다운은 Trainer 시작 후에만 적용(6.3 발견 A).
         - **승격 게이트 G1~G5**: 아티팩트 / 임계치·검증 손실(3배) / 홀드아웃 알람 비율(포트·일 150 미만은 SKIP → 종합 WARN, `gate_min_port_days=150`, 발견 B) / 카나리 AUPRC / 임계치 추세. auto 는 PASS 에서만 승격. G2·G3 배율 표기 공통화(×N, 1/N, 발견 C).
         - **카나리**: `validation/cli/build_canary.py`(시드 900, 40포트×7일, 트랙별 라벨, 카나리 AUPRC 계산은 트랙당 약 1초). 의심 구간 규칙 품질 실험은 `validation/cli/check_retrain_policy.py`(장애 제외율 검증 시드 평균 90.6%, 시드 31 이 89.6% 로 경계선 미달 — traffic_drop 이 원인, P1-4 와 같은 취약점).
-        - **검증**: 컨테이너 E2E 기본 10/10 PASS, 6.3 시나리오 1~6 PASS, 시나리오 4(auto) (a) 소형 홀드아웃 → 종합 WARN 으로 승격 안 됨·Consumer 리로드 없음 / (b) 홀드아웃 130포트(390포트·일) 게이트 PASS → 자동 승격(이력 `auto-gate`)·Consumer 가 v5 로 리로드. UI 는 `vue-tsc && vite build` 통과, 브라우저에서 WARN/SKIP 색·게이트 상세 표시 사용자 확인. 전체 pytest **355 passed**(컨테이너, models/ 있음, skip 0)·reviewer PASS.
+        - **검증**: 컨테이너 E2E 기본 10/10 PASS, 6.3 시나리오 1~6 PASS, 시나리오 4(auto) (a) 소형 홀드아웃 → 종합 WARN 으로 승격 안 됨·Consumer 리로드 없음 / (b) 홀드아웃 130포트(390포트·일) 게이트 PASS → 자동 승격(이력 `auto-gate`)·Consumer 가 v5 로 리로드. UI 는 `vue-tsc && vite build` 통과, 브라우저에서 사용자가 게이트 상세·WARN/SKIP 색, 학습 폼의 `exclude_suspect=false` 요청, 드리프트 패널 수치 일치를 확인. 전체 pytest **355 passed**(컨테이너, models/ 있음, skip 0)·reviewer PASS.
         - **미검증/제약 (그대로 명시)**:
             - **실시간 3일 경과**는 검증하지 못함: 지속성·쿨다운·활성화 시각(`activated_at`)을 상태 파일/레지스트리 조작과 가짜 포트 행(픽스처)으로 시뮬레이션했음.
             - **운영 규모 G3 미검증**: 150~300포트·일 구간에서는 인시던트 1~2건 차이로 PASS/FAIL 이 흔들릴 수 있음(설계서 8장).
             - **G3 절대 상한 0.05 는 장애 포함 전체 인시던트 기준**이라, 장애가 많은 데이터(포트당 7일 간격 장애)에서는 정상 모델도 FAIL 할 수 있음(이번 대규모 시드 1차에서 0.063 으로 FAIL).
             - **카나리는 시뮬레이터 장애 유형만 대표**하며(설계서 8장), 이번 시나리오 4 의 게이트 PASS 는 카나리 파일이 없어 G4 SKIP 상태로 얻은 값(G4 미반영).
             - **게이트 전체(G3 포함) 소요시간은 미측정**(카나리 구간만 측정).
-            - **현재 활성 v1(traffic·optical 모두)은 포트 분포 기준값이 없는 레거시(`baseline_legacy`)** 라 드리프트는 감지만 하고 자동 재학습 대상이 아님(`retrain_policy.py:216`; 호스트 `models/*_ae_v1.json` 에 `baseline_port_median` 없음). 재학습으로 만든 모델부터 기준값이 기록되어 비레거시(`trainer.py:280`). 컨테이너 E2E 로는 **광 트랙만** 확인(v2 활성화 후 `baseline_legacy: False`); **traffic 트랙의 재학습·자동 재학습 경로는 컨테이너에서 확인하지 않았음(확인 필요)**.
+            - **컨테이너 검증은 광 트랙만 수행**: traffic 의 학습·승격·드리프트 재학습 경로는 컨테이너에서 확인하지 않았음(단위·API 테스트로만 커버). 현재 활성 v1(traffic·optical 모두)은 포트 분포 기준값이 없는 레거시(`baseline_legacy`)라 **traffic 드리프트 재학습은 notify 로 막혀 있음**(`retrain_policy.py:216`; 호스트 `models/traffic_ae_v1.json` 에 `baseline_port_median` 없음). 재학습으로 만든 모델부터 기준값이 기록되어 비레거시(`trainer.py:280`) — 광 트랙은 v2 활성화 후 `baseline_legacy: False` 를 컨테이너에서 확인.
             - arm64/GPU 이미지, 실제 운영 데이터는 미검증.
         - **운영 적용 주의**: auto 모드는 시나리오 4 로 동작을 확인했으나 **기본값은 candidate 유지**. auto 를 운영에 켜기 전에 카나리 구성(G4 가 SKIP 이 아닌 상태)과 G3 판정 규모(홀드아웃 150포트·일 이상)를 확인해야 함.
         - 관찰: Producer 없이 기동하면 Kafka 토픽이 없어 Consumer 가 종료·재시작을 반복(P2-1).
