@@ -232,7 +232,7 @@ def _alarm_stats(scores, th, alert_policy, days, ft):
             "incidents_per_port_day": n_inc / (ports * days)}, alarms
 
 
-# 검증 도구(validation/cli/check_promotion.py)가 게이트와 같은 계산을 호출하는 공개 이름 (내부 이름이 바뀌어도 도구가 조용히 깨지지 않게)
+# 게이트와 같은 계산을 외부 검증 도구가 호출하는 공개 이름 (내부 이름이 바뀌어도 도구가 조용히 깨지지 않게)
 alarm_stats = _alarm_stats
 
 
