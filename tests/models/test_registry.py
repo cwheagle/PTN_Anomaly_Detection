@@ -341,3 +341,21 @@ def test_policy_version_errors(d):
     with pytest.raises(RegistryError):
         reg_mod.create_policy_version(str(d), FT, "v1", PRECISION)
     assert [v["version"] for v in reg_mod.load(str(d), FT)["versions"]] == ["v1"]   # 실패 시 등록 안 됨
+
+
+# T-P3-G7 (U4'): G3 의 절대 상한 위반(WARN)은 수동 승격을 막지 않고, 상대 기준 위반(FAIL)은 force 가 필요
+def test_g3_absolute_limit_warn_promotes_without_force_and_returns_the_message(d):
+    msg = "홀드아웃 130포트 알람 0.100건/포트·일 > 절대 상한 0.050 (×2.0, 절대 상한 초과 — 장애가 많은 기간일 수 있음, 사람이 검토)"
+    _setup_gated(d, _gate("WARN", [_chk("G1", "PASS"), _chk("G3", "WARN", msg)]))
+    out = reg_mod.promote(str(d), FT, "v2")
+    assert out["active"] == "v2" and out["warnings"] == [f"[G3] {msg}"]
+
+
+def test_g3_relative_fail_needs_force(d):
+    msg = "홀드아웃 130포트 알람 0.200건/포트·일 > 기준 0.150 (×1.3, 활성 모델 대비 과다)"
+    _setup_gated(d, _gate("FAIL", [_chk("G1", "PASS"), _chk("G3", "FAIL", msg)]))
+    with pytest.raises(PromotionWarning) as e:
+        reg_mod.promote(str(d), FT, "v2")
+    assert e.value.warnings == [f"[G3] {msg}"]
+    out = reg_mod.promote(str(d), FT, "v2", force=True)
+    assert out["active"] == "v2" and out["warnings"] == [f"[G3] {msg}"]

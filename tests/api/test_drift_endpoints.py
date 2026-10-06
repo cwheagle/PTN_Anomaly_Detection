@@ -546,3 +546,27 @@ def test_explicit_preset_overrides_inheritance_and_no_policy_means_none(pipe):
         reg["versions"][0].pop("alert_policy")                                                 # 활성 모델에 정책 없음
     pipe.main.run_training_pipeline("traffic", {}, None, "manual")
     assert _FakeTrainer.instances[0].kw["alert_policy"] is None
+
+
+def test_auto_mode_does_not_promote_when_g3_absolute_limit_is_exceeded(pipe):
+    """T-P3-E3 (U4'): mode=auto 에서 G3 절대 상한(0.05) 초과(WARN) 후보는 자동 승격되지 않고 활성 불변·Consumer 리로드 없음.
+    실제 gate.evaluate(C4') 결과를 사용한다 (홀드아웃 150포트·일 이상, 상대 기준은 통과)."""
+    from src.models import promotion_gate as pg, registry
+    from src.pipeline.retrain_policy import RetrainPolicy
+    pipe.monkeypatch.setenv("DRIFT_RETRAIN_MODE", "auto")
+    _seed_registry(pipe)
+    stats = {"ports": 130, "incidents": 39, "port_days": 390, "incidents_per_port_day": 0.10}
+
+    def run(ft, version, now=None):
+        entry = {"version": version, "threshold": 0.3, "final_val_loss": 0.02}
+        gate = pg.evaluate(entry, {"version": "v1", "threshold": 0.3, "final_val_loss": 0.02}, stats, stats, None,
+                           [0.3, 0.3, 0.3], RetrainPolicy()).to_dict()
+        registry.set_gate(str(pipe.tmp), ft, version, gate)
+        return gate
+    pipe.monkeypatch.setattr(pipe.main, "run_gate_for", run)
+    pipe.set_collector(OK_RESULT)
+    pipe.main.run_training_pipeline("traffic", {}, None, "drift")
+    st = pipe.main.training_status["traffic"]
+    g3 = {c["id"]: c for c in registry.find(registry.load(str(pipe.tmp), "traffic"), "v7")["gate"]["checks"]}["G3"]
+    assert g3["status"] == "WARN" and st["gate_status"] == "WARN"
+    assert _active(pipe) == "v1" and pipe.published == []

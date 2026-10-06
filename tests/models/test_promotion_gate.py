@@ -50,7 +50,7 @@ def test_g2_val_loss_blowup_and_no_active():
     (0.010, 0.000, pg.PASS),          # 활성이 0 이어도 floor 0.01 까지 허용
     (0.011, 0.000, pg.FAIL),
     (0.049, 0.200, pg.PASS),          # 활성이 많이 울려도 절대 상한(0.05) 이내면 통과
-    (0.051, 0.200, pg.FAIL),          # 절대 상한 초과는 활성 대비와 무관하게 FAIL
+    (0.051, 0.200, pg.WARN),          # 절대 상한(0.05) 초과이지만 활성 대비(x1.5 = 0.3)는 통과 -> C4' 에서 WARN (P1-3, 이전엔 FAIL)
 ])
 def test_g3_alarm_rate_rule(cand, active, expected):
     assert pg.check_g3(_stats(cand), _stats(active), L).status == expected
@@ -60,7 +60,7 @@ def test_g3_skip_without_gate_data_and_absolute_limit_only_without_active():
     assert pg.check_g3(None, _stats(0.01), L).status == pg.SKIP
     assert pg.check_g3({"ports": 0, "incidents_per_port_day": 0.0}, None, L).status == pg.SKIP
     assert pg.check_g3(_stats(0.05), None, L).status == pg.PASS
-    assert pg.check_g3(_stats(0.06), None, L).status == pg.FAIL
+    assert pg.check_g3(_stats(0.06), None, L).status == pg.WARN          # 활성 없음: 절대 상한 초과는 WARN (P1-3 C4', 이전엔 FAIL)
 
 
 @pytest.mark.parametrize("cand,expected", [(0.80, pg.PASS), (0.75, pg.PASS), (0.749, pg.FAIL)])
@@ -147,7 +147,7 @@ def test_run_gate_end_to_end_with_two_tiny_models(tiny_env, tiny_scenario):
     by = {c.id: c for c in res.checks}
     assert by["G1"].status == pg.PASS
     assert by["G2"].status in (pg.PASS, pg.FAIL) and by["G2"].value > 0          # 활성 v1 과 비교됨
-    assert by["G3"].status in (pg.PASS, pg.FAIL) and by["G3"].value is not None  # 게이트 데이터로 계산됨
+    assert by["G3"].status in (pg.PASS, pg.WARN, pg.FAIL) and by["G3"].value is not None   # 게이트 데이터로 계산됨 (C4': 절대 상한 초과는 WARN)
     assert by["G4"].status == pg.SKIP                                             # 카나리 파일 없음
     assert by["G5"].status == pg.SKIP                                             # 활성 이력 부족
     assert res.data["against"] == "v1" and res.data["ports"] == 6
@@ -304,3 +304,60 @@ def test_gate_uses_each_models_own_policy_and_records_both(tiny_env, tiny_scenar
     # 같은 가중치인데 정책만 달라 후보 알람이 줄어듦 (SENSITIVE: 임계치 x0.02·즉시 알람 / precision: 임계치 x3·길게 확인)
     assert derived.data["candidate_stats"]["incidents"] < plain.data["candidate_stats"]["incidents"]
     assert derived.data["active_stats"] == plain.data["active_stats"]                                         # 활성 쪽은 그대로
+
+
+# ──────────────────────────────────────────────
+# T-P3-G5/G6 (U4'): G3 판정 C4' — 상대 기준 위반 FAIL, 절대 상한 위반 WARN
+# ──────────────────────────────────────────────
+def _g3(cand, active=None, port_days=390, incidents=None):
+    a = None if active is None else {"ports": 130, "incidents": 0, "port_days": port_days, "incidents_per_port_day": active}
+    c = {"ports": 130, "incidents": incidents if incidents is not None else round(cand * port_days), "port_days": port_days,
+         "incidents_per_port_day": cand}
+    return pg.check_g3(c, a, L), c
+
+
+@pytest.mark.parametrize("cand,active,status,limit,text", [
+    (0.200, 0.100, pg.FAIL, 0.15, "활성 모델 대비 과다"),     # 상대 상한 = max(0.10 x 1.5, 0.01) = 0.15 초과
+    (0.151, 0.100, pg.FAIL, 0.15, "활성 모델 대비 과다"),
+    (0.150, 0.100, pg.WARN, 0.05, "절대 상한 초과"),          # 상대는 통과(경계 포함)·절대 0.05 초과
+    (0.100, 0.100, pg.WARN, 0.05, "절대 상한 초과"),
+    (0.040, 0.100, pg.PASS, 0.05, None),                       # 둘 다 통과
+    (0.011, 0.000, pg.FAIL, 0.01, "활성 모델 대비 과다"),     # 활성 0 이면 하한 floor 0.01
+    (0.010, 0.000, pg.PASS, 0.01, None),
+])
+def test_g3_c4prime_with_active(cand, active, status, limit, text):
+    """T-P3-G5: 활성 있음 — 상대 상한 초과 FAIL / 상대 통과·절대 초과 WARN / 둘 다 통과 PASS (value·limit 은 5.3 표기)"""
+    c, _ = _g3(cand, active)
+    assert c.status == status and c.value == pytest.approx(cand) and c.limit == pytest.approx(limit)
+    if text:
+        assert text in c.message
+    if status == pg.WARN:
+        assert "장애가 많은 기간일 수 있음" in c.message and "사람이 검토" in c.message
+    assert c.detail["cand"]["port_days"] == 390 and c.detail["active"]["port_days"] == 390
+
+
+@pytest.mark.parametrize("cand,status", [(0.051, pg.WARN), (0.050, pg.PASS), (0.400, pg.WARN), (0.0, pg.PASS)])
+def test_g3_c4prime_without_active_only_absolute_limit_and_never_fails(cand, status):
+    """T-P3-G5: 활성 없음 — 0.05 초과는 WARN(FAIL 아님), 이하는 PASS"""
+    c, _ = _g3(cand, None)
+    assert c.status == status and c.limit == pytest.approx(0.05)
+    assert c.detail["active"] is None
+
+
+def _overall(cand, active, port_days=390):
+    cs = {"ports": 130, "incidents": 1, "port_days": port_days, "incidents_per_port_day": cand}
+    as_ = {"ports": 130, "incidents": 1, "port_days": port_days, "incidents_per_port_day": active}
+    return pg.evaluate(_meta("v2", 0.3), _meta("v1", 0.3), cs, as_, None, [0.1, 0.1, 0.1], L)
+
+
+def test_overall_follows_g3_c4prime():
+    """T-P3-G6: G3 WARN(절대 상한)만 있으면 종합 WARN, G3 FAIL(상대)이면 종합 FAIL, 둘 다 통과면 PASS, 가드 미달은 SKIP -> 종합 WARN"""
+    by = lambda r: {c.id: c.status for c in r.checks}
+    warn, fail, ok = _overall(0.10, 0.10), _overall(0.20, 0.10), _overall(0.04, 0.10)
+    assert by(warn)["G3"] == pg.WARN and warn.status == pg.WARN
+    assert by(fail)["G3"] == pg.FAIL and fail.status == pg.FAIL
+    assert by(ok)["G3"] == pg.PASS and ok.status == pg.PASS
+    skip = _overall(0.20, 0.10, port_days=149)
+    assert by(skip)["G3"] == pg.SKIP and skip.status == pg.WARN
+    g3 = {c.id: c for c in warn.checks}["G3"]
+    assert (g3.value, g3.limit) == (0.10, 0.05) and g3.detail["cand"] == {"incidents": 1, "port_days": 390}

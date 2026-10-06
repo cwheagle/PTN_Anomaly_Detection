@@ -125,4 +125,6 @@ RETENTION_DAYS = 30
 #     "drift_median_factor": 1.5,        # 포트별 평균 score 중앙값이 기준의 이 배수를 넘으면 광역 드리프트
 #     "drift_port_fraction": 0.30,       # 기준 p90 을 넘는 포트가 이 비율을 넘으면 광역 드리프트 (정상 기대치 0.10)
 #     "gate_min_port_days": 150,         # 게이트 홀드아웃 포트 x 일수가 이보다 작으면 G3 판정 불가(SKIP) -> 종합 WARN (auto 비승격)
+#     "gate_max_incidents_per_port_day": 0.05,  # G3 절대 상한: 후보 알람이 이를 넘으면 **WARN**(FAIL 아님 — auto 만 차단, 수동 승격은 가능).
+#                                               # FAIL 은 활성 모델 대비 gate_max_alarm_ratio(1.5배, 하한 gate_alarm_floor 0.01) 초과일 때
 # }

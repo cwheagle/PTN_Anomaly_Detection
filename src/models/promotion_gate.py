@@ -8,7 +8,7 @@
 |----|------|---------|
 | G1 | 아티팩트: 파일 존재, threshold/val_loss 가 유한한 양수, input_dim 이 현재 DataProcessor 와 일치 | FAIL (force 로도 승격 불가) |
 | G2 | 임계치·검증 손실이 활성 모델 대비 3배 초과/미만 (registry.compare_with_active) | FAIL |
-| G3 | 홀드아웃 포트 알람 비율: 후보 ≤ max(활성×1.5, 0.01) 이고 ≤ 0.05 인시던트/포트·일 | FAIL |
+| G3 | 홀드아웃 포트 알람 비율(C4'): 후보 > max(활성×1.5, 0.01) 이면 FAIL(활성 대비 과다), 아니고 > 0.05 이면 WARN(절대 상한, 장애 많은 기간일 수 있음) | FAIL / WARN |
 | G4 | 카나리 구분력: AUPRC(후보) ≥ AUPRC(활성) − 0.05 (카나리 파일이 없으면 SKIP) | FAIL |
 | G5 | 임계치 상승 추세: 최근 활성 버전들 + 후보의 임계치가 단조 증가하고 누적 2배 이상 | WARN |
 
@@ -123,17 +123,23 @@ def check_g3(cand_stats, active_stats, limits) -> GateCheck:
                          f"인시던트 {cand_stats.get('incidents')}건) — 사람이 검토하세요", detail)
     cand = cand_stats["incidents_per_port_day"]
     abs_limit = limits.gate_max_incidents_per_port_day
-    limit = abs_limit
+    rel_limit = None
     if active_stats and active_stats.get("ports"):
-        limit = min(abs_limit, max(active_stats["incidents_per_port_day"] * limits.gate_max_alarm_ratio,
-                                   limits.gate_alarm_floor))
+        rel_limit = max(active_stats["incidents_per_port_day"] * limits.gate_max_alarm_ratio, limits.gate_alarm_floor)
     count = f"인시던트 {cand_stats.get('incidents')}건/{port_days:g}포트·일"
-    if cand <= limit:
-        return GateCheck("G3", PASS, cand, limit,
-                         f"홀드아웃 {cand_stats['ports']}포트 알람 {cand:.3f}건/포트·일 ≤ {limit:.3f} ({count})", detail)
-    why = "활성 모델 대비 과다" if limit < abs_limit else "절대 상한 초과"
-    return GateCheck("G3", FAIL, cand, limit, f"홀드아웃 {cand_stats['ports']}포트 알람 {cand:.3f}건/포트·일 > 기준 {limit:.3f} "
-                     f"({registry.format_ratio(cand / limit if limit > 0 else None)}, {why}; {count})", detail)
+    head = f"홀드아웃 {cand_stats['ports']}포트 알람 {cand:.3f}건/포트·일"
+    # C4' (P1-3 5.3): 상대 기준(활성 대비) 위반은 FAIL, 절대 상한 위반은 WARN(정보 + auto 차단, 수동 승격은 막지 않음).
+    # 절대 상한은 장애를 포함한 전체 인시던트 기준이라 장애가 많은 기간에는 정상 후보도 넘을 수 있기 때문이다.
+    if rel_limit is not None and cand > rel_limit:
+        return GateCheck("G3", FAIL, cand, rel_limit,
+                         f"{head} > 기준 {rel_limit:.3f} ({registry.format_ratio(cand / rel_limit if rel_limit > 0 else None)}, "
+                         f"활성 모델 대비 과다; {count})", detail)
+    if cand > abs_limit:
+        return GateCheck("G3", WARN, cand, abs_limit,
+                         f"{head} > 절대 상한 {abs_limit:.3f} ({registry.format_ratio(cand / abs_limit if abs_limit > 0 else None)}, "
+                         f"절대 상한 초과 — 장애가 많은 기간일 수 있음, 사람이 검토; {count})", detail)
+    limit = abs_limit if rel_limit is None else min(abs_limit, rel_limit)
+    return GateCheck("G3", PASS, cand, limit, f"{head} ≤ {limit:.3f} ({count})", detail)
 
 
 def check_g4(canary, limits) -> GateCheck:
