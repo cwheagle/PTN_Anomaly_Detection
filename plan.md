@@ -170,7 +170,7 @@
 | P1-3 | 실험 모델 승격(v2): 정상 구간 정제를 학습 파이프라인에 포함, v1 은 롤백용 보존 | S | P0-1, P0-2 선행 |
 | P1-4 | traffic_drop(점진적 트래픽 감소) 탐지 개선, 롤링 규칙 + AE 하이브리드 검토 | M | 모든 방법이 취약(노이즈 학습 모델 조기 탐지 5%) |
 | P2-1 | 운영 견고성: Kafka `healthcheck` 기반 `depends_on`, Consumer 직전 알람 레벨 Redis 영속화(재시작 시 소실), `/api/anomalies` 를 최신 슬롯 전역이 아닌 포트별 최신 상태로, API 인증/CORS 제한, compose 기동 직후 Producer 없이 Consumer 가 토픽(`ptn_metrics`) 없음으로 재시작 루프(P1-1 E2E 시나리오 4 에서 관찰) | M | E2E 에서 확인된 항목 |
-| P2-2 | 브라우저에서의 UI 화면 동작 검증 | S | 지금은 HTTP 수준만 확인 |
+| P2-2 | 브라우저에서의 UI 화면 동작 검증 | S | 지금은 HTTP 수준만 확인. **부분 확인(2026-10-06, P1-1 중 사용자가 브라우저로 확인)**: 모델 관리 화면의 게이트 상세(G1~G5 값·기준·메시지)와 WARN/SKIP 색, `excludeSuspect` 체크박스 해제 시 요청에 `exclude_suspect=false` 가 실림, 드리프트 패널 숫자가 API 응답과 일치. **미확인**: 승격 409 경고의 UI 표시, 학습 중단(skipped) 표시, 그 밖의 화면 |
 | P2-3 | 환경/위생: `requirements.txt` 버전 고정, Python 3.12(이미지) 기준 테스트, 오염된 구 학습 CSV(`data/`) 정리 | S | 로컬은 3.14, 이미지는 3.12 로 불일치 |
 | P2-4 | GPU 서버(arm64) 배포 확인: (1) compose 에 GPU 연결 설정이 없어 컨테이너는 CPU 로만 동작, (2) `pip install torch` 의 aarch64 wheel 이 CUDA 를 지원하는지 `torch.cuda.is_available()` 로 확인(GB10 은 NVIDIA 공식 CUDA 이미지/전용 인덱스 필요 가능), (3) arm64 이미지 빌드 검증 | M | 로컬 테스트는 `PTN_PLATFORM=linux/amd64` |
 | P3-1 | **Phase 13**: XAI(SHAP/LIME 폭포수), 능동 학습(관리자 피드백 → 정답 자동 구축 → 재학습 반영) | L | P1-1 의 게이트와 결합하면 자동 롤백 재검토 가능 |
