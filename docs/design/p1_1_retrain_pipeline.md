@@ -206,11 +206,12 @@ def load_state(model_dir, ft) -> dict; def save_state(model_dir, ft, state)   # 
 |---|---|---|---|
 | G1 | 아티팩트: 파일 존재, threshold·val_loss 가 유한하고 > 0, input_dim 이 현재 DataProcessor 와 일치 | FAIL | force 로도 승격 불가 (깨진 모델) |
 | G2 | 임계치/검증 손실 비율 (기존 `registry.compare_with_active`, 3배) | FAIL | P0-1 동작 유지. **활성 모델 기준 상대 비교라서 활성 모델이 비정상이면 정상 후보도 FAIL 한다(의도된 동작)** → `force` 로 승격하거나, 롤백으로 정상 버전을 활성화한 뒤 승격. G3 도 활성 모델 기준 상대 비교라 같은 영향을 받음 |
-| G3 | **홀드아웃 포트 알람 비율**: 게이트 데이터(검증 포트 × 최근 3일, 최대 2,000포트 샘플)에서 후보와 활성 모델의 해당 트랙 알람을 **운영과 같은 정책으로** 계산 → 인시던트/포트·일 (1시간 묶음) | `cand ≤ max(active × 1.5, 0.01)` 그리고 `cand ≤ 0.05` 이면 PASS, 아니면 FAIL | 보고 패키지의 합격 기준 C1(오탐 ≤ 0.02)과 맞춰 절대 상한 0.05(장애 포함 전체 알람). 활성 모델과 겹치는 인시던트 비율은 **정보로만** 기록(판정에 쓰지 않음: 활성 모델의 알람이 오탐이었을 수 있음) |
+| G3 | **홀드아웃 포트 알람 비율**: 게이트 데이터(검증 포트 × 최근 3일, 최대 2,000포트 샘플)에서 후보와 활성 모델의 해당 트랙 알람을 **운영과 같은 정책으로** 계산 → 인시던트/포트·일 (1시간 묶음) | `cand ≤ max(active × 1.5, 0.01)` 그리고 `cand ≤ 0.05` 이면 PASS, 아니면 FAIL. **단, 게이트 데이터의 포트·일(검증 포트 수 × 일수) < `gate_min_port_days`(150) 이면 SKIP** (메시지 `포트·일 n<150, 판정 불가`) | 보고 패키지의 합격 기준 C1(오탐 ≤ 0.02)과 맞춰 절대 상한 0.05(장애 포함 전체 알람). **최소 포트·일 가드 (2026-10-06 확정)**: 포트·일이 작으면 인시던트 1건의 값이 하한·상한보다 커서(예: 4포트 × 3일 = 12포트·일 → 1건 = 0.083) 학습 난수만으로 PASS/FAIL 이 갈림(6.3 E2E 발견). 150 이면 1건 = 0.0067 로 하한 0.01 보다 작고, 섀도 최소 규모 500포트(검증 50포트 × 3일)에서도 판정됨. value 에는 비율과 함께 **인시던트 수·포트·일(후보/활성)** 을 기록. 활성 모델과 겹치는 인시던트 비율은 **정보로만** 기록(판정에 쓰지 않음: 활성 모델의 알람이 오탐이었을 수 있음) |
 | G4 | **카나리 구분력**: `<model_dir>/<ft>_canary.csv`(라벨된 고정 장애/정상 데이터)가 있으면 후보와 활성의 AUPRC 비교 | `cand ≥ active − 0.05` 이면 PASS, 아니면 FAIL. 파일 없으면 SKIP | 순환 위험 완화용(8장). 카나리는 `validation/` 도구가 시뮬레이터로 생성해 모델 볼륨에 둔다 (src 는 파일만 읽음 → import 규칙 준수) |
 | G5 | **임계치 상승 추세**: 최근 활성화된 3개 버전 + 후보의 threshold 가 단조 증가하고 누적 2배 이상 | WARN | 점진적 둔감화(장애를 정상으로 계속 흡수) 경보 |
 
 - 종합: 하나라도 FAIL → `FAIL`, FAIL 없이 WARN → `WARN`, 나머지 → `PASS`. 게이트 실행 자체가 실패하면 `ERROR`.
+  - **G3 가 SKIP 이면 (FAIL 이 없을 때) 종합은 `WARN`** (2026-10-06 확정). 알람 부하를 판정하지 못한 후보가 auto 모드에서 자동 승격되지 않게 하기 위함(auto 는 `PASS` 에서만 승격, 1장 5). 수동 승격은 WARN 과 같이 승격 + warnings 반환(2.7). 다른 검사의 SKIP(예: 카나리 파일 없는 G4)은 종합에 영향 없음.
 - **배율 표기 (2026-10-06 확정)**: G2·G3 메시지는 같은 포맷 함수 하나로 배율을 표기한다. 비율 ≥ 1 이면 `×37.5`, < 1 이면 역수로 `1/37.5` 로 쓰고 원래 값과 기준을 함께 쓴다(예: `임계치 16.48 → 0.4399 (1/37.5, 기준 1/3 ~ ×3)`). G2 기준이 3배 초과·1/3 미만으로 대칭이므로, 감소도 같은 척도로 보여야 한다(이전 표기 `0.0배` 는 정보가 없었음).
 - 활성 버전이 없는 최초 학습은 기존대로 자동 활성화(게이트는 기록만).
 
@@ -315,6 +316,7 @@ def run_gate(model_dir, ft, version, window: TrainWindow, policy: RetrainPolicy,
 | `min_hours_since_activation` | 24 | F2 |
 | `cooldown_hours` | 72 | |
 | `gate_max_alarm_ratio` / `gate_alarm_floor` / `gate_max_incidents_per_port_day` | 1.5 / 0.01 / 0.05 | 보고 패키지 C1 과 정합 |
+| `gate_min_port_days` | 150 | 2026-10-06 확정. 미달 시 G3 SKIP + 종합 WARN (2.6). 1건 = 0.0067 < 하한 0.01, 섀도 최소 500포트에서 판정 가능 |
 | `gate_canary_auprc_drop` | 0.05 | |
 | `gate_threshold_trend_versions` / `gate_threshold_trend_factor` | 3 / 2.0 | |
 
@@ -372,7 +374,9 @@ C(명시 구간)는 전 시드 PASS. A 가 B 에 더하는 효과 약 +0.7%p, �
 | | T-P4 | 환경변수 `DRIFT_RETRAIN_MODE` 가 config 보다 우선, 잘못된 값은 `candidate` 로 + 경고 |
 | `tests/models/test_promotion_gate.py` (신규) | T-G1 | `evaluate()` 각 검사 PASS/FAIL/WARN/SKIP 경계값 |
 | | T-G2 | 종합 상태 규칙 (FAIL > WARN > PASS, ERROR) |
+| | T-G1b | 배율 포맷 함수: 비율 ≥ 1 은 `×N`, < 1 은 `1/N`, 원래 값과 기준을 함께 표기. G2·G3 메시지가 같은 함수를 사용 |
 | | T-G3 | 임계치 추세 WARN |
+| | T-G5 | G3 최소 포트·일: 149포트·일 → G3 SKIP(메시지 `포트·일 n<150`) + 다른 검사 PASS 여도 종합 WARN / 150포트·일 → 기존 규칙대로 PASS·FAIL 판정 / value 에 인시던트 수·포트·일(후보/활성) 기록 |
 | | T-G4 | `run_gate` 가 작은 더미 모델 2개로 끝까지 동작 (DB 대신 `fetch_raw` 주입) |
 | `tests/models/test_registry.py` (추가) | T-R1 | gate FAIL → PromotionWarning, force 로 승격 / G1 FAIL 은 force 로도 거부 |
 | | T-R2 | gate WARN → 승격 + warnings 반환 |
@@ -381,7 +385,7 @@ C(명시 구간)는 전 시드 PASS. A 가 B 에 더하는 효과 약 +0.7%p, �
 | | T-A2 | `count_incidents` == `validation.evaluation.metrics.make_incidents` 개수 |
 | `tests/pipeline/test_inference_golden.py` | T-I1 | 버전 지정 로드 추가 후 골든 출력 불변 |
 | `tests/api/test_model_endpoints.py` (추가) | T-E1 | drift check 응답 하위 호환 키 + retrain 필드 |
-| | T-E2 | mode=auto & PASS → 승격·reload publish 호출 / candidate → 활성 불변 |
+| | T-E2 | mode=auto & PASS → 승격·reload publish 호출 / candidate → 활성 불변 / mode=auto & G3 SKIP(종합 WARN) → 승격하지 않고 활성 불변 |
 | | T-E3 | `/api/model/gate` 학습 중 409 |
 | `tests/test_architecture.py` | (기존) | 신규 src 모듈이 validation 을 import 하지 않음 |
 
@@ -400,6 +404,7 @@ C(명시 구간)는 전 시드 PASS. A 가 B 에 더하는 효과 약 +0.7%p, �
 
 그 밖의 한계
 - G3 의 "알람 비율"은 정답 없는 대리 지표다. 후보의 알람이 적은 것이 오탐 감소인지 둔감화인지 G3 만으로는 구분 불가 → G4/G5 와 사람 검토로 보완.
+- G3 의 분해능: 포트·일 150 미만은 SKIP 으로 막지만, **150 ~ 300 포트·일 구간에서는 인시던트 1~2건 차이로 PASS/FAIL 경계가 흔들릴 수 있다**(1건 = 0.0033 ~ 0.0067, 하한 0.01). 이 구간의 FAIL/PASS 는 value 의 인시던트 수를 보고 사람이 판단한다.
 - 포트 홀드아웃은 망 전체 공통 패턴에 대해서는 완전한 미관측 데이터가 아니다(2.1).
 - 학습 구간 28일은 알람 이력 보존(30일)에 묶여 있다. 더 긴 구간이 필요하면 `RETENTION_DAYS` 연장 또는 알람 구간 별도 보관이 필요(범위 밖).
 - 드리프트 기준값은 **새로 학습한 모델부터** 포트 분포로 저장된다. 현재 v1 은 legacy 라서 이 설계 적용 후에도 드리프트 재학습이 자동으로 일어나지 않는다(의도된 동작). P1-3 승격 후부터 유효.
