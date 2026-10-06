@@ -232,6 +232,10 @@ def _alarm_stats(scores, th, alert_policy, days, ft):
             "incidents_per_port_day": n_inc / (ports * days)}, alarms
 
 
+# 검증 도구(validation/cli/check_promotion.py)가 게이트와 같은 계산을 호출하는 공개 이름 (내부 이름이 바뀌어도 도구가 조용히 깨지지 않게)
+alarm_stats = _alarm_stats
+
+
 def run_gate(model_dir: str, ft: str, version: str, window, policy, fetch_raw: Callable,
              alert_policy, detector_factory=None) -> GateResult:
     """후보 `version` 을 검증해 GateResult 를 반환 (레지스트리에는 쓰지 않음 — 호출자가 set_gate).

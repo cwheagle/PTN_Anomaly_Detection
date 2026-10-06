@@ -6,6 +6,10 @@ P1-3 v2 승격 검증 도구 (설계서 docs/design/p1_3_model_promotion.md 6장
 의심 구간 규칙 B, 포트 분할, 수집·학습)는 모두 운영 코드(src)를 그대로 호출한다 (lessons #31).
 모든 수치는 시뮬레이션 기준이며 실데이터 검증이 아니다.
 
+주의 (V3 의 C3 열): C0(현재 식)은 src 의 promotion_gate.check_g3 를 그대로 호출하지만, C3(추정 오탐 보정 식,
+`fp_incidents_per_port_day`·`c3_status`)는 **이 도구의 구현값**이며 src 와 같은 코드라는 증거가 아니다 (lessons #31).
+U4(C3 를 게이트에 구현)를 하게 되면 두 함수를 src/models/promotion_gate.py 로 옮기고 도구는 import 하며 동등성 테스트를 추가한다.
+
   train  (V1 학습)   운영 레시피로 학습: 규칙 B + 자기 알람(활성 모델 v1 의 알람) 의심 구간 제외 + 포트 홀드아웃 10%,
                      DataCollector·train_window·Trainer 를 그대로 사용 (DB 대신 시뮬레이터 데이터를 주입)
   eval   (V1·V2)     학습한 모델을 검증 시드에서 평가: AUPRC·이벤트 지표, 정책 기본 ↔ 오탐 억제형
@@ -217,7 +221,7 @@ def judge_v4(df, v1_name, v2_models):
 # ─────────────────────────────────────────────
 def gate_stats(scores, th, policy, ft):
     """승격 게이트와 같은 계산: (통계 dict, 알람 프레임). 판정 3일 구간만 센다."""
-    return promotion_gate._alarm_stats(scores, th, policy, GATE_DAYS, ft)
+    return promotion_gate.alarm_stats(scores, th, policy, GATE_DAYS, ft)
 
 
 def fp_incidents_per_port_day(alarms, raw, port_days, rp=None):

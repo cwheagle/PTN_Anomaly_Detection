@@ -124,13 +124,37 @@ def test_evaluate_models_and_judgements_run_end_to_end(trained, tiny_model_dir):
     assert new.loc["오탐억제형", "fp"] <= new.loc["기본", "fp"]
 
 
-def test_gate_table_matches_src_gate_functions(trained, tiny_model_dir):
-    """게이트 표의 구조(시드 x 밀도 x 트랙 x 후보)와 포트·일(홀드아웃 포트 x 3일), 최소 포트·일 가드가 src 의 check_g3 와 같은 판정"""
+def test_gate_table_skips_below_min_port_days(trained, tiny_model_dir):
+    """1노드 = 10포트 x 3일 = 30포트·일 < 150 -> 두 식 모두 최소 포트·일 가드로 SKIP"""
     out, _ = trained
     t = cp.gate_table(str(out), str(tiny_model_dir), seeds=[7], nodes=1, densities={"기준": 7.0})
     assert len(t) == 4 and set(t.candidate) == {"정상", "과다"} and set(t.track) == set(cp.TRACKS)
-    assert (t.port_days == 30).all()                                          # 1노드 = 10포트 x 3일
-    assert (t.C0 == "SKIP").all() and (t.C3 == "SKIP").all()                  # 30포트·일 < 150 -> 두 식 모두 최소 포트·일 가드로 SKIP
-    # C0 는 src 함수를 그대로 호출한 값과 같다 (같은 통계 -> 같은 판정)
-    cand = {"ports": 10, "incidents": 0, "port_days": 30, "incidents_per_port_day": 0.0}
-    assert promotion_gate.check_g3(cand, cand, RetrainPolicy()).status == "SKIP"
+    assert (t.port_days == 30).all() and (t.C0 == "SKIP").all() and (t.C3 == "SKIP").all()
+
+
+def test_gate_table_values_equal_independent_src_calculation(tiny_env):
+    """5노드(50포트) x 3일 = 150포트·일: 표의 인시던트율·판정이 src 함수로 따로 계산한 값과 같다 (T-P3-V1)"""
+    import pandas as pd
+    from src.pipeline.inference import AnomalyDetector
+    from validation.simulator.scenario_generator import ScenarioConfig
+
+    seed, gap = 7, 7.0
+    t = cp.gate_table(str(tiny_env), str(tiny_env), seeds=[seed], nodes=5, densities={"기준": gap})
+    assert len(t) == 4 and (t.port_days == 150).all()
+
+    data = cp.make_data(seed, 5, cp.GATE_DAYS + 1, mean_gap_days=gap)
+    since = pd.Timestamp(ScenarioConfig().start) + pd.Timedelta(days=1)
+    det = AnomalyDetector()                                         # tiny_env 가 PATHS 를 그 폴더로 돌려 둠
+    rp = RetrainPolicy()
+    for ft in cp.TRACKS:
+        scores, th = det.track_scores(data[ft], ft)
+        scores = scores[pd.to_datetime(scores["occur_date"]) >= since]
+        active, _ = promotion_gate.alarm_stats(scores, th, cp.POLICIES["기본"], cp.GATE_DAYS, ft)
+        for kind, factor in (("정상", 1.0), ("과다", 0.5)):
+            cand, _ = promotion_gate.alarm_stats(scores, th * factor, cp.POLICIES["오탐억제형"], cp.GATE_DAYS, ft)
+            row = t[(t.track == ft) & (t.candidate == kind)].iloc[0]
+            assert row["total"] == pytest.approx(cand["incidents_per_port_day"])
+            assert row["active"] == pytest.approx(active["incidents_per_port_day"])
+            assert row["C0"] == promotion_gate.check_g3(cand, active, rp).status
+            assert row["C0"] in ("PASS", "FAIL") and row["C3"] in ("PASS", "FAIL")       # 150포트·일 -> 가드 통과, 판정이 나옴
+            assert 0 <= row["fp"] <= row["total"] + 1e-12                                  # 추정 오탐은 전체 인시던트의 부분

@@ -86,3 +86,22 @@ def test_reload_to_version_without_policy_restores_default_and_priority(tiny_env
     registry.rollback(str(tiny_env), "traffic")
     det.reload_model("traffic")
     assert det.policy_for("traffic") == configured and "traffic" not in det.policies   # 롤백 -> 정책도 복귀
+
+
+def test_dampening_follows_the_dominant_tracks_policy(tiny_env, tiny_scenario, monkeypatch):
+    """P1-3: 두 트랙 결합 등급의 댐프닝은 우세 트랙(traffic 심각도 >= optical 이면 traffic)의 정책을 쓴다.
+    traffic=precision(6/4/3), optical=기본(3/2/1)일 때 행마다 우세 트랙이 바뀌면 적용 정책도 따라간다."""
+    from src.pipeline import inference
+    from src.pipeline.alerting import AlertPolicy, get_preset
+    det = AnomalyDetector()
+    det.policies["traffic"] = get_preset("precision")               # optical 은 메타 없음 -> 기본 정책
+    seen = []
+    real = inference.dampening_step
+    monkeypatch.setattr(inference, "dampening_step", lambda state, level, policy: seen.append(policy) or real(state, level, policy))
+    res = det.detect(df_traffic=tiny_scenario["traffic"], df_optical=tiny_scenario["optical"], latest_only=False)
+
+    expected = [get_preset("precision") if t >= o else AlertPolicy()
+                for t, o in zip(res["traffic_severity"], res["optical_severity"])]
+    assert len(seen) == len(res) == len(expected)
+    assert seen == expected
+    assert get_preset("precision") in seen and AlertPolicy() in seen         # 두 갈래가 실제로 모두 실행됨 (공허한 통과 방지)
