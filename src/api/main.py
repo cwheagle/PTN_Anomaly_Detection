@@ -556,10 +556,11 @@ async def get_model_versions(ft: str = Query(None, pattern="^(traffic|optical)$"
 
 @app.post("/api/model/promote")
 async def promote_model(ft: str = Query(..., pattern="^(traffic|optical)$"), version: str = Query(...),
-                        force: bool = Query(False)):
-    """후보(또는 이전 버전)를 활성화. 현재 모델과 크게 어긋나면(임계치/검증 손실) force=true 없이는 409."""
+                        force: bool = Query(False), reason: str = Query("manual", max_length=100)):
+    """후보(또는 이전 버전)를 활성화. 현재 모델과 크게 어긋나면(임계치/검증 손실) force=true 없이는 409.
+    reason 은 활성화 이력의 사유로 기록(앞뒤 공백 제거, 비면 manual, 최대 100자)."""
     try:
-        result = model_registry.promote(_model_dir(ft), ft, version, force=force)
+        result = model_registry.promote(_model_dir(ft), ft, version, force=force, reason=reason.strip() or "manual")
     except model_registry.PromotionWarning as e:
         raise HTTPException(status_code=409, detail={"message": "승격 검증에서 문제가 발견되었습니다. 확인 후 force=true 로 다시 요청하세요.",
                                                      "warnings": e.warnings, "checks": e.checks})

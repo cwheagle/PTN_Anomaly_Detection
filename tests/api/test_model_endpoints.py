@@ -38,6 +38,7 @@ def client(tmp_path, monkeypatch, api_main):
     monkeypatch.setattr(main.redis_client, "publish", lambda ch, msg: published.append((ch, json.loads(msg))))
     c = TestClient(main.app)
     c.published = published
+    c.model_dir = str(tmp_path)
     return c
 
 
@@ -72,6 +73,29 @@ def test_promote_normal_candidate_then_rollback(client):
     assert back["previous"] == "v3" and back["active"] == "v1"
     assert client.get("/api/model/versions?ft=traffic").json()["traffic"]["active_version"] == "v1"
     assert len(client.published) == 2                          # 승격 + 롤백 각각 리로드 알림
+
+
+def _history(client):
+    return [(h["version"], h["reason"]) for h in reg_mod.load(client.model_dir, "traffic")["history"]]
+
+
+def test_promote_reason_is_recorded_in_history_and_distinct_from_rollback(client):
+    assert client.post("/api/model/promote?ft=traffic&version=v3&reason=%20P1-3%20rehearsal%20").status_code == 200
+    client.post("/api/model/rollback?ft=traffic")
+    assert _history(client)[-2:] == [("v3", "P1-3 rehearsal"), ("v1", "rollback")]
+
+
+def test_promote_without_or_blank_reason_defaults_to_manual(client):
+    client.post("/api/model/promote?ft=traffic&version=v3")
+    client.post("/api/model/rollback?ft=traffic")
+    client.post("/api/model/promote?ft=traffic&version=v3&reason=%20%20")
+    assert [r for _, r in _history(client)] == ["trained", "manual", "rollback", "manual"]
+
+
+def test_promote_reason_is_recorded_with_force_and_too_long_is_rejected(client):
+    assert client.post("/api/model/promote?ft=traffic&version=v2&force=true&reason=forced-ok").status_code == 200
+    assert _history(client)[-1] == ("v2", "forced-ok")
+    assert client.post("/api/model/promote?ft=traffic&version=v3&reason=" + "x" * 101).status_code == 422
 
 
 def test_error_codes(client):
