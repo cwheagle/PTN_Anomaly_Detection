@@ -189,3 +189,44 @@ def test_count_incidents_equals_evaluation_make_incidents():
         ev = sim.assign(nuisance=False)
         inc, _ = make_incidents(ev)
         assert count_incidents(sim) == len(inc) > 0
+
+
+# ──────────────────────────────────────────────
+# T-P3-A1/A2: 모델별 정책 프리셋과 메타 왕복 (P1-3)
+# ──────────────────────────────────────────────
+def test_presets_have_the_documented_values():
+    """T-P3-A1: precision = 오탐 억제형(performance_report 3~5장), default = 코드 기본값"""
+    from src.pipeline.alerting import POLICY_PRESETS, get_preset
+    p = get_preset("precision")
+    assert (p.threshold_scale, p.sigma_k, p.dampening_steps) == (3.0, 2.0, {1: 6, 2: 4, 3: 3})
+    assert (p.dyn_cap, p.severity_decay) == (1.2, 0.5)                       # 건드리지 않는 값은 기본 그대로
+    d = get_preset("default")
+    assert d == AlertPolicy() and (d.threshold_scale, d.sigma_k, d.dampening_steps) == (1.0, 3.0, {1: 3, 2: 2, 3: 1})
+    assert set(POLICY_PRESETS) == {"default", "precision"}
+
+
+def test_unknown_preset_name_is_an_error():
+    from src.pipeline.alerting import get_preset
+    with pytest.raises(ValueError, match="fast"):
+        get_preset("fast")
+
+
+def test_policy_meta_roundtrip_and_string_keys_restored():
+    """T-P3-A2: 메타(JSON 이라 댐프닝 키가 문자열)로 저장했다 읽어도 같은 정책"""
+    import json
+    from src.pipeline.alerting import get_preset, policy_from_meta, policy_to_meta
+    meta = policy_to_meta(get_preset("precision"))
+    assert meta == {"preset": "precision", "sigma_k": 2.0, "dyn_cap": 1.2, "threshold_scale": 3.0,
+                    "severity_decay": 0.5, "dampening_steps": {"1": 6, "2": 4, "3": 3}}
+    restored = policy_from_meta(json.loads(json.dumps(meta)))
+    assert restored == get_preset("precision") and restored.dampening_steps == {1: 6, 2: 4, 3: 3}
+    custom = AlertPolicy(sigma_k=2.5, dampening_steps={1: 2, 2: 2, 3: 1})
+    assert policy_to_meta(custom)["preset"] == "custom"
+    assert policy_from_meta(policy_to_meta(custom)) == custom
+
+
+def test_policy_from_meta_missing_or_partial():
+    from src.pipeline.alerting import policy_from_meta
+    assert policy_from_meta(None) is None and policy_from_meta({}) is None            # 정책 없음 = 모델이 지정하지 않음
+    partial = policy_from_meta({"preset": "precision", "sigma_k": 2.5})               # 빠진 값은 프리셋에서
+    assert (partial.sigma_k, partial.threshold_scale, partial.dampening_steps) == (2.5, 3.0, {1: 6, 2: 4, 3: 3})

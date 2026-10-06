@@ -344,7 +344,7 @@ def test_manual_training_does_not_touch_retrain_state(pipe):
 
 def test_train_endpoint_defaults_to_port_split_and_passes_exclude_flag(env):
     env.client.post("/api/model/train?ft=traffic&exclude_suspect=false")
-    assert env.launched[-1][2:] == (None, "manual", False)
+    assert env.launched[-1][2:] == (None, "manual", False, None)
     r = env.client.post("/api/model/train?ft=optical").json()
     assert r["range"]["mode"] == "port_split" and r["exclude_suspect"] is True
 
@@ -514,3 +514,35 @@ def test_promote_409_detail_includes_gate_checks_and_force_overrides(env):
     detail = r.json()["detail"]
     assert detail["warnings"] == ["[G3] 알람 과다"] and detail["checks"][0]["id"] == "G3"
     assert env.client.post("/api/model/promote?ft=traffic&version=v7&force=true").status_code == 200
+
+
+# T-P3-E1 (P1-3): 모델별 알람 정책 — 학습 결과(후보)에 정책이 짝으로 저장되고, 드리프트 재학습은 활성 모델의 정책을 승계
+def _set_active_policy(env, meta):
+    from src.models import registry
+    _seed_registry(env, with_candidate=False)
+    with registry.transaction(str(env.tmp), "traffic") as reg:
+        registry.find(reg, "v1")["alert_policy"] = meta
+
+
+def test_drift_retraining_inherits_the_active_models_alert_policy(pipe):
+    meta = {"preset": "precision", "sigma_k": 2.0, "dyn_cap": 1.2, "threshold_scale": 3.0, "severity_decay": 0.5,
+            "dampening_steps": {"1": 6, "2": 4, "3": 3}}
+    _set_active_policy(pipe, meta)
+    pipe.set_collector(OK_RESULT)
+    pipe.main.run_training_pipeline("traffic", {}, None, "drift")
+    assert _FakeTrainer.instances[0].kw["alert_policy"] == meta
+
+
+def test_explicit_preset_overrides_inheritance_and_no_policy_means_none(pipe):
+    _set_active_policy(pipe, {"preset": "precision", "sigma_k": 2.0, "threshold_scale": 3.0})
+    pipe.set_collector(OK_RESULT)
+    pipe.main.run_training_pipeline("traffic", {}, None, "manual", True, "default")
+    assert _FakeTrainer.instances[0].kw["alert_policy"]["preset"] == "default"
+    assert _FakeTrainer.instances[0].kw["alert_policy"]["threshold_scale"] == 1.0              # 프리셋의 실제 값이 저장됨
+
+    _FakeTrainer.instances.clear()
+    from src.models import registry
+    with registry.transaction(str(pipe.tmp), "traffic") as reg:
+        reg["versions"][0].pop("alert_policy")                                                 # 활성 모델에 정책 없음
+    pipe.main.run_training_pipeline("traffic", {}, None, "manual")
+    assert _FakeTrainer.instances[0].kw["alert_policy"] is None

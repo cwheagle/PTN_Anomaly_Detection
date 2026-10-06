@@ -207,6 +207,12 @@ def _sample_ports(raw: pd.DataFrame, policy) -> pd.DataFrame:
     return raw[pd.MultiIndex.from_frame(raw[KEY]).isin(val)]
 
 
+def _model_policy(detector, ft, fallback):
+    """그 모델이 쓸 알람 정책 (모델 메타 정책 > 운영 기본 정책). 가짜 탐지기(테스트)는 fallback."""
+    getter = getattr(detector, "policy_for", None)
+    return getter(ft) if getter else fallback
+
+
 def _track_scores(detector, raw, ft, since):
     scores, th = detector.track_scores(raw, ft)
     if scores is None:
@@ -264,8 +270,13 @@ def run_gate(model_dir: str, ft: str, version: str, window, policy, fetch_raw: C
                 if act_det is not None:
                     act_scores, act_th = _track_scores(act_det, raw, ft, window.gate_start)
             days = max(policy.gate_days, 1)
-            cand_stats, cand_alarms = _alarm_stats(cand_scores, cand_th, alert_policy, days, ft)
-            active_stats, act_alarms = _alarm_stats(act_scores, act_th, alert_policy, days, ft)
+            # 후보는 후보의 정책으로, 활성은 활성의 정책으로 계산한다 (운영에서 실제로 날 알람의 비교, P1-3 4.2-6)
+            cand_policy = _model_policy(cand_det, ft, alert_policy)
+            act_policy = _model_policy(act_det, ft, alert_policy) if act_det is not None else None
+            data["alert_policy"] = {"candidate": alerting.policy_to_meta(cand_policy),
+                                    "active": alerting.policy_to_meta(act_policy) if act_policy is not None else None}
+            cand_stats, cand_alarms = _alarm_stats(cand_scores, cand_th, cand_policy, days, ft)
+            active_stats, act_alarms = _alarm_stats(act_scores, act_th, act_policy, days, ft)
             if cand_stats and act_alarms is not None and len(cand_alarms):
                 ca = cand_alarms[cand_alarms["alarm"]][KEY + ["occur_date"]]
                 aa = act_alarms[act_alarms["alarm"]][KEY + ["occur_date"]]

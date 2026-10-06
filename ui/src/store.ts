@@ -125,7 +125,8 @@ export const store = reactive({
 
   // date_params 가 비어 있으면 서버가 최근 구간을 포트 단위 홀드아웃으로 나눠 학습한다 (권장 기본).
   // exclude_suspect=false 이면 장애 의심 구간 자동 제외를 끈다.
-  async trainModel(ft: string, training_config: any = {}, date_params: any = {}, exclude_suspect = true) {
+  // alert_policy: 후보와 짝으로 저장할 알람 정책 프리셋(default / precision). 빈 값이면 서버가 활성 모델의 정책을 승계한다.
+  async trainModel(ft: string, training_config: any = {}, date_params: any = {}, exclude_suspect = true, alert_policy = '') {
     try {
       const res = await axios.post(`/api/model/train`, training_config, {
         params: {
@@ -134,7 +135,8 @@ export const store = reactive({
           train_end: date_params.train_end,
           test_start: date_params.test_start,
           test_end: date_params.test_end,
-          exclude_suspect
+          exclude_suspect,
+          alert_policy: alert_policy || undefined
         }
       })
       return res.data

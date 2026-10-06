@@ -289,3 +289,18 @@ def test_run_gate_default_policy_skips_g3_for_small_holdout_and_records_port_day
 def test_default_policy_min_port_days_is_150():
     from src.pipeline.retrain_policy import RetrainPolicy
     assert RetrainPolicy().gate_min_port_days == 150
+
+
+def test_gate_uses_each_models_own_policy_and_records_both(tiny_env, tiny_scenario):
+    """T-P3-G2: 후보는 후보 정책(precision), 활성은 활성 정책(메타 없음 -> 운영 기본 정책)으로 알람을 계산하고 data 에 기록"""
+    from src.pipeline.alerting import get_preset, policy_to_meta
+    same_weights = registry.create_policy_version(str(tiny_env), "traffic", "v2", policy_to_meta(get_preset("precision"), "precision"))
+    pol = _gate_policy()
+    plain = pg.run_gate(str(tiny_env), "traffic", "v2", _window(), pol, _fetch(tiny_scenario), SENSITIVE)       # v2: 메타 없음 -> SENSITIVE
+    derived = pg.run_gate(str(tiny_env), "traffic", same_weights["version"], _window(), pol, _fetch(tiny_scenario), SENSITIVE)
+    assert derived.data["alert_policy"]["candidate"]["preset"] == "precision"
+    assert derived.data["alert_policy"]["active"] == policy_to_meta(SENSITIVE)                               # 활성 v1 은 메타 없음
+    assert plain.data["alert_policy"]["candidate"] == policy_to_meta(SENSITIVE)
+    # 같은 가중치인데 정책만 달라 후보 알람이 줄어듦 (SENSITIVE: 임계치 x0.02·즉시 알람 / precision: 임계치 x3·길게 확인)
+    assert derived.data["candidate_stats"]["incidents"] < plain.data["candidate_stats"]["incidents"]
+    assert derived.data["active_stats"] == plain.data["active_stats"]                                         # 활성 쪽은 그대로

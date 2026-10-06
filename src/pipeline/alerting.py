@@ -51,6 +51,47 @@ def load_policy():
     return policy
 
 
+# 모델별 알람 정책 프리셋 (P1-3). `precision`(오탐 억제형)은 performance_report.md 3~5장에서 고른 값으로
+# v2 모델과 짝으로만 쓴다(임시 채택, 섀도에서 재확인). `default` 는 코드 기본값(config.ALERT_POLICY 를 보지 않음).
+POLICY_PRESETS = {
+    "default": AlertPolicy(),
+    "precision": AlertPolicy(threshold_scale=3.0, sigma_k=2.0, dampening_steps={1: 6, 2: 4, 3: 3}),
+}
+_POLICY_FIELDS = ("sigma_k", "dyn_cap", "threshold_scale", "severity_decay", "dampening_steps")
+
+
+def get_preset(name):
+    """프리셋 이름 -> AlertPolicy. 알 수 없는 이름은 ValueError (API 에서 422 로 변환)."""
+    if name not in POLICY_PRESETS:
+        raise ValueError(f"알 수 없는 알람 정책 프리셋 '{name}' (허용: {', '.join(POLICY_PRESETS)})")
+    return POLICY_PRESETS[name]
+
+
+def policy_to_meta(policy: AlertPolicy, preset=None) -> dict:
+    """모델 메타/레지스트리에 저장할 dict. 프리셋 이름과 **실제 값을 함께** 저장해 프리셋 정의가 나중에 바뀌어도
+    그 모델의 정책은 고정된다. preset 을 생략하면 프리셋과 값이 같은 것을 찾고, 없으면 'custom'."""
+    if preset is None:
+        preset = next((n for n, p in POLICY_PRESETS.items() if p == policy), "custom")
+    meta = {"preset": preset}
+    for f in _POLICY_FIELDS:
+        v = getattr(policy, f)
+        meta[f] = {str(k): int(x) for k, x in v.items()} if f == "dampening_steps" else float(v)
+    return meta
+
+
+def policy_from_meta(meta):
+    """저장된 dict -> AlertPolicy. 메타가 없거나 비어 있으면 None (= 모델이 정책을 지정하지 않음).
+    값이 일부 빠져 있으면 프리셋(없으면 코드 기본값)의 값으로 채운다. 댐프닝 키는 문자열('1')이어도 복원."""
+    if not meta:
+        return None
+    base = POLICY_PRESETS.get(meta.get("preset"), AlertPolicy())
+    kw = {f: float(meta[f]) for f in _POLICY_FIELDS if f != "dampening_steps" and meta.get(f) is not None}
+    policy = base.with_(**kw)
+    if meta.get("dampening_steps"):
+        policy = policy.with_(dampening_steps={int(k): int(v) for k, v in meta["dampening_steps"].items()})
+    return policy
+
+
 def dynamic_threshold(past_mean, past_std, global_th, policy: AlertPolicy):
     """최종 임계치 (벡터). 전역 임계치(학습 percentile) × scale 이 하한이다."""
     min_th = global_th * policy.threshold_scale

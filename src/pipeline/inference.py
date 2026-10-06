@@ -11,7 +11,8 @@ from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS, FEATURE_GROUPS, SEVERITY_CONFIG
 from src.rca.feature_contribution import FeatureContributionAnalyzer
 from src.rca.rule_engine import RCAEngine
-from src.pipeline.alerting import AlertPolicy, load_policy, dynamic_threshold, severity_from_ratio, dampening_step
+from src.pipeline.alerting import (AlertPolicy, load_policy, dynamic_threshold, severity_from_ratio, dampening_step,
+                                   policy_from_meta)
 
 class AnomalyDetector:
     def __init__(self, policy=None, versions=None, tracks=('traffic', 'optical')):
@@ -20,7 +21,10 @@ class AnomalyDetector:
         tracks  : 로드할 트랙. 게이트는 필요한 트랙만 로드한다. 기본값은 기존 동작(둘 다, 활성 버전).
         """
         # 알람 판정 정책(동적 임계치 k, 전역 임계치 배율, 댐프닝 횟수 등). 기본값은 기존 동작과 동일.
+        # 모델별 정책(P1-3): 로드한 모델 메타에 alert_policy 가 있으면 그 트랙은 메타 정책을 쓰고(우선),
+        # 없으면 아래 self.policy(생성자 인자 > config.ALERT_POLICY > 코드 기본값)로 동작한다.
         self.policy = policy or load_policy()
+        self.policies = {}     # {트랙: 메타에서 읽은 정책} — 메타 정책이 없는 트랙은 키가 없음
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tracks = {} # {f_type: {'model': m, 'proc': p, 'th': t, 'config': c}}
 
@@ -34,6 +38,11 @@ class AnomalyDetector:
         versions = versions or {}
         for ft in tracks:
             self.reload_model(ft, version=versions.get(ft))
+
+    def policy_for(self, ft):
+        """트랙의 현재 알람 정책: 모델 메타 정책 > 기본 정책(self.policy). 트랙 이름의 접두(traffic*)도 허용."""
+        base = 'traffic' if str(ft).startswith('traffic') else ft
+        return self.policies.get(base, self.policy)
 
     @staticmethod
     def _resolve_paths(ft, version=None):
@@ -81,12 +90,14 @@ class AnomalyDetector:
             # 설정 파일(.json) 로드
             cfg = MODEL_CONFIG.copy()
             th = None
-            
+            model_policy = None
+
             if os.path.exists(meta_path):
                 with open(meta_path, 'r') as f:
                     meta = json.load(f)
                     cfg.update(meta.get('config', {}))
                     th = meta.get('threshold', cfg.get('threshold'))
+                    model_policy = policy_from_meta(meta.get('alert_policy'))
                     print(f"[*] Loaded metadata for {ft} model (Trained at: {meta.get('trained_at')})")
 
             # 프로세서 우선 초기화 (파생 변수 차원 확인)
@@ -115,6 +126,12 @@ class AnomalyDetector:
             
             # 메모리 교체
             self.tracks[ft] = {'model': model, 'proc': proc, 'th': th if th is not None else 0.1, 'config': cfg}
+            # 정책도 모델과 함께 교체 (롤백하면 정책이 메타 없음 -> 기본 정책으로 복귀)
+            if model_policy is not None:
+                self.policies[ft] = model_policy
+                print(f"[*] {ft.capitalize()} alert policy from model metadata: {model_policy}")
+            else:
+                self.policies.pop(ft, None)
             print(f"[SUCCESS] {ft.capitalize()} model track (re)loaded. (Threshold: {self.tracks[ft]['th']:.6f})")
             return True
         except Exception as e:
@@ -205,7 +222,7 @@ class AnomalyDetector:
                 past_std = np.std(past_mse, axis=1)
                 
                 # 동적 임계치 = max(μ + k·σ, 전역 임계치 × scale), 과거부터 오류가 지속된 경우 상한 적용 (src/pipeline/alerting.py)
-                final_threshold = dynamic_threshold(past_mean, past_std, track['th'], self.policy)
+                final_threshold = dynamic_threshold(past_mean, past_std, track['th'], self.policy_for(base_ft))
 
                 # [Phase 8] Feature별 기여도 계산용 NumPy 변환
                 inputs_np = inputs.cpu().numpy()
@@ -235,7 +252,7 @@ class AnomalyDetector:
             contributions_json = json.dumps(base_contributions, ensure_ascii=False)
             
             # 심각도 점수 (0~100): ratio = score / 임계치, 1.0 에서 50 (src/pipeline/alerting.py)
-            res[f'{base_ft}_severity'] = severity_from_ratio(res[f'{base_ft}_score'].values, res[f'{base_ft}_threshold'].values, self.policy)
+            res[f'{base_ft}_severity'] = severity_from_ratio(res[f'{base_ft}_score'].values, res[f'{base_ft}_threshold'].values, self.policy_for(base_ft))
             
             # [Phase 6] 추세 분석 (Slope): 포트별 점수 변화율 산출
             # 최근 4시점을 이용해 선형 회귀 기울기 계산 (Rolling)
@@ -505,7 +522,9 @@ class AnomalyDetector:
             state = self.alert_states[port_key]
             
             # 등급별 연속 횟수 요건(기본: CRITICAL 즉시 / MAJOR 2회 / MINOR 3회)을 통과해야 알람 (src/pipeline/alerting.py)
-            passed = dampening_step(state, int(current_level), self.policy)
+            # 두 트랙 결합 등급이라 우세 트랙(get_dominant_metrics 와 같은 규칙)의 정책을 쓴다
+            dom = 'traffic' if row.get('traffic_severity', 0.0) >= row.get('optical_severity', 0.0) else 'optical'
+            passed = dampening_step(state, int(current_level), self.policy_for(dom))
             if current_level == 0:
                 return pd.Series([0, "NORMAL", False])
 

@@ -209,6 +209,14 @@
                     <input type="checkbox" v-model="excludeSuspect[ft as string]" class="mt-0.5" />
                     <span>장애 의심 구간 자동 제외 (자기 알람 이력 + 지속 오류/광 하락/트래픽 급감 규칙). 의심 구간이 20% 를 넘으면 학습을 중단합니다.</span>
                   </label>
+                  <div class="flex items-center gap-3 text-xs text-slate-300">
+                    <span class="font-bold text-slate-400 uppercase tracking-wider">Alert Policy</span>
+                    <select v-model="alertPolicy[ft as string]" class="bg-slate-800 border border-slate-700 rounded-lg p-1.5 text-xs text-slate-200">
+                      <option value="">활성 모델의 정책 승계 (기본)</option>
+                      <option value="default">default — 기본 정책</option>
+                      <option value="precision">precision — 오탐 억제형 (조기 탐지 감소 대가, 모델과 짝으로 배포)</option>
+                    </select>
+                  </div>
                   <div :class="['grid grid-cols-2 gap-6 bg-slate-900/50 p-4 rounded-xl border border-slate-700/50', useRecentWindow[ft as string] ? 'opacity-40 pointer-events-none' : '']">
                     <div class="space-y-3">
                       <span class="text-xs font-bold text-blue-400 uppercase block border-b border-blue-500/20 pb-1">Training</span>
@@ -304,6 +312,7 @@
                       <th class="px-3 py-2">Val Loss</th>
                       <th class="px-3 py-2">Samples</th>
                       <th class="px-3 py-2">Trigger</th>
+                      <th class="px-3 py-2">Policy</th>
                       <th class="px-3 py-2">Gate</th>
                       <th class="px-3 py-2">Status</th>
                       <th class="px-3 py-2 text-right"></th>
@@ -317,7 +326,8 @@
                       <td class="px-3 py-2 font-mono text-slate-300">{{ fmtNum(ver.threshold) }}</td>
                       <td class="px-3 py-2 font-mono text-slate-300">{{ fmtNum(ver.final_val_loss) }}</td>
                       <td class="px-3 py-2 font-mono text-slate-400">{{ ver.samples_used ? ver.samples_used.toLocaleString() : '-' }}</td>
-                      <td class="px-3 py-2 text-slate-400">{{ ver.trigger || '-' }}</td>
+                      <td class="px-3 py-2 text-slate-400">{{ ver.trigger || '-' }}<span v-if="ver.derived_from" class="text-slate-500"> ← {{ ver.derived_from }}</span></td>
+                      <td class="px-3 py-2 text-slate-400">{{ ver.alert_policy?.preset || 'default (메타 없음)' }}</td>
                       <td class="px-3 py-2">
                         <button v-if="ver.gate" @click="toggleGate(ft as string, ver.version)"
                                 :class="['px-2 py-0.5 rounded text-[10px] font-bold uppercase border', gateClass(ver.gate_status)]">{{ ver.gate_status }}</button>
@@ -342,9 +352,10 @@
                     </tr>
                     <!-- 게이트 검사별 값 / 한계 / 메시지 -->
                     <tr v-if="ver.gate && isGateOpen(ft as string, ver.version)" class="bg-slate-900/50">
-                      <td colspan="9" class="px-4 py-3">
+                      <td colspan="10" class="px-4 py-3">
                         <div class="text-[10px] text-slate-500 mb-2">
                           evaluated {{ ver.gate.evaluated_at }} · vs {{ ver.gate.data?.against || 'no active model' }}
+                          <span v-if="ver.gate.data?.alert_policy"> · policy {{ ver.gate.data.alert_policy.candidate?.preset }} vs {{ ver.gate.data.alert_policy.active?.preset || '-' }}</span>
                           <span v-if="ver.suspect_stats"> · suspect {{ (ver.suspect_stats.fraction * 100).toFixed(1) }}% of training rows</span>
                         </div>
                         <div v-for="c in ver.gate.checks" :key="c.id" class="flex items-start gap-3 py-0.5">
@@ -356,7 +367,7 @@
                     </tr>
                     </template>
                     <tr v-if="versionsOf(ft as string).length === 0">
-                      <td colspan="9" class="px-3 py-6 text-center text-slate-500 italic">No versions yet.</td>
+                      <td colspan="10" class="px-3 py-6 text-center text-slate-500 italic">No versions yet.</td>
                     </tr>
                   </tbody>
                 </table>
@@ -406,6 +417,7 @@ const getPastDate = (days: number) => {
 
 const useRecentWindow = ref<Record<string, boolean>>({ traffic: true, optical: true })   // true: 날짜 미지정 -> 서버가 최근 구간 포트 분할
 const excludeSuspect = ref<Record<string, boolean>>({ traffic: true, optical: true })
+const alertPolicy = ref<Record<string, string>>({ traffic: '', optical: '' })   // '' = 활성 모델 정책 승계
 const dateConfigs = ref<Record<string, any>>({
   traffic: { train_start: getPastDate(37), train_end: getPastDate(7), test_start: getPastDate(7), test_end: getPastDate(0) },
   optical: { train_start: getPastDate(37), train_end: getPastDate(7), test_start: getPastDate(7), test_end: getPastDate(0) }
@@ -489,7 +501,7 @@ const handleTrain = async (ft: string) => {
   
   isTraining[ft] = true 
   try {
-    await store.trainModel(ft, trainConfigs.value[ft], dates, excludeSuspect.value[ft])
+    await store.trainModel(ft, trainConfigs.value[ft], dates, excludeSuspect.value[ft], alertPolicy.value[ft])
     showNotification(`${ft.toUpperCase()} training task started.`, 'success')
     await store.fetchModelStatus()
     startPolling() // 학습 시작 시 폴링 시작

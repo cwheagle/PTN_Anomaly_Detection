@@ -146,12 +146,42 @@ def list_versions(model_dir, ft):
     out = []
     for v in reg["versions"]:
         item = {k: v.get(k) for k in ("version", "trained_at", "threshold", "final_val_loss", "baseline_mse", "samples_used",
-                                      "trigger", "suspect_stats")}
+                                      "trigger", "suspect_stats", "alert_policy", "derived_from")}
         item["status"] = status_of(reg, v["version"])
         item["gate"] = v.get("gate")                                  # 승격 게이트 결과 (없으면 None)
         item["gate_status"] = (v.get("gate") or {}).get("status")
         out.append(item)
     return {"active_version": reg["active_version"], "versions": out}
+
+
+def create_policy_version(model_dir, ft, src_version, policy_meta):
+    """같은 가중치·스케일러에 다른 알람 정책만 붙인 **새 후보 버전**을 만든다 (재학습 없음, P1-3 4.2-5).
+
+    새 메타 파일(`<ft>_ae_<새버전>.json`: 원 메타 복사 + alert_policy + derived_from)을 쓰고, 레지스트리 엔트리는
+    원 버전의 model_path/scaler_path 를 그대로 참조한다. 활성 버전·이력은 바꾸지 않는다(후보로만 등록).
+    원 버전의 게이트 결과는 새 정책의 것이 아니므로 가져오지 않는다 — 호출자가 게이트를 다시 돌린다.
+    Returns: 등록된 엔트리"""
+    with transaction(model_dir, ft) as reg:
+        src = find(reg, src_version)
+        if src is None:
+            raise VersionNotFound(f"버전 '{src_version}' 이(가) 없습니다.")
+        _check_files(model_dir, src)
+        new_version = next_version_id(reg)
+        with open(os.path.join(model_dir, src["config_path"]), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["alert_policy"] = policy_meta
+        meta["derived_from"] = src_version
+        new_config = f"{ft}_ae_{new_version}.json"
+        tmp = os.path.join(model_dir, new_config + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=4, ensure_ascii=False)
+        os.replace(tmp, os.path.join(model_dir, new_config))
+        entry = {k: v for k, v in src.items() if k not in ("gate", "is_active", "version", "config_path", "alert_policy",
+                                                          "derived_from", "trigger")}
+        entry.update({"version": new_version, "config_path": new_config, "alert_policy": policy_meta,
+                      "derived_from": src_version, "trigger": "policy", "is_active": False})
+        reg["versions"].append(entry)
+        return entry
 
 
 def format_ratio(ratio) -> str:

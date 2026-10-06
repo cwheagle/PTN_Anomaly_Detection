@@ -299,14 +299,25 @@ def run_gate_for(ft: str, version: str, now: datetime = None) -> dict:
     return gate
 
 
+def _resolve_alert_policy(ft: str, preset: str = None):
+    """학습 결과(후보)와 짝으로 저장할 알람 정책(메타 dict). preset 이 있으면 그 프리셋,
+    없으면 **활성 모델의 정책을 승계**한다(드리프트 재학습 포함 — 학습 설정 재사용과 같은 방식). 활성 모델에도 없으면 None(기본 정책)."""
+    if preset:
+        return alerting.policy_to_meta(alerting.get_preset(preset), preset)
+    reg = model_registry.load(_model_dir(ft), ft)
+    active = model_registry.find(reg, reg.get("active_version")) if reg.get("active_version") else None
+    return (active or {}).get("alert_policy")
+
+
 def run_training_pipeline(ft: str, training_config: dict, date_params: dict = None, trigger: str = "manual",
-                          exclude_suspect: bool = True):
+                          exclude_suspect: bool = True, alert_policy: str = None):
     """백그라운드 학습 실행 (스레드에서 실행되어 이벤트 루프 차단 방지)
 
     date_params 가 없으면 **포트 분할 모드**: 최근까지 포함한 구간 [T-train_days, T] 을 포트 단위 홀드아웃으로
     학습/검증에 나눈다. 있으면 사용자가 지정한 날짜 분할(기존 UI 호환).
     exclude_suspect: 자기 알람 이력·규칙으로 찾은 장애 의심 구간을 학습에서 제외 (의심 비율이 한도를 넘으면 학습 중단).
     결과는 후보로만 저장되며, 드리프트 트리거(trigger='drift')의 결과는 재학습 상태 파일에도 기록된다.
+    alert_policy: 후보와 짝으로 저장할 알람 정책 프리셋 이름. 생략하면 활성 모델의 정책을 승계한다.
     """
     print(f"[*] [BG] Starting training pipeline for {ft} (trigger={trigger})...")
     policy = load_retrain_policy()
@@ -401,7 +412,8 @@ def run_training_pipeline(ft: str, training_config: dict, date_params: dict = No
                 retrain_policy.load_state(model_dir, ft), datetime.now(), outcome="started"))
         trainer_started = True
         trainer = Trainer(feature_type=ft, config_override=training_config, progress_callback=on_progress, activate=False,
-                          trigger=trigger, window_info=window_info, suspect_stats=suspect_stats)
+                          trigger=trigger, window_info=window_info, suspect_stats=suspect_stats,
+                          alert_policy=_resolve_alert_policy(ft, alert_policy))
         active_trainers[ft]["trainers"] = [trainer]
         
         if active_trainers[ft]["stop_requested"]:
@@ -483,14 +495,21 @@ async def train_model(
     train_end: str = Query(None),
     test_start: str = Query(None),
     test_end: str = Query(None),
-    exclude_suspect: bool = Query(True)
+    exclude_suspect: bool = Query(True),
+    alert_policy: str = Query(None)
 ):
     """모델 후보 학습 시작.
 
     날짜를 하나도 지정하지 않으면 최근 train_days 일을 포트 단위 홀드아웃으로 나눠 학습(권장 기본).
     날짜를 지정하면 기존처럼 날짜 분할(누락된 값은 이전 기본값으로 채움).
     exclude_suspect=false 이면 장애 의심 구간 제외를 끈다.
+    alert_policy: 후보와 짝으로 저장할 알람 정책 프리셋(default / precision). 생략하면 활성 모델의 정책을 승계한다.
     """
+    if alert_policy:
+        try:
+            alerting.get_preset(alert_policy)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
     if training_status.get(ft, {}).get("is_training"):
         raise HTTPException(status_code=409, detail=f"{ft} training is already in progress.")
 
@@ -511,12 +530,13 @@ async def train_model(
                       'end': window.end.strftime('%Y-%m-%d %H:%M:%S'), 'val_port_fraction': policy.val_port_fraction}
     # 백그라운드 작업이 시작되기 전의 연타도 막기 위해 즉시 학습 중으로 표시
     training_status[ft]["is_training"] = True
-    background_tasks.add_task(run_training_pipeline, ft, training_config, date_params, "manual", exclude_suspect)
+    background_tasks.add_task(run_training_pipeline, ft, training_config, date_params, "manual", exclude_suspect, alert_policy)
     return {
         "status": "started", 
         "message": f"{ft} model training task queued.",
         "range": range_info,
         "exclude_suspect": exclude_suspect,
+        "alert_policy": alert_policy,
     }
 
 def _broadcast_model_reload(ft: str):
@@ -549,6 +569,28 @@ async def promote_model(ft: str = Query(..., pattern="^(traffic|optical)$"), ver
         raise HTTPException(status_code=409, detail=str(e))
     _broadcast_model_reload(ft)
     return {"status": "success", "track": ft, **result}
+
+
+@app.post("/api/model/policy")
+async def create_policy_version(ft: str = Query(..., pattern="^(traffic|optical)$"), version: str = Query(...),
+                                preset: str = Query(...)):
+    """재학습 없이 같은 가중치에 알람 정책만 바꾼 **새 후보 버전**을 만들고 게이트를 실행한다 (활성 버전은 불변).
+    승격·롤백은 기존 절차를 따른다."""
+    try:
+        policy = alerting.get_preset(preset)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if training_status.get(ft, {}).get("is_training"):
+        raise HTTPException(status_code=409, detail=f"{ft} training is in progress.")
+    try:
+        entry = model_registry.create_policy_version(_model_dir(ft), ft, version, alerting.policy_to_meta(policy, preset))
+    except model_registry.VersionNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except model_registry.RegistryError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    gate = await asyncio.to_thread(run_gate_for, ft, entry["version"])
+    return {"status": "success", "track": ft, "version": entry["version"], "derived_from": version,
+            "alert_policy": preset, "gate": gate}
 
 
 @app.post("/api/model/gate")

@@ -15,7 +15,7 @@ from src.config import MODEL_CONFIG, PATHS
 
 class Trainer:
     def __init__(self, feature_type='traffic', config_override=None, progress_callback=None, activate=True,
-                 trigger='manual', window_info=None, suspect_stats=None):
+                 trigger='manual', window_info=None, suspect_stats=None, alert_policy=None):
         self.feature_type = feature_type
         self.progress_callback = progress_callback
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,6 +30,8 @@ class Trainer:
         self.trigger = trigger
         self.window_info = window_info
         self.suspect_stats = suspect_stats
+        # 모델과 짝으로 배포할 알람 정책 (alerting.policy_to_meta 형식 dict). None 이면 메타에 기록하지 않음(= 기본 정책)
+        self.alert_policy = alert_policy
 
         # 1. 설정값 병합 (기본값 + 외부 주입값)
         self.config = MODEL_CONFIG.copy()
@@ -247,6 +249,8 @@ class Trainer:
             "suspect_stats": self.suspect_stats,
             **{k: meta.get(k) for k in ("baseline_port_median", "baseline_port_p90", "baseline_ports", "baseline_source")},
         }
+        if self.alert_policy:
+            registry_entry["alert_policy"] = self.alert_policy
         with registry.transaction(model_dir, self.feature_type) as reg:
             self.activated = registry.add_version(reg, registry_entry, self.activate)
             
@@ -319,6 +323,8 @@ class Trainer:
             "training_window": self.window_info,
             "suspect_stats": self.suspect_stats,
         }
+        if self.alert_policy:
+            meta["alert_policy"] = self.alert_policy
         meta.update(extra or {})
         
         # 모델명과 동일하게 .json 확장자로 저장 (예: traffic_ae.pth -> traffic_ae.json)
