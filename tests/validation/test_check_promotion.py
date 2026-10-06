@@ -158,3 +158,37 @@ def test_gate_table_values_equal_independent_src_calculation(tiny_env):
             assert row["C0"] == promotion_gate.check_g3(cand, active, rp).status
             assert row["C0"] in ("PASS", "FAIL") and row["C3"] in ("PASS", "FAIL")       # 150포트·일 -> 가드 통과, 판정이 나옴
             assert 0 <= row["fp"] <= row["total"] + 1e-12                                  # 추정 오탐은 전체 인시던트의 부분
+
+
+# ── V2 후속: 정책 재선택 ──
+def _cand(f1, early, fp, scale=1.0):
+    return {"scale": scale, "sigma": 3.0, "damping": "default(3/2/1)", "f1": f1, "early": early, "fp": fp, "auprc": 0.6, "prec": 0.5, "lead": 100.0}
+
+
+def test_pick_policy_applies_the_fixed_rule_and_never_relaxes_it():
+    t = pd.DataFrame([_cand(0.90, 0.69, 0.01, 1), _cand(0.85, 0.80, 0.021, 2),        # F1 은 높지만 규칙 위반(조기 < 70% / 오탐 > 0.02)
+                      _cand(0.80, 0.70, 0.02, 3), _cand(0.75, 0.90, 0.00, 4)])          # 경계값(조기 0.70, 오탐 0.02)은 충족
+    assert cp.pick_policy(t)["scale"] == 3                                               # 충족 중 F1 최대
+    assert cp.pick_policy(t.iloc[[0, 1]]) is None                                         # 충족 없음 -> 완화하지 않고 None
+
+
+def test_grid_is_the_pre_registered_p0_2_selection_space():
+    assert cp.GRID_SCALES == (0.8, 1.0, 1.25, 1.5, 2.0, 3.0) and cp.GRID_SIGMAS == (2.0, 3.0, 4.0)
+    assert (cp.SELECT_MIN_EARLY, cp.SELECT_MAX_FP) == (0.70, 0.02)
+    c = cp.policy_candidates()
+    assert len(c) == 6 * 3 * 7
+    assert any(x["threshold_scale"] == 3.0 and x["sigma_k"] == 2.0 and x["damping"] == "heavy(6/4/3)" for x in c)   # 현재 precision 포함
+
+
+def test_reselect_refuses_validation_seeds_before_any_work(tiny_model_dir):
+    with pytest.raises(ValueError, match="개발 시드"):
+        cp.reselect_policy({"m": str(tiny_model_dir)}, seeds=[7, 23], nodes=1, days=3)
+
+
+def test_reselect_runs_on_dev_seeds_and_chosen_row_satisfies_the_rule(tiny_model_dir):
+    cands = [c for c in cp.policy_candidates() if c["sigma_k"] == 3.0 and c["damping"] == "default(3/2/1)"][:3]
+    table, chosen = cp.reselect_policy({"m": str(tiny_model_dir)}, seeds=[7], nodes=1, days=4, candidates=cands)
+    assert len(table) == 3 and list(table["f1"]) == sorted(table["f1"], reverse=True)
+    if chosen is not None:
+        assert chosen["early"] >= 0.70 and chosen["fp"] <= 0.02
+        assert cp.policy_from_row(chosen).threshold_scale == chosen["scale"]

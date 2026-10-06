@@ -15,6 +15,8 @@ U4(C3 를 게이트에 구현)를 하게 되면 두 함수를 src/models/promoti
   eval   (V1·V2)     학습한 모델을 검증 시드에서 평가: AUPRC·이벤트 지표, 정책 기본 ↔ 오탐 억제형
   gate   (V3)        게이트 G3 판정식 비교: 현재 식(C0) ↔ 추정 오탐 보정 식(C3), 정상/과다 알람 후보
   vs-v1  (V4)        v1 + 기본 정책 ↔ 새 모델 + 오탐 억제형, 기준선 병기
+  select (V2 후속)   V2 미달 시 개발 시드 7·11 로만 정책 재선택 (선택 규칙: 조기 탐지 >= 70% 이고 오탐 <= 0.02 중 F1 최대)
+  confirm (V2 후속)  선택된 후보 정책을 검증 시드에서 **한 번만** 확인 (기본 / 기존 오탐억제형 / 후보 병기)
 
 사용법:
   python validation/cli/check_promotion.py train --out validation/runs/promo_s101 --data-seed 101 --train-seed 0
@@ -55,6 +57,11 @@ V2_MAX_FP = 0.02                    # 오탐 억제형의 오탐 평균 상한 (
 V4_MIN_DIFF = 0.03                  # v1 대비 AUPRC·F1 상승, 오탐 감소 폭 (각각 > 0.03)
 EXCESS_THRESHOLD_FACTOR = 0.5       # V3 과다 알람 후보 = 임계치 x 0.5
 GATE_DAYS = 3                       # 판정 3일 + 규칙 B 기준선 1일 (설계서 V3 세부)
+
+# 정책 재선택(V2 후속): 선택 규칙은 performance_report.md 3장과 같고, 탐색 공간은 그 선택에 쓴 P0-2 격자
+# (tune_alerting.py 기본값: 배율 6 x σ 3 x 댐프닝 7). 이 공간 밖으로 넓히지 않는다.
+SELECT_MIN_EARLY, SELECT_MAX_FP = 0.70, 0.02
+GRID_SCALES, GRID_SIGMAS = (0.8, 1.0, 1.25, 1.5, 2.0, 3.0), (2.0, 3.0, 4.0)
 
 POLICIES = {"기본": alerting.get_preset("default"), "오탐억제형": alerting.get_preset("precision")}
 
@@ -193,10 +200,11 @@ def judge_v1(df, models):
     return {"auprc": float(auprc), "f1_precision": float(f1), "pass": bool(auprc >= V1_MIN_AUPRC and f1 >= V1_MIN_F1)}
 
 
-def judge_v2(df, models):
-    """V2: 오탐억제형 오탐 평균 <= 0.02 그리고 이벤트 F1 평균 > 기본 정책 F1 평균 (조기 탐지·리드타임은 병기)"""
+def judge_v2(df, models, policy="오탐억제형"):
+    """V2: 오탐억제형 오탐 평균 <= 0.02 그리고 이벤트 F1 평균 > 기본 정책 F1 평균 (조기 탐지·리드타임은 병기).
+    policy: 판정할 정책 이름 (재선택 후보를 같은 기준으로 판정할 때 지정)"""
     m = df[df.model.isin(models)]
-    p, d = m[m.policy == "오탐억제형"], m[m.policy == "기본"]
+    p, d = m[m.policy == policy], m[m.policy == "기본"]
     out = {"fp_precision": float(p["fp"].mean()), "f1_precision": float(p["f1"].mean()), "f1_default": float(d["f1"].mean()),
            "early_precision": float(p["early"].mean()), "early_default": float(d["early"].mean()),
            "lead_precision": float(p["lead"].median()), "lead_default": float(d["lead"].median())}
@@ -214,6 +222,51 @@ def judge_v4(df, v1_name, v2_models):
          "fp": float(old["fp"].mean() - new["fp"].mean())}        # 오탐은 줄어든 폭
     d["pass"] = bool(all(v > V4_MIN_DIFF for v in d.values()))
     return d
+
+
+# ─────────────────────────────────────────────
+# V2 후속: 정책 재선택 (개발 시드로만) / 검증 시드 1회 확인
+# ─────────────────────────────────────────────
+def policy_candidates():
+    """선택 공간: P0-2 격자 (배율 x σ x 댐프닝 프리셋). 이름 열로 부분집합을 구분할 수 있게 값을 함께 반환"""
+    from validation.evaluation.tuning import DAMPING_PRESETS, policy_grid
+    return list(policy_grid(threshold_scales=GRID_SCALES, sigma_ks=GRID_SIGMAS, damping_presets=DAMPING_PRESETS))
+
+
+def reselect_policy(models, seeds, nodes=6, days=14, candidates=None, log=None):
+    """개발 시드에서 후보 정책마다 (모델 x 시드) 평균 지표를 구하고 선택 규칙으로 하나를 고른다.
+    검증 시드가 섞이면 거부한다(lessons #30). Returns: (표, 선택된 행 또는 None)"""
+    if set(int(x) for x in seeds) & set(VAL_SEEDS):
+        raise ValueError(f"재선택은 개발 시드 {DEV_SEEDS} 로만 한다 (검증 시드 {VAL_SEEDS} 는 선택 이후 확인용): {list(seeds)}")
+    candidates = candidates or policy_candidates()
+    rows = []
+    for seed in seeds:
+        data = make_data(seed, nodes, days)
+        for name, mdir in models.items():
+            scores = score_data(data, mdir)
+            for c in candidates:
+                m = metrics_row(evaluate_alarms(simulate_alarms(scores, c["policy"]), data))
+                rows.append({"scale": c["threshold_scale"], "sigma": c["sigma_k"], "damping": c["damping"],
+                             "model": name, "seed": seed, **m})
+            if log:
+                log(f"seed {seed} model {name}: {len(candidates)} policies done")
+    df = pd.DataFrame(rows)
+    table = (df.groupby(["scale", "sigma", "damping"])[["auprc", "f1", "early", "fp", "prec", "lead"]]
+             .mean().reset_index().sort_values("f1", ascending=False).reset_index(drop=True))
+    return table, pick_policy(table)
+
+
+def pick_policy(table):
+    """선택 규칙(사전 고정): 조기 탐지 >= 70% 이고 오탐 <= 0.02 인 정책 중 이벤트 F1 최대. 없으면 None (기준을 완화하지 않음).
+    table 은 F1 내림차순으로 정렬되어 있어야 한다 (동률이면 앞선 행)."""
+    ok = table[(table["early"] >= SELECT_MIN_EARLY) & (table["fp"] <= SELECT_MAX_FP)]
+    return None if ok.empty else ok.iloc[0]
+
+
+def policy_from_row(row):
+    from validation.evaluation.tuning import DAMPING_PRESETS
+    return AlertPolicy(threshold_scale=float(row["scale"]), sigma_k=float(row["sigma"]),
+                       dampening_steps=dict(DAMPING_PRESETS[row["damping"]]))
 
 
 # ─────────────────────────────────────────────
@@ -334,9 +387,66 @@ def cmd_vs_v1(a):
     print(f"\n[V4] AUPRC +{d['auprc']:.3f}, 이벤트 F1 +{d['f1']:.3f}, 오탐 -{d['fp']:.3f} (각 > {V4_MIN_DIFF}) -> {'PASS' if d['pass'] else 'FAIL'}")
 
 
+def cmd_select(a):
+    import json
+    models = _models_arg(a.models)
+    seeds = [int(s) for s in a.seeds.split(",")]
+    table, chosen = reselect_policy(models, seeds, a.nodes, a.days, log=lambda m: print(f"[*] {m}", flush=True))
+    pd.set_option("display.width", 200)
+    if a.out_csv:
+        table.to_csv(a.out_csv, index=False)
+    print(f"== 개발 시드 {seeds} x 모델 {list(models)} 평균, 선택 규칙: 조기 >= {SELECT_MIN_EARLY:.0%} & 오탐 <= {SELECT_MAX_FP} 중 F1 최대 ==")
+    print(f"후보 {len(table)}개 중 규칙 충족 {int(((table['early'] >= SELECT_MIN_EARLY) & (table['fp'] <= SELECT_MAX_FP)).sum())}개")
+    print("\n[F1 상위 8 (규칙 무관)]"); print(table.head(8).round(3).to_string(index=False))
+    ok = table[(table["early"] >= SELECT_MIN_EARLY) & (table["fp"] <= SELECT_MAX_FP)]
+    print("\n[규칙 충족 후보 상위 8]"); print(ok.head(8).round(3).to_string(index=False) if len(ok) else "(없음)")
+    # 설계 4.4 의 부분집합: 현재 프리셋 2종(default, precision)의 임계치 배율 격자
+    sub = table[((table.sigma == 3.0) & (table.damping == "default(3/2/1)")) | ((table.sigma == 2.0) & (table.damping == "heavy(6/4/3)"))]
+    sub_ok = sub[(sub["early"] >= SELECT_MIN_EARLY) & (sub["fp"] <= SELECT_MAX_FP)]
+    print("\n[부분집합: 프리셋 2종 x 배율 격자 — 규칙 충족]"); print(sub_ok.round(3).to_string(index=False) if len(sub_ok) else "(없음)")
+    cur = table[(table.scale == 3.0) & (table.sigma == 2.0) & (table.damping == "heavy(6/4/3)")]
+    print("\n[현재 오탐억제형 프리셋(3.0/σ2/heavy)의 개발 시드 값]"); print(cur.round(3).to_string(index=False))
+    if chosen is None:
+        print("\n[결과] 선택 규칙을 만족하는 정책이 없음 — 기준을 완화하지 않고 보고 후 중단")
+        return
+    print(f"\n[선택] 배율 {chosen['scale']:g} / σ {chosen['sigma']:g} / 댐프닝 {chosen['damping']}  "
+          f"(F1 {chosen['f1']:.3f}, 조기 {chosen['early']:.1%}, 오탐 {chosen['fp']:.3f}, 리드 {chosen['lead']:.0f}분)")
+    if a.out_json:
+        json.dump({"scale": float(chosen["scale"]), "sigma": float(chosen["sigma"]), "damping": chosen["damping"]},
+                  open(a.out_json, "w", encoding="utf-8"), ensure_ascii=False)
+
+
+def cmd_confirm(a):
+    import json
+    models = _models_arg(a.models)
+    sel = json.load(open(a.policy_json, encoding="utf-8"))
+    cand = policy_from_row(sel)
+    policies = {"기본": POLICIES["기본"], "오탐억제형(기존)": POLICIES["오탐억제형"], "후보": cand}
+    df = evaluate_models(models, [int(s) for s in a.seeds.split(",")], a.nodes, a.days, policies=policies)
+    print(f"== 검증 시드 {a.seeds} 평균±표준편차 (모델 {list(models)}) | 후보 = 배율 {sel['scale']:g}/σ {sel['sigma']:g}/{sel['damping']} ==")
+    print(_fmt(df, ["auprc", "f1", "early", "fp", "prec", "lead"]))
+    for name in ("오탐억제형(기존)", "후보"):
+        j = judge_v2(df, list(models), policy=name)
+        print(f"[V2 판정 — {name}] 오탐 {j['fp_precision']:.3f} (<= {V2_MAX_FP}), F1 {j['f1_precision']:.3f} > 기본 {j['f1_default']:.3f}; "
+              f"조기 {j['early_precision']:.1%} (기본 {j['early_default']:.1%}), 리드 {j['lead_precision']:.0f}분 (기본 {j['lead_default']:.0f}분) -> {'PASS' if j['pass'] else 'FAIL'}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sl = sub.add_parser("select")
+    sl.add_argument("--models", required=True)
+    sl.add_argument("--seeds", default=",".join(map(str, DEV_SEEDS)))
+    sl.add_argument("--nodes", type=int, default=6)
+    sl.add_argument("--days", type=int, default=14)
+    sl.add_argument("--out-csv", default=None)
+    sl.add_argument("--out-json", default=None, help="선택된 정책 저장 (confirm 입력)")
+    cf = sub.add_parser("confirm")
+    cf.add_argument("--models", required=True)
+    cf.add_argument("--policy-json", required=True)
+    cf.add_argument("--seeds", default=",".join(map(str, VAL_SEEDS)))
+    cf.add_argument("--nodes", type=int, default=6)
+    cf.add_argument("--days", type=int, default=14)
     t = sub.add_parser("train")
     t.add_argument("--out", required=True)
     t.add_argument("--data-seed", type=int, default=TRAIN_SEEDS[0])
@@ -363,7 +473,8 @@ def main():
     v.add_argument("--nodes", type=int, default=6)
     v.add_argument("--days", type=int, default=14)
     a = ap.parse_args()
-    {"train": cmd_train, "eval": cmd_eval, "gate": cmd_gate, "vs-v1": cmd_vs_v1}[a.cmd](a)
+    {"train": cmd_train, "eval": cmd_eval, "gate": cmd_gate, "vs-v1": cmd_vs_v1,
+     "select": cmd_select, "confirm": cmd_confirm}[a.cmd](a)
 
 
 if __name__ == "__main__":
