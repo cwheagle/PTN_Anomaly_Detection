@@ -1,7 +1,7 @@
 # P1-3 설계: 개선 모델(v2) 승격 · 모델별 알람 정책 · 게이트 G3 보정
 
 > 작성: 2026-10-06 (architect) · 근거: plan.md Backlog **P1-3** 행, `docs/performance_report.md` 2~7장, `docs/design/p1_1_retrain_pipeline.md` 2.6·8장, `docs/report_package.md` 4.4·5.3·6.1, lessons #22·#23·#24·#28·#29·#30·#31·#33·#34
-> 상태: **확정(2026-10-06, 사용자 승인)** — 11장 결정 D1~D5 확정. 구현은 dev, 8장 구현 단위 순서대로.
+> 상태: **확정(2026-10-06, 사용자 승인)** — 11장 결정 D1~D5 확정. 구현은 dev, 8장 구현 단위 순서대로. 보완(2026-10-06): U1·U2 구현 중 해석한 부분(4.2 메타 필드·정책 전용 버전, 4.3 혼합 정책 댐프닝, 6장 V1 주의, 8장 U4 조건)을 확정 반영. 합격 기준 값은 변경 없음.
 > 모든 성능 수치는 **시뮬레이션 기준**이며 실데이터 검증이 아니다. 실데이터 재확인은 섀도 운영(4.4, `docs/report_package.md` 5장)에서 한다.
 
 ---
@@ -86,14 +86,24 @@ plan.md P1-3: "실험 모델 승격(v2): 정상 구간 정제를 학습 파이�
 
 ### 4.2 동작 규칙 (B3)
 1. 정책 결정 순서(트랙별): **활성 모델 메타의 `alert_policy`** → 없으면 `config.ALERT_POLICY` → 없으면 `AlertPolicy()` 코드 기본값. v1 은 메타에 정책이 없으므로 지금과 똑같이 동작한다(골든 테스트 불변).
-2. 메타 형식: `"alert_policy": {"preset": "precision", "threshold_scale": 3.0, "sigma_k": 2.0, "dampening_steps": {"1": 6, "2": 4, "3": 3}}` — 프리셋 이름과 **실제 값을 함께** 저장(프리셋 정의가 나중에 바뀌어도 그 모델의 정책은 고정).
+2. 메타 형식: 프리셋 이름과 **`AlertPolicy` 의 5개 필드 전부**(`sigma_k`, `dyn_cap`, `threshold_scale`, `severity_decay`, `dampening_steps`)를 실제 값으로 저장한다(2026-10-06 구현 반영, `alerting.policy_to_meta`). 예: `"alert_policy": {"preset": "precision", "sigma_k": 2.0, "dyn_cap": 1.2, "threshold_scale": 3.0, "severity_decay": 0.5, "dampening_steps": {"1": 6, "2": 4, "3": 3}}`. 프리셋 정의가 나중에 바뀌어도 그 모델의 정책은 고정된다. 값이 프리셋과 일치하지 않으면 `preset="custom"`.
+   - 복원(`alerting.policy_from_meta`): 메타가 없거나 비면 `None`(= 정책 미지정 → 4.2-1 우선순위). 일부 필드가 빠져 있으면 **그 프리셋(없으면 코드 기본값)의 값으로 보충**한다. `dampening_steps` 키는 문자열(`"1"`)이어도 복원.
 3. 추론기(`AnomalyDetector`)는 정책을 **트랙별로** 보관하고, `reload_model(ft, version)` 때 그 버전 메타의 정책으로 바꾼다. Consumer 는 이미 Redis `reload` 로 리로드하므로 승격·롤백 시 정책도 함께 바뀐다(재시작 불필요).
 4. 학습 시 지정: `/api/model/train` 에 `alert_policy`(프리셋 이름, 선택). 지정하지 않으면 **활성 모델의 정책을 이어받는다**(드리프트 재학습 포함, 학습 설정 재사용과 같은 방식). 활성 모델에도 없으면 메타에 기록하지 않는다(= 기본 정책).
-5. **정책만 바꾼 새 버전**: 같은 가중치로 정책만 바꿔야 할 때(섀도 결과 반영 등, 4.4) 재학습하지 않고 `POST /api/model/policy?ft&version&preset` 로 **새 후보 버전**(가중치·스케일러 파일은 원 버전 참조, 메타의 `alert_policy` 만 다름, `derived_from` 기록)을 만들고 게이트를 다시 돈다. 한 번에 한 가지(정책만) 바꾸는 경로이고, 레지스트리 이력·롤백이 그대로 적용된다.
+5. **정책만 바꾼 새 버전**: 같은 가중치로 정책만 바꿔야 할 때(섀도 결과 반영 등, 4.4) 재학습하지 않고 `POST /api/model/policy?ft&version&preset` 로 **새 후보 버전**(가중치·스케일러 파일은 원 버전 참조, 메타의 `alert_policy` 만 다름, `derived_from` 기록)을 만든다. 한 번에 한 가지(정책만) 바꾸는 경로이고, 레지스트리 이력·롤백이 그대로 적용된다.
+   - 확정(2026-10-06, 구현 반영): 새 버전의 `trigger` 는 **`policy`**, `trained_at` 은 **원 버전의 값을 유지**(가중치를 학습한 시점이므로). 이 API 는 게이트를 **동기로 실행**하고 생성된 버전과 게이트 결과를 함께 반환한다.
+   - **UI 에는 정책 전용 버전 만들기 버튼이 없다(이번 범위 밖).** API 로만 만든다. UI 는 버전 목록에서 정책과 `trigger=policy` 를 표시만 한다.
 6. 게이트(G3)는 **후보는 후보 정책으로, 활성은 활성 정책으로** 알람을 계산한다(= 운영에서 실제로 날 알람의 비교). 게이트 `data` 에 두 정책을 기록한다.
 
 ### 4.3 트랙 간 정책
-정책은 두 트랙 결합 결과로 선택했다(`tune_alerting.py`). B3 는 트랙별 저장이지만 v2 는 **두 트랙 모두 precision** 으로 시작한다(트랙별로 다른 정책은 근거 데이터가 없어 범위 밖).
+정책은 두 트랙 결합 결과로 선택했다(`tune_alerting.py`). B3 는 트랙별 저장이지만 v2 는 **두 트랙 모두 precision** 으로 시작한다(트랙별로 다른 정책을 의도적으로 쓰는 것은 근거 데이터가 없어 범위 밖).
+
+**두 트랙의 정책이 다를 때(확정 2026-10-06)** — 트랙을 따로 승격·롤백하면 일시적으로 생긴다(예: traffic=v2+precision, optical=v1+기본).
+- 트랙별 단계(동적 임계치 `sigma_k`·`dyn_cap`·`threshold_scale`, 심각도 `severity_decay`)는 **각 트랙의 정책**을 쓴다.
+- 포트의 결합 등급에 적용하는 **댐프닝(연속 횟수)은 우세 트랙의 정책**을 쓴다. 우세 트랙 규칙은 통합 지표와 같다(`get_dominant_metrics`: traffic 심각도 ≥ optical 심각도이면 traffic, 같으면 traffic). 구현: `src/pipeline/inference.py` `apply_dampening`.
+- 근거: 결합 등급 자체가 우세 트랙의 심각도에서 나오므로(lessons #10), 그 등급을 만든 모델과 짝인 정책으로 거르는 것이 정책-모델 짝 원칙과 맞다. 우세 트랙이 스텝마다 바뀌면 같은 연속 카운트에 다른 요구 횟수가 적용될 수 있으나, 혼합 상태는 트랙별 승격 사이의 과도기에만 생긴다.
+- 검토한 대안: (a) 두 정책 중 **더 엄격한 쪽**(등급별 요구 횟수의 최댓값) — 기본 정책 모델의 알람까지 오탐 억제형 기준으로 늦춰 그 모델의 검증된 동작과 달라짐, (b) **트랙별 댐프닝 상태를 따로** 두고 결합 — 상태 구조와 기존 골든·동등성 테스트를 바꿔야 해 범위가 큼. 둘 다 채택하지 않음.
+- 두 트랙의 정책이 같으면(v1+v1, v2+v2) 이 규칙은 결과에 영향이 없다.
 
 ### 4.4 실데이터 섀도에서의 재확인과 재조정 (report_package 6.1 과의 정합)
 정책 수치는 시뮬레이션이므로 **실데이터 섀도 운영에서 재확인**한다. 섀도 운영 절차(`docs/report_package.md` 5장)와 다음과 같이 맞춘다.
@@ -145,7 +155,7 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. PASS
 
 | 단계 | 바꾸는 것 (나머지 고정) | 합격 기준 |
 |---|---|---|
-| **V1 운영 레시피** | 학습 경로만: 실험 레시피(정답 제외·시간 분할) → **운영 레시피**(A∪B 의심 구간 제외 + 포트 홀드아웃 10%, `DataCollector`·`train_window`·`Trainer` 그대로). A(자기 알람)는 v1 을 활성 모델로 가정해 산출 | 기준선 = P1-1 7.2 `auto`(AUPRC 평균 0.637, 오탐 억제형 이벤트 F1 평균 0.805). **AUPRC 평균 ≥ 0.587 그리고 오탐 억제형 이벤트 F1 평균 ≥ 0.755** (각각 −0.05). 미달이면 원인(포트 홀드아웃 임계치 차이 등)을 보고하고 정책을 다시 고르지 않음 |
+| **V1 운영 레시피** | 학습 경로만: 실험 레시피(정답 제외·시간 분할) → **운영 레시피**(A∪B 의심 구간 제외 + 포트 홀드아웃 10%, `DataCollector`·`train_window`·`Trainer` 그대로). A(자기 알람)는 v1 을 활성 모델로 가정해 산출. **주의**: AUPRC 는 "정책 무관" 으로 분류하지만, 여기서 쓰는 점수에는 정책의 동적 임계치가 섞이므로(`threshold_scale`·`sigma_k` 등에 따라 순위가 약간 달라짐) **정책에 약하게 의존**한다. 기준선(7.2)과 같은 정책 설정으로 계산한 값끼리 비교한다 | 기준선 = P1-1 7.2 `auto`(AUPRC 평균 0.637, 오탐 억제형 이벤트 F1 평균 0.805). **AUPRC 평균 ≥ 0.587 그리고 오탐 억제형 이벤트 F1 평균 ≥ 0.755** (각각 −0.05). 미달이면 원인(포트 홀드아웃 임계치 차이 등)을 보고하고 정책을 다시 고르지 않음 |
 | **V2 정책** | 정책만: 기본 ↔ 오탐 억제형 (V1 모델) | 오탐 억제형에서 **오탐 평균 ≤ 0.02 건/포트·일 그리고 이벤트 F1 평균 > 기본 정책 F1 평균**. 조기 탐지율·리드타임 중앙값은 두 정책 모두 **병기**(기준 없음, 대가 보고). 미달이면 개발 시드 7·11 에서 같은 선택 규칙(조기 탐지 ≥ 70%·오탐 ≤ 0.02 중 F1 최대, `performance_report.md` 3장)으로 정책을 다시 골라 검증 시드로 한 번만 확인 → 그래도 미달이면 보고 |
 | **V3 G3 판정식** | 게이트 판정식만 (V1 모델, V2 정책 고정) | 아래 V3 세부. **정상 후보는 모든 조건에서 PASS, 과다 알람 후보는 모든 조건에서 FAIL** |
 | **V4 v1 대비** | 운영 전후 조합: **v1 + 기본 정책** ↔ **v2(V1 모델) + 오탐 억제형** | 검증 시드에서 v2 가 **AUPRC 평균 높음, 이벤트 F1 평균 높음, 오탐 평균 낮음** (세 가지 모두, 각 차이 > 0.03). 고정 임계치·롤링 규칙·항상 알람을 같은 채점으로 병기(#23). v1 은 `models/` 의 현재 v1 파일 |
@@ -186,11 +196,11 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. PASS
 ## 8. 구현 단위 (dev, 순서대로; 각 단위 끝에 전체 pytest)
 | 순서 | 단위 | 변경 파일 | 테스트 ID | 완료 조건 |
 |---|---|---|---|---|
-| 1 | **U1 — 모델별 정책 (B3)** | `src/pipeline/alerting.py` (프리셋 정의 `POLICY_PRESETS`, `policy_from_meta`/`policy_to_meta`), `src/pipeline/inference.py` (트랙별 정책, `reload_model` 시 메타 정책 적용, 우선순위 4.2-1), `src/models/trainer.py` (메타·레지스트리에 `alert_policy`), `src/models/registry.py` (정책 전용 버전 생성, `derived_from`), `src/models/promotion_gate.py` (후보·활성 각자 정책, `data` 에 정책 기록), `src/api/main.py` (`/api/model/train` 의 `alert_policy`, 활성 정책 승계, `POST /api/model/policy`), `ui/` 모델 관리 (학습 폼 정책 선택, 버전 목록 정책 표시), `src/config.py.example` (ALERT_POLICY 주석에 "모델 메타 정책이 우선" 설명) | T-P3-A1, A2, I1, I2, I3, T1, R1, G2, E1, E2 | 정책 메타 없는 모델의 출력이 기존 골든과 동일(T-P3-I1) |
+| 1 | **U1 — 모델별 정책 (B3)** | `src/pipeline/alerting.py` (프리셋 정의 `POLICY_PRESETS`, `policy_from_meta`/`policy_to_meta`), `src/pipeline/inference.py` (트랙별 정책, `reload_model` 시 메타 정책 적용, 우선순위 4.2-1), `src/models/trainer.py` (메타·레지스트리에 `alert_policy`), `src/models/registry.py` (정책 전용 버전 생성, `derived_from`), `src/models/promotion_gate.py` (후보·활성 각자 정책, `data` 에 정책 기록), `src/api/main.py` (`/api/model/train` 의 `alert_policy`, 활성 정책 승계, `POST /api/model/policy`), `ui/` 모델 관리 (학습 폼 정책 선택, 버전 목록 정책·`trigger` 표시. 정책 전용 버전 만들기 버튼은 없음), `src/config.py.example` (ALERT_POLICY 주석에 "모델 메타 정책이 우선" 설명) | T-P3-A1, A2, I1, I2, I3, I4, T1, R1, G2, E1, E2 | 정책 메타 없는 모델의 출력이 기존 골든과 동일(T-P3-I1) |
 | 2 | **U2 — 검증 도구** | `validation/cli/check_promotion.py` (신규: V1 운영 레시피 학습, V2 정책 비교, V3 게이트 식 비교, V4 v1 대비. 판정 함수는 `src` 것을 호출) | T-P3-V1 | 작은 시드로 끝까지 동작 |
 | 3 | **U3 — V1·V2 실행** | 코드 변경 없음. 결과를 architect 가 `docs/performance_report.md` 8장에 기록 | — | 6장 V1·V2 기준 판정 보고(PASS/FAIL 그대로) |
 | 4 | **U3b — V3 측정 (분기점)** | 코드 변경 없음 | — | 개발 시드에서 C0 이 기준 만족 → **U4 건너뜀**, 확인 시드 판정 보고. 불만족 → U4 |
-| 5 | **U4 — G3 보정 (C3, 분기 시에만)** | `src/models/promotion_gate.py` (`fp_incidents_per_port_day`, 규칙 B 구간, 조회 1일 앞당김, `detail` 확장), `src/pipeline/retrain_policy.py` (`gate_max_fp_per_port_day=0.05`; 기존 `gate_max_incidents_per_port_day` 는 상대 기준이 아닌 절대 상한이라 C3 에서 대체 — 설정에 있으면 같은 값으로 읽는 별칭), `src/config.py.example` | T-P3-G1, G3 | 이후 V3 를 C3 식으로 재실행해 6장 기준 판정 |
+| 5 | **U4 — G3 보정 (C3, 분기 시에만)** | `src/models/promotion_gate.py` (`fp_incidents_per_port_day`, 규칙 B 구간, 조회 1일 앞당김, `detail` 확장), `src/pipeline/retrain_policy.py` (`gate_max_fp_per_port_day=0.05`; 기존 `gate_max_incidents_per_port_day` 는 상대 기준이 아닌 절대 상한이라 C3 에서 대체 — 설정에 있으면 같은 값으로 읽는 별칭), `src/config.py.example`. **조건(lessons #31)**: V3 는 지금 `validation/cli/check_promotion.py` 안의 `fp_incidents_per_port_day`·`c3_status` 로 C3 를 계산한다. U4 에서는 이 계산을 **`src`(promotion_gate)로 옮기고**, 도구는 `src` 함수를 호출하도록 바꾸며, 옮기기 전 도구 계산과 옮긴 뒤 `src` 계산이 같은 입력에서 같은 값·판정을 내는지 **동등성 테스트**를 추가한다 | T-P3-G1, G3, G4 | 동등성 테스트 통과 후 V3 를 C3 식으로 재실행해 6장 기준 판정 |
 | 6 | **U5 — V4 실행** | 코드 변경 없음 | — | 6장 V4 기준 판정 보고 |
 | 7 | **U6 — 컨테이너 승격 리허설 (V5) = v2 학습·승격** | 코드 변경 없음(절차). 결과를 architect 가 설계서·plan.md 에 기록 | — | 6장 V5 표 전부 PASS. 롤백 포함 |
 
@@ -205,13 +215,15 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. PASS
 | `tests/pipeline/test_inference_golden.py` | T-P3-I1 | 정책 메타 없는 모델로 로드 시 `detect()` 출력이 기존 골든과 동일 |
 | `tests/pipeline/test_inference_versions.py` | T-P3-I2 | traffic=precision 메타, optical=메타 없음 → 트랙별로 다른 정책 적용 |
 | | T-P3-I3 | `reload_model` 로 정책 있는 버전 → 없는 버전(롤백) 시 기본 정책 복귀, 우선순위(메타 > config > 기본) |
+| | T-P3-I4 | 두 트랙 정책이 다를 때 댐프닝은 우세 트랙(traffic 심각도 ≥ optical 이면 traffic)의 정책을 따름 |
 | `tests/models/test_trainer.py` | T-P3-T1 | `alert_policy` 지정 시 메타·레지스트리에 기록, 미지정 시 기록 안 함 |
-| `tests/models/test_registry.py` | T-P3-R1 | 정책 전용 버전: 새 버전 번호, 같은 가중치·스케일러 경로, 다른 `alert_policy`, `derived_from`, 후보 상태(비활성), 롤백 대상 |
+| `tests/models/test_registry.py` | T-P3-R1 | 정책 전용 버전: 새 버전 번호, 같은 가중치·스케일러 경로, 다른 `alert_policy`, `derived_from`, `trigger=policy`, `trained_at` 은 원 버전 값, 후보 상태(비활성), 롤백 대상 |
 | `tests/models/test_promotion_gate.py` | T-P3-G2 | G3 가 후보·활성 각자 정책으로 계산되고 `data` 에 두 정책 기록 |
 | | T-P3-G1 (U4) | 장애 구간 알람이 많아도 규칙 B 구간 안이면 추정 오탐에서 제외 → PASS / 구간 밖 알람 과다 → FAIL / 상대 기준은 전체 인시던트로 유지 / `detail` 의 `fp_incidents` |
 | | T-P3-G3 (U4) | 규칙 B 기준선용 1일 앞 데이터는 인시던트 집계에서 제외, 최소 포트·일 가드(150) 유지 |
+| `tests/validation/test_check_promotion.py` | T-P3-G4 (U4) | 동등성: 같은 알람·원본 데이터·포트·일에서 `check_promotion.py` 의 기존 계산(`fp_incidents_per_port_day`, `c3_status`)과 `src` 로 옮긴 G3(C3) 계산의 추정 오탐 값과 PASS/FAIL 이 일치 |
 | `tests/api/test_model_endpoints.py` | T-P3-E1 | `/api/model/train` 의 `alert_policy` 전달, 미지정 시 활성 모델 정책 승계(드리프트 재학습 포함) |
-| | T-P3-E2 | `POST /api/model/policy` 정상·잘못된 프리셋(422)·학습 중(409) |
+| | T-P3-E2 | `POST /api/model/policy` 정상(게이트 동기 실행, 응답에 버전과 게이트 결과)·잘못된 프리셋(422)·학습 중(409) |
 | `tests/validation/test_check_promotion.py` | T-P3-V1 | 도구가 작은 시드로 V1~V4 를 끝까지 실행, 게이트·알람 판정이 `src` 함수 결과와 동일 |
 | `tests/test_architecture.py` | (기존) | `src` → `validation` import 없음 |
 
