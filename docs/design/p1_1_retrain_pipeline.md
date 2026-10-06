@@ -167,7 +167,19 @@ def record_training(state: dict, now, version, outcome) -> dict
 def load_state(model_dir, ft) -> dict; def save_state(model_dir, ft, state)   # 원자적 쓰기 (registry.save 와 같은 방식)
 ```
 상태 파일 `<model_dir>/<ft>_retrain_state.json` (공유 볼륨, API 재시작에도 유지):
-`{consecutive_widespread: [날짜...], last_trigger_at, last_outcome, last_version}`
+`{consecutive_widespread: [날짜...], last_trigger_at, last_outcome, last_version, last_skipped_at}`
+
+**결과별 상태 기록 (2026-10-06 확정, 6.3 E2E 발견 반영)**
+| 결과 | `last_trigger_at` (쿨다운 시작) | 지속성(`consecutive_widespread`) | `last_skipped_at` |
+|---|---|---|---|
+| 수집 단계 중단: `skipped: suspect_fraction=…` | 기록 안 함 (쿨다운 미적용) | **유지** | 기록 → 24h 백오프 |
+| 수집 오류 (DB 실패 등) | 기록 안 함 (쿨다운 미적용) | **유지** | 기록 → 24h 백오프 |
+| 수집 통과 후 Trainer 시작 (이후 후보 생성·학습 예외·게이트 ERROR 모두) | **기록** (쿨다운 72h) | 초기화 | — |
+
+- 쿨다운은 **후보가 연달아 생기는 것**을 막는 장치이고, 의심 비율 중단의 목적은 "장애 중에 재학습하지 않음"이지 "장애 뒤 72h 금지"가 아니다. 따라서 후보를 만들지 않은 중단·수집 오류는 쿨다운을 걸지 않는다.
+- 학습 시작 후 실패에 쿨다운을 유지하는 이유: 같은 학습 실패가 매일 반복되는 비용을 막기 위함.
+- `record_training(state, now, version, outcome)` 은 Trainer 시작 시점에만 `last_trigger_at` 을 기록한다. 중단·수집 오류는 `record_skip(state, now, outcome)`(`last_outcome`, `last_skipped_at` 만 갱신)으로 분리한다.
+- 결과: 장애 구간이 28일 학습 창에서 빠져 의심 비율이 20% 아래로 내려가면, 그다음 일일 점검에서 바로 재학습된다.
 
 `decide()` 규칙 (위에서부터 첫 번째 해당):
 | 조건 | action | reason 예 |
@@ -179,6 +191,7 @@ def load_state(model_dir, ft) -> dict; def save_state(model_dir, ft, state)   # 
 | mode == off | notify | |
 | 연속 widespread 일수 < `drift_persist_checks`(3) | notify | `광역 드리프트 1/3일` |
 | 마지막 드리프트 트리거 후 < `cooldown_hours`(72) | notify | `쿨다운 41h 남음` |
+| 마지막 중단·수집 오류(`last_skipped_at`) 후 < 24h (일일 점검 주기와 같은 고정값) | notify | `재학습 보류: 의심 비율 32.4% > 20% — 장애 의심 (15h 후 재시도)` |
 | 드리프트 트리거로 만든 미승격 후보가 활성 버전보다 새로 있음 | notify | `대기 중 후보 v5 검토 필요` |
 | 학습 중 | notify | |
 | 그 외 | **train** | |
@@ -192,12 +205,13 @@ def load_state(model_dir, ft) -> dict; def save_state(model_dir, ft, state)   # 
 | ID | 검사 | 판정 | 비고 |
 |---|---|---|---|
 | G1 | 아티팩트: 파일 존재, threshold·val_loss 가 유한하고 > 0, input_dim 이 현재 DataProcessor 와 일치 | FAIL | force 로도 승격 불가 (깨진 모델) |
-| G2 | 임계치/검증 손실 비율 (기존 `registry.compare_with_active`, 3배) | FAIL | P0-1 동작 유지 |
+| G2 | 임계치/검증 손실 비율 (기존 `registry.compare_with_active`, 3배) | FAIL | P0-1 동작 유지. **활성 모델 기준 상대 비교라서 활성 모델이 비정상이면 정상 후보도 FAIL 한다(의도된 동작)** → `force` 로 승격하거나, 롤백으로 정상 버전을 활성화한 뒤 승격. G3 도 활성 모델 기준 상대 비교라 같은 영향을 받음 |
 | G3 | **홀드아웃 포트 알람 비율**: 게이트 데이터(검증 포트 × 최근 3일, 최대 2,000포트 샘플)에서 후보와 활성 모델의 해당 트랙 알람을 **운영과 같은 정책으로** 계산 → 인시던트/포트·일 (1시간 묶음) | `cand ≤ max(active × 1.5, 0.01)` 그리고 `cand ≤ 0.05` 이면 PASS, 아니면 FAIL | 보고 패키지의 합격 기준 C1(오탐 ≤ 0.02)과 맞춰 절대 상한 0.05(장애 포함 전체 알람). 활성 모델과 겹치는 인시던트 비율은 **정보로만** 기록(판정에 쓰지 않음: 활성 모델의 알람이 오탐이었을 수 있음) |
 | G4 | **카나리 구분력**: `<model_dir>/<ft>_canary.csv`(라벨된 고정 장애/정상 데이터)가 있으면 후보와 활성의 AUPRC 비교 | `cand ≥ active − 0.05` 이면 PASS, 아니면 FAIL. 파일 없으면 SKIP | 순환 위험 완화용(8장). 카나리는 `validation/` 도구가 시뮬레이터로 생성해 모델 볼륨에 둔다 (src 는 파일만 읽음 → import 규칙 준수) |
 | G5 | **임계치 상승 추세**: 최근 활성화된 3개 버전 + 후보의 threshold 가 단조 증가하고 누적 2배 이상 | WARN | 점진적 둔감화(장애를 정상으로 계속 흡수) 경보 |
 
 - 종합: 하나라도 FAIL → `FAIL`, FAIL 없이 WARN → `WARN`, 나머지 → `PASS`. 게이트 실행 자체가 실패하면 `ERROR`.
+- **배율 표기 (2026-10-06 확정)**: G2·G3 메시지는 같은 포맷 함수 하나로 배율을 표기한다. 비율 ≥ 1 이면 `×37.5`, < 1 이면 역수로 `1/37.5` 로 쓰고 원래 값과 기준을 함께 쓴다(예: `임계치 16.48 → 0.4399 (1/37.5, 기준 1/3 ~ ×3)`). G2 기준이 3배 초과·1/3 미만으로 대칭이므로, 감소도 같은 척도로 보여야 한다(이전 표기 `0.0배` 는 정보가 없었음).
 - 활성 버전이 없는 최초 학습은 기존대로 자동 활성화(게이트는 기록만).
 
 알람 계산은 운영 코드와 같아야 한다(lessons #31). 이를 위해:
@@ -352,7 +366,7 @@ C(명시 구간)는 전 시드 PASS. A 가 B 에 더하는 효과 약 +0.7%p, �
 | | T-D3 | 다수 포트 이동 → widespread |
 | | T-D4 | 활성화 후 24h 미만 → warming_up; 조회 시작이 activated_at 이후 |
 | | T-D5 | legacy 기준값 → `baseline_legacy` true |
-| `tests/pipeline/test_retrain_policy.py` (신규) | T-P1 | `decide()` 표의 각 행 (mode off/candidate/auto, 지속성, 쿨다운, 대기 후보, 학습 중) |
+| `tests/pipeline/test_retrain_policy.py` (신규) | T-P1 | `decide()` 표의 각 행 (mode off/candidate/auto, 지속성, 쿨다운, 중단 후 24h 백오프, 대기 후보, 학습 중) + 2.5 결과별 상태 기록: ① `skipped: suspect_fraction` 뒤 쿨다운 미적용·지속성 유지, 24h 이내 재점검은 notify, 24h 경과 후 train ② 수집 오류도 ①과 같음 ③ Trainer 시작 후 실패(학습 예외·게이트 ERROR)는 쿨다운 적용 |
 | | T-P2 | 같은 날 중복 체크는 지속성 1회 |
 | | T-P3 | 상태 파일 원자적 저장, 손상 파일은 빈 상태로 로드 |
 | | T-P4 | 환경변수 `DRIFT_RETRAIN_MODE` 가 config 보다 우선, 잘못된 값은 `candidate` 로 + 경고 |
