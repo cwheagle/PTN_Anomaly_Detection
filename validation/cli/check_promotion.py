@@ -53,10 +53,11 @@ from validation.simulator.scenario_generator import ScenarioConfig, generate
 TRACKS = ("traffic", "optical")
 KEY = ["ip_addr", "cid", "lid"]
 # 근거 실행(검증 시드 23·31·47 전체)의 1회 잠금 파일: 사용자 지정 파일명에 의존하지 않도록 위치를 고정한다.
-#   V3 근거  = <모델 폴더>/v3_evidence.json,  confirm = <정책 JSON 과 같은 폴더>/v2_confirm.json
+#   V3 근거  = <모델 폴더>/v3_evidence.json,  confirm = <정책 JSON 과 같은 폴더>/v2_confirm.json,
+#   V4 근거  = 비교하는 v2 모델 폴더마다 <모델 폴더>/v4_evidence.json (v1·운영 models/ 폴더에는 아무것도 쓰지 않는다)
 # 근거 실행은 측정을 시작하기 전에 이 파일을 배타적으로 만들고(이미 있으면 거부), 실행이 도중에 실패해도 잠금은 남는다
 # (검증 시드를 한 번 열었기 때문, lessons #30). **한계: 잠금 파일을 직접 지우는 것은 막을 수 없다 — 운영자 규율.**
-V3_LOCK, CONFIRM_LOCK = "v3_evidence.json", "v2_confirm.json"
+V3_LOCK, CONFIRM_LOCK, V4_LOCK = "v3_evidence.json", "v2_confirm.json", "v4_evidence.json"
 DEV_SEEDS = (7, 11)                 # 선택(정책·식)은 개발 시드로만
 VAL_SEEDS = (23, 31, 47)            # 확인은 검증 전용 시드로만
 TRAIN_SEEDS = (101, 103)            # 학습 시드 (학습 난수·데이터 영향)
@@ -490,13 +491,44 @@ def cmd_gate(a):
             t.to_csv(out + ".csv", index=False)
 
 
+def v4_rows_report(df, v1_name, v2_models):
+    """V4 보고용 개별 값: v1 은 시드별, v2 는 모델 x 시드별 (판정에는 쓰지 않음 — 한 모델의 결과가 평균에 가려지지 않게 보기 위한 표)"""
+    cols = ["auprc", "f1", "early", "fp", "prec", "lead"]
+    old = df[(df.model == v1_name) & (df.policy == "기본")].assign(arm="v1+기본")
+    new_p = df[df.model.isin(v2_models) & (df.policy == "오탐억제형")].assign(arm="v2+오탐억제형")
+    new_d = df[df.model.isin(v2_models) & (df.policy == "기본")][["model", "seed", "auprc"]].rename(columns={"auprc": "auprc_rank"})
+    new_p = new_p.merge(new_d, on=["model", "seed"], how="left")           # v2 의 AUPRC(순위 품질)는 기본 정책 행 값
+    out = pd.concat([old, new_p], ignore_index=True)
+    return out[["arm", "model", "seed", *cols] + ["auprc_rank"]].sort_values(["arm", "model", "seed"]).reset_index(drop=True)
+
+
 def cmd_vs_v1(a):
+    import json
+    seeds = [int(x) for x in a.seeds.split(",")]
+    if set(seeds) != set(VAL_SEEDS):                      # 근거 실행: 검증 시드 전체만 (부분집합·개발 시드 혼입 거부)
+        raise SystemExit(f"[!] vs-v1(V4)는 검증 시드 {VAL_SEEDS} 전체로만 실행합니다 (받은 값: {sorted(seeds)}).")
     models = _models_arg(a.models)
+    locks = []
+    for name, mdir in models.items():                     # v2 모델 폴더마다 1회 잠금 (하나라도 이미 있으면 측정 전 거부, 거부 시 새 잠금을 남기지 않음)
+        if os.path.exists(os.path.join(mdir, V4_LOCK)):
+            for done in locks:
+                os.remove(done)
+            raise SystemExit(f"[!] {os.path.join(mdir, V4_LOCK)} 가 이미 있습니다 — 검증 시드(근거) 실행은 1회만 허용합니다.")
+        locks.append(evidence_lock(os.path.join(mdir, V4_LOCK), {"kind": "V4", "seeds": seeds, "models": a.models, "v1_models": a.v1_models}))
     v1 = {"v1": a.v1_models}
-    df = evaluate_models({**v1, **models}, [int(s) for s in a.seeds.split(",")], a.nodes, a.days)
-    print(_fmt(df, ["auprc", "f1", "early", "fp", "prec", "lead"]))
+    df = evaluate_models({**v1, **models}, seeds, a.nodes, a.days)
+    print(f"== V4 [근거 판정(1회)] 검증 시드 {seeds}, v2 모델 {list(models)}, v1 = {a.v1_models} ==")
+    rows = v4_rows_report(df, "v1", list(models))
+    pd.set_option("display.width", 200)
+    print("\n[개별 값 — 모델 x 시드 (판정에는 쓰지 않음)]"); print(rows.round(4).to_string(index=False))
+    print("\n[평균±표준편차]"); print(_fmt(df, ["auprc", "f1", "early", "fp", "prec", "lead"]))
     d = judge_v4(df, "v1", list(models))
-    print(f"\n[V4] AUPRC +{d['auprc']:.3f}, 이벤트 F1 +{d['f1']:.3f}, 오탐 -{d['fp']:.3f} (각 > {V4_MIN_DIFF}) -> {'PASS' if d['pass'] else 'FAIL'}")
+    print(f"\n[V4] AUPRC +{d['auprc']:.3f}, 이벤트 F1 +{d['f1']:.3f}, 오탐 -{d['fp']:.3f} (각 > {V4_MIN_DIFF}) -> {'PASS' if d['pass'] else 'FAIL'}"
+          "   (판정: v2 6개 값 평균 대 v1 3개 값 평균, 모델별 판정 아님)")
+    rec = {"status": "done", "kind": "V4", "seeds": seeds, "judgement": d}
+    for lk in locks + ([a.record] if a.record else []):    # 잠금 파일에 결과를 기록하고, --record 는 사본 출력용
+        json.dump(rec, open(lk, "w", encoding="utf-8"), ensure_ascii=False, indent=2, default=str)
+        rows.to_csv(lk + ".csv", index=False)
 
 
 def cmd_select(a):
@@ -598,6 +630,7 @@ def main():
     v.add_argument("--seeds", default=",".join(map(str, VAL_SEEDS)))
     v.add_argument("--nodes", type=int, default=6)
     v.add_argument("--days", type=int, default=14)
+    v.add_argument("--record", default=None, help="결과 사본 저장 파일(선택). 1회 잠금은 v2 모델 폴더의 v4_evidence.json")
     a = ap.parse_args()
     {"train": cmd_train, "eval": cmd_eval, "gate": cmd_gate, "vs-v1": cmd_vs_v1,
      "select": cmd_select, "confirm": cmd_confirm}[a.cmd](a)

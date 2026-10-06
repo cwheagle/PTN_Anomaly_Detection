@@ -354,3 +354,83 @@ def test_gate_cli_explore_mode_prints_judgement_and_writes_record(tiny_env, tmp_
     saved = json.load(open(rec, encoding="utf-8"))
     assert saved["phase"] == "탐색" and saved["seeds"] == [7] and saved["final_policy"] == "오탐억제형"
     assert "pass" in saved["judgement"] and os.path.exists(str(rec) + ".csv")
+
+
+# ── V4 근거 실행 가드 (vs-v1) ──
+def _v4_args(models, seeds="23,31,47", record=None, v1="models"):
+    import types
+    return types.SimpleNamespace(models=",".join(f"{k}={v}" for k, v in models.items()), v1_models=v1, seeds=seeds, nodes=1, days=4, record=record)
+
+
+def _fake_v4_df():
+    rows = []
+    for seed in (23, 31, 47):
+        rows += [_rows("v1", "기본", seed=seed, auprc=0.30, f1=0.30, fp=0.50)]
+        for m, dd in (("s101", 0.0), ("s103", 0.02)):
+            rows += [_rows(m, "오탐억제형", seed=seed, f1=0.60 + dd, fp=0.04), _rows(m, "기본", seed=seed, auprc=0.60 + dd)]
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("seeds", ["23", "23,31", "7,11", "7,23,31,47", "5"])
+def test_v4_rejects_partial_dev_or_mixed_seeds_before_any_measurement(tmp_path, monkeypatch, seeds):
+    m = {"a": tmp_path / "a", "b": tmp_path / "b"}
+    for d in m.values():
+        d.mkdir()
+    monkeypatch.setattr(cp, "evaluate_models", _boom)
+    with pytest.raises(SystemExit, match="전체로만"):
+        cp.cmd_vs_v1(_v4_args({k: str(v) for k, v in m.items()}, seeds))
+    assert not any((d / cp.V4_LOCK).exists() for d in m.values())
+
+
+def test_v4_runs_once_locks_each_v2_model_folder_and_never_touches_the_v1_folder(tmp_path, monkeypatch, capsys):
+    a, b, v1 = tmp_path / "a", tmp_path / "b", tmp_path / "v1models"
+    for d in (a, b, v1):
+        d.mkdir()
+    calls = []
+    monkeypatch.setattr(cp, "evaluate_models", lambda models, seeds, nodes, days, **k: calls.append(list(models)) or _fake_v4_df())
+    args = _v4_args({"s101": str(a), "s103": str(b)}, record=str(tmp_path / "copy.json"), v1=str(v1))
+    cp.cmd_vs_v1(args)
+    out = capsys.readouterr().out
+    assert calls == [["v1", "s101", "s103"]] and "근거 판정(1회)" in out and "모델별 판정 아님" in out
+    for d in (a, b):
+        rec = json.load(open(d / cp.V4_LOCK, encoding="utf-8"))
+        assert rec["status"] == "done" and rec["judgement"]["pass"] is True and (d / (cp.V4_LOCK + ".csv")).exists()
+    assert list(v1.iterdir()) == []                                              # v1(운영) 폴더에는 아무것도 쓰지 않음
+    assert "[개별 값 — 모델 x 시드" in out and out.count("v2+오탐억제형") >= 6      # 모델 x 시드 개별 값이 출력됨
+    for rec_name in (None, str(tmp_path / "other.json")):                        # 같은 모델로 다시, 다른 --record 로도 거부
+        with pytest.raises(SystemExit, match="1회만"):
+            cp.cmd_vs_v1(_v4_args({"s101": str(a), "s103": str(b)}, record=rec_name, v1=str(v1)))
+    assert len(calls) == 1 and not (tmp_path / "other.json").exists()
+
+
+def test_v4_refusal_when_only_one_model_folder_is_locked_leaves_no_new_lock(tmp_path, monkeypatch):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        d.mkdir()
+    (b / cp.V4_LOCK).write_text("{}")                                           # b 는 이미 근거 실행을 한 모델
+    monkeypatch.setattr(cp, "evaluate_models", _boom)
+    with pytest.raises(SystemExit, match="1회만"):
+        cp.cmd_vs_v1(_v4_args({"a": str(a), "b": str(b)}))
+    assert not (a / cp.V4_LOCK).exists()                                         # 거부 시 a 에 새 잠금을 남기지 않음
+
+
+def test_v4_failure_during_measurement_keeps_the_locks(tmp_path, monkeypatch):
+    a = tmp_path / "a"
+    a.mkdir()
+    monkeypatch.setattr(cp, "evaluate_models", lambda *x, **k: (_ for _ in ()).throw(RuntimeError("중간 실패")))
+    with pytest.raises(RuntimeError):
+        cp.cmd_vs_v1(_v4_args({"a": str(a)}))
+    assert (a / cp.V4_LOCK).exists()                                             # 측정 시작 후 실패해도 잠금 유지 -> 재시도 거부
+    monkeypatch.setattr(cp, "evaluate_models", _boom)
+    with pytest.raises(SystemExit, match="1회만"):
+        cp.cmd_vs_v1(_v4_args({"a": str(a)}))
+
+
+def test_v4_individual_rows_report_keeps_each_model_and_seed_visible():
+    r = cp.v4_rows_report(_fake_v4_df(), "v1", ["s101", "s103"])
+    assert len(r) == 3 + 6 and set(r.arm) == {"v1+기본", "v2+오탐억제형"}
+    v2 = r[r.arm == "v2+오탐억제형"].set_index(["model", "seed"])
+    assert v2.loc[("s101", 23), "f1"] == pytest.approx(0.60) and v2.loc[("s103", 47), "f1"] == pytest.approx(0.62)
+    assert v2.loc[("s103", 31), "auprc_rank"] == pytest.approx(0.62)             # v2 의 AUPRC(순위 품질)는 기본 정책 행 값
+    d = cp.judge_v4(_fake_v4_df(), "v1", ["s101", "s103"])                       # 판정 상수·방식 불변: v2 6개 평균 vs v1 3개 평균
+    assert d["f1"] == pytest.approx(0.31 - 0.0) and d["pass"] is True
