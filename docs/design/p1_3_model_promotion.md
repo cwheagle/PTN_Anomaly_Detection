@@ -197,6 +197,9 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. 기�
   - **정상** = 후보 ① (정의상 기준 구성), 그리고 truth-FP ≤ F① 인 후보
   - **과다** = truth-FP ≥ **max(3 × F①, 0.04)**
   - **중간** = 그 외 → **판정에서 제외**하고 값만 기록
+  - **F① 의 측정 단위**(확정 2026-10-06, V3 도구 구현 반영): **시드 × 밀도 × 트랙별로 같은 게이트 데이터**에서 잰다(다른 조건의 F① 을 섞지 않음).
+  - **truth-FP 의 정의**(확정): 평가 도구 `validation/evaluation/metrics.event_metrics` 의 false incident 정의를 재사용 — 어떤 에피소드의 활성 구간에도 속하지 않는 알람을 묶은 인시던트. U3·`performance_report.md` 의 오탐 수치와 같은 정의라 일관된다. **한계**: 에피소드를 **트랙 구분 없이** 쓰므로, 한 트랙 후보가 다른 트랙 장애 구간에 낸 알람(그 트랙 입력에는 신호가 없어 사실상 오탐)은 오탐으로 세지 않는다. 카나리의 트랙별 라벨(P1-1 설계서 2.10, lessons #35)과 다르며, 모든 후보에서 같은 방향(과소 계상)이고 장애가 잦은 조건일수록 크다. F① 대비 상대 라벨이라 판정 영향은 작을 것으로 보지만 측정하지 않았다.
+  - **라벨이 없는 조건**(확정): 한 조건(시드 × 밀도 × 트랙)에 과다 라벨 후보가 없으면 그 조건의 **과다 기준은 판정 불가**로 기록하고 **정상 기준은 그대로 적용**한다. 과다 라벨 후보가 **전 조건에 하나도 없으면 V3 전체를 판정 불가**로 기록한다(합격으로 보지 않음).
   - 근거(모두 V3 게이트 데이터를 보기 전의 것): 3배 = G2 비율 한도(`registry.THRESHOLD_RATIO_LIMIT`), 0.04 = `report_package.md` 5.6 경보선(F① 이 0 에 가까울 때 작은 차이를 과다로 부르지 않기 위한 하한). 게이트의 상대 기준 1.5배는 **쓰지 않는다**(라벨이 게이트 식을 그대로 따라가지 않도록).
   - 이전 정의(정상 ≤ 0.02 = C1)를 바꾼 이유: 사용자가 임시 채택한 구성의 오탐이 U3 에서 0.029(검증 시드 평균)~0.039(개발 시드 평균)로 C1 을 넘어, 이전 정의로는 **정상 후보가 하나도 없어** V3 가 판정 불가가 됨. 정상의 절대 수준은 V2(FAIL 기록)와 섀도 C1 이 판단하고, V3 는 "확정 구성 대비 과다 알람을 G3 가 가려내는가" 만 본다.
 - **후보 풀 (5개 고정, 메커니즘과 무관하게 라벨은 위 속성으로 붙임)**:
@@ -246,7 +249,7 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. 기�
 | 3 | **U3 — V1·V2 실행** | 코드 변경 없음. 결과를 architect 가 `docs/performance_report.md` 8장에 기록 | — | 6장 V1·V2 기준 판정 보고(PASS/FAIL 그대로) |
 | 4 | **U3b — V3 측정 (분기점)** | 코드 변경 없음 | — | **완료(2026-10-06)**: 개발 시드에서 C0·C3 모두 불만족, 과다 후보 정의 결함 발견(5.2) → 사용자 결정 D-a·D-b·D-c |
 | ~~5~~ | ~~**U4 — G3 보정 (C3)**~~ | **폐기(2026-10-06, D-b)**. C3 를 `src` 로 옮기지 않음. `check_promotion.py` 의 C3 계산은 참고 열로만 유지 | ~~T-P3-G1, G3, G4~~ (폐기) | — |
-| 5' | **U4' — G3 판정 C4'** | `src/models/promotion_gate.py` `check_g3`: 5.3 규칙으로 변경 — 상대 기준(활성 있을 때) 위반 → FAIL, 그다음 절대 상한(`gate_max_incidents_per_port_day`) 위반 → **WARN**, 메시지 구분("활성 모델 대비 과다" / "절대 상한 초과 — 장애가 많은 기간일 수 있음, 사람이 검토"), `value`/`limit` 은 5.3 표기. 종합 규칙(`evaluate`)은 변경 없음(WARN 이 이미 auto 차단). `src/pipeline/retrain_policy.py`: 키 변경 없음, `gate_max_incidents_per_port_day` 주석만 "WARN 상한" 으로. `src/config.py.example`: 같은 주석. `validation/cli/check_promotion.py`: V3 를 6장 재정의(truth-FP 라벨, 후보 풀 5개, 활성 2가지, C4' 판정 열 + C0·C3 참고 열)로 변경, C4' 판정은 `src` 의 `check_g3` 를 호출(#31). **기존 테스트 영향**(`tests/models/test_promotion_gate.py`): `test_g3_alarm_rate_rule` 의 `(0.051, 0.200) → FAIL` 은 **WARN** 으로, `test_g3_skip_without_gate_data_and_absolute_limit_only_without_active` 의 `(0.06, 활성 없음) → FAIL` 은 **WARN** 으로 기대값 변경. 상대 기준 FAIL 케이스(`test_g3_fail_message_uses_shared_ratio_format` 등)는 그대로 FAIL. `tests/api/test_drift_endpoints.py` 의 auto 비승격(G3 SKIP)은 영향 없음 | T-P3-G5, G6, G7, E3, V2 (+ 기존 G3 테스트 기대값 갱신) | V2 확정 후 V3 를 근거 시드 1회로 판정(6장) |
+| 5' | **U4' — G3 판정 C4'** | `src/models/promotion_gate.py` `check_g3`: 5.3 규칙으로 변경 — 상대 기준(활성 있을 때) 위반 → FAIL, 그다음 절대 상한(`gate_max_incidents_per_port_day`) 위반 → **WARN**, 메시지 구분("활성 모델 대비 과다" / "절대 상한 초과 — 장애가 많은 기간일 수 있음, 사람이 검토"), `value`/`limit` 은 5.3 표기. 종합 규칙(`evaluate`)은 변경 없음(WARN 이 이미 auto 차단). `src/pipeline/retrain_policy.py`: 키 변경 없음, `gate_max_incidents_per_port_day` 주석만 "WARN 상한" 으로. `src/config.py.example`: 같은 주석. `validation/cli/check_promotion.py`: V3 를 6장 재정의(truth-FP 라벨, 후보 풀 5개, 활성 2가지, C4' 판정 열 + C0·C3 참고 열)로 변경, C4' 판정은 `src` 의 `check_g3` 를 호출(#31). **기존 테스트 기대값 변경 3건**(`tests/models/test_promotion_gate.py`): ① `test_g3_alarm_rate_rule` 의 `(0.051, 활성 0.200)` FAIL → **WARN**, ② `test_g3_skip_without_gate_data_and_absolute_limit_only_without_active` 의 `(0.06, 활성 없음)` FAIL → **WARN**, ③ `test_run_gate_end_to_end_with_two_tiny_models` 의 G3 허용 상태에 **WARN 추가**(소형 더미 모델의 알람량이 커서 절대 상한 초과 → WARN. 이 테스트의 의도는 G3 가 게이트 데이터로 계산되는지 확인하는 것이라 상태 값 자체는 검증 대상이 아님). 상대 기준 FAIL 케이스(`test_g3_fail_message_uses_shared_ratio_format` 등)는 그대로 FAIL. `tests/api/test_drift_endpoints.py` 의 auto 비승격(G3 SKIP)은 영향 없음 | T-P3-G5, G6, G7, E3, V2 (+ 기존 G3 테스트 기대값 갱신) | V2 확정 후 V3 를 근거 시드 1회로 판정(6장) |
 | 6 | **U5 — V4 실행** | 코드 변경 없음 | — | 6장 V4 기준 판정 보고 |
 | 7 | **U6 — 컨테이너 승격 리허설 (V5) = v2 학습·승격** | 코드 변경 없음(절차). 결과를 architect 가 설계서·plan.md 에 기록 | — | 6장 V5 표 전부 PASS. 롤백 포함 |
 
@@ -274,7 +277,7 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. 기�
 | | T-P3-E2 | `POST /api/model/policy` 정상(게이트 동기 실행, 응답에 버전과 게이트 결과)·잘못된 프리셋(422)·학습 중(409) |
 | `tests/api/test_drift_endpoints.py` | T-P3-E3 (U4') | mode=auto 에서 G3 WARN(절대 상한 초과) 후보는 자동 승격되지 않고 활성 불변 |
 | `tests/validation/test_check_promotion.py` | T-P3-V1 | 도구가 작은 시드로 V1~V4 를 끝까지 실행, 게이트·알람 판정이 `src` 함수 결과와 동일 |
-| | T-P3-V2 (U4') | V3 재정의: truth-FP 라벨(≤0.02 정상, ≥0.04 그리고 ≥3배 과다, 그 외 중간·판정 제외) 경계값, 후보 풀 5개·활성 2가지 생성, C4' 판정 열이 `src` `check_g3` 결과와 동일 |
+| | T-P3-V2 (U4') | V3 재정의(6장 2차): truth-FP 라벨 경계값 — 정상 = 후보 ① 과 truth-FP ≤ F①, 과다 = truth-FP ≥ max(3 × F①, 0.04), 그 외 중간·판정 제외. F① 은 시드 × 밀도 × 트랙별 같은 게이트 데이터에서 측정. 과다 라벨이 없는 조건은 과다 기준 판정 불가(정상 기준은 적용), 전 조건에 없으면 전체 판정 불가. 후보 풀 5개·활성 2가지 생성, C4' 판정 열이 `src` `check_g3` 결과와 동일 |
 | `tests/test_architecture.py` | (기존) | `src` → `validation` import 없음 |
 
 ## 10. 위험과 한계
@@ -318,4 +321,5 @@ G3 = 홀드아웃 포트 × 최근 3일의 알람 인시던트/포트·일. 기�
 | 2026-10-06 | traffic_drop 판별 불가 → P1-4 이월 (D-c) | U3b traffic_drop 조건에서 알람 ≈ 0 |
 | 2026-10-06 | V2 탐색 공간 사후 기록 | 설계에 격자 미명시 → dev 가 P0-2 탐색 공간(6 × 3 × 7 = 126개) 재사용 |
 | 2026-10-06 | **V2 FAIL 기록, 사용자 결정 A** (현재 오탐 억제형 프리셋 임시 채택 유지) | 검증 시드 오탐 0.029 > 0.02. 개발 시드 126개 격자에서 규칙 충족 0개, 검증 시드로 재선택 확인 안 함. C1 은 시뮬레이션에서 미달, 섀도에서 재확인 |
+| 2026-10-06 | V3 도구 해석 확정(F① 측정 단위, truth-FP = event_metrics false incident 재사용·트랙 무구분 한계, 라벨 없는 조건 처리), U4' 기존 테스트 기대값 변경 3건으로 정정, 9장 T-P3-V2 를 2차 재정의에 맞춤 | dev 구현 중 해석한 사항을 문서에 확정 |
 | 2026-10-06 | **V3 정상·과다 기준 2차 재정의** (정상 = 후보 ① 과 그 이하, 과다 ≥ max(3 × F①, 0.04)) | 이전 정의(정상 ≤ 0.02)로는 사용자가 채택한 구성(오탐 0.029~0.039)이 정상으로 분류되지 않아 정상 후보가 없음. U3(V1·V2) 결과를 본 뒤 바꾼 정의이므로 V3 개발 시드 판정은 탐색으로만 표시하고, 근거는 미개봉 검증 시드 23·31·47 의 V3 게이트 데이터 1회 판정만 씀. 그 결과로 기준·식을 다시 고르지 않음. 상수(3배, 0.04)는 기존 상수 재사용 |
