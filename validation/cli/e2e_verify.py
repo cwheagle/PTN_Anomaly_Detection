@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--ip-like", default="10.20.0.%", help="시연 데이터 IP 패턴")
     ap.add_argument("--renotify", type=int, default=15, help="스택에 설정한 ALARM_RENOTIFY_MINUTES")
     ap.add_argument("--window", type=int, default=27, help="Consumer 윈도우 행 수 (DataProcessor.required_rows)")
+    ap.add_argument("--since", default=None, help="이 시각 이후 결과만 판정 (이전 실행의 잔여 행 제외, 예: '2026-10-05 10:00:00')")
     ap.add_argument("--api", default="http://localhost:8000")
     ap.add_argument("--ui", default="http://localhost")
     args = ap.parse_args()
@@ -54,8 +55,10 @@ def main():
     c = mysql.connector.connect(host=os.getenv("DB_HOST", "localhost"), user=os.getenv("DB_USER", "root"),
                                 password=os.getenv("DB_PASS", "root"), database=os.getenv("DB_NAME", "cowptn_test"),
                                 port=int(os.getenv("DB_PORT", 3306)))
+    since_sql = " AND occur_date >= %s" if args.since else ""
     df = pd.read_sql("SELECT occur_date, ip_addr, cid, lid, alarm_label, is_anomaly FROM anomaly_detection "
-                     f"WHERE ip_addr LIKE '{args.ip_like}' ORDER BY ip_addr, cid, lid, occur_date", c)
+                     f"WHERE ip_addr LIKE %s{since_sql} ORDER BY ip_addr, cid, lid, occur_date", c,
+                     params=(args.ip_like, args.since) if args.since else (args.ip_like,))
     df["occur_date"] = pd.to_datetime(df["occur_date"])
     labels = pd.read_csv(os.path.join(args.seed_dir, "labels.csv"), parse_dates=["occur_date"])
     episodes = pd.read_csv(os.path.join(args.seed_dir, "episodes.csv"), parse_dates=["t_start", "t_fail", "t_end"])
