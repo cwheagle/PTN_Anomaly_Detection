@@ -14,7 +14,8 @@ from src.data.data_processor import DataProcessor
 from src.config import MODEL_CONFIG, PATHS
 
 class Trainer:
-    def __init__(self, feature_type='traffic', config_override=None, progress_callback=None, activate=True):
+    def __init__(self, feature_type='traffic', config_override=None, progress_callback=None, activate=True,
+                 trigger='manual', window_info=None, suspect_stats=None):
         self.feature_type = feature_type
         self.progress_callback = progress_callback
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,6 +26,10 @@ class Trainer:
         self.activate = activate
         self.activated = None       # 학습 후: 이 버전이 활성화되었는지
         self.version = None         # 학습 후: 저장된 버전 ID
+        # 재학습 출처 메타데이터 (기록 전용): trigger = manual | drift, window_info = 학습 구간·분할, suspect_stats = 제외 통계
+        self.trigger = trigger
+        self.window_info = window_info
+        self.suspect_stats = suspect_stats
 
         # 1. 설정값 병합 (기본값 + 외부 주입값)
         self.config = MODEL_CONFIG.copy()
@@ -220,7 +225,11 @@ class Trainer:
         
         # 4. 임계치 산출 및 통합 메타데이터 저장
         # 훈련 데이터 기반으로 임계치 결정
-        meta = self._save_metadata(train_sequences, best_val_loss if val_loader else None)
+        # 드리프트 기준값: 검증(홀드아웃 포트) 데이터의 '포트별 평균 score' 분포 (없으면 학습 데이터로, 출처 표시)
+        baseline_src, baseline_path = ("val", v_path) if v_res else ("train", t_path)
+        port_baseline = self._port_baseline(baseline_path)
+        port_baseline["baseline_source"] = baseline_src
+        meta = self._save_metadata(train_sequences, best_val_loss if val_loader else None, extra=port_baseline)
         
         # 레지스트리 갱신 (후보로 저장하거나, 활성 버전이 없으면 활성화)
         registry_entry = {
@@ -233,6 +242,10 @@ class Trainer:
             "final_val_loss": meta["final_val_loss"],
             "baseline_mse": meta.get("baseline_mse"),
             "samples_used": meta.get("samples_used"),
+            "trigger": self.trigger,
+            "training_window": self.window_info,
+            "suspect_stats": self.suspect_stats,
+            **{k: meta.get(k) for k in ("baseline_port_median", "baseline_port_p90", "baseline_ports", "baseline_source")},
         }
         with registry.transaction(model_dir, self.feature_type) as reg:
             self.activated = registry.add_version(reg, registry_entry, self.activate)
@@ -243,7 +256,33 @@ class Trainer:
             print(f"[SUCCESS] {self.feature_type.capitalize()} model saved as CANDIDATE. (Version: {new_version_id}, not active — promote to deploy)")
         return True
 
-    def _save_metadata(self, sequences, val_loss=None):
+    def _port_baseline(self, data_path):
+        """추론과 같은 지표(포트별 윈도우 마지막 시점 MSE 의 평균)의 포트 분포 -> median / p90.
+        드리프트 감지가 같은 지표끼리 비교하도록 학습 시 저장한다 (lessons #19). 계산 불가 시 빈 dict."""
+        try:
+            df = pd.read_csv(data_path)
+            df_clean = self.processor.preprocess(df, is_train=False)
+            grouped = self.processor.create_sequences(df_clean, is_train=False) if df_clean is not None else {}
+        except Exception as e:
+            print(f"[!] Port baseline skipped: {e}")
+            return {}
+        self.model.eval()
+        port_means = []
+        with torch.no_grad():
+            for seqs, _ in grouped.values():
+                x = torch.from_numpy(seqs).float().to(self.device)
+                out = self.model(x)
+                mse = torch.mean((x[:, -1, :] - out[:, -1, :]) ** 2, dim=1)
+                port_means.append(float(mse.mean().cpu()))
+        if not port_means:
+            return {}
+        return {
+            "baseline_port_median": float(np.median(port_means)),
+            "baseline_port_p90": float(np.percentile(port_means, 90)),
+            "baseline_ports": len(port_means),
+        }
+
+    def _save_metadata(self, sequences, val_loss=None, extra=None):
         """임계치와 학습 당시의 설정을 하나의 JSON으로 저장 (Inference 로드용)"""
         self.model.eval()
         mses = []
@@ -275,8 +314,12 @@ class Trainer:
             "threshold": threshold,
             "baseline_mse": baseline_mse,
             "samples_used": len(sequences),
-            "final_val_loss": float(val_loss) if val_loss is not None else None
+            "final_val_loss": float(val_loss) if val_loss is not None else None,
+            "trigger": self.trigger,
+            "training_window": self.window_info,
+            "suspect_stats": self.suspect_stats,
         }
+        meta.update(extra or {})
         
         # 모델명과 동일하게 .json 확장자로 저장 (예: traffic_ae.pth -> traffic_ae.json)
         config_path = self.paths['model'].replace('.pth', '.json')

@@ -14,7 +14,11 @@ from src.rca.rule_engine import RCAEngine
 from src.pipeline.alerting import AlertPolicy, load_policy, dynamic_threshold, severity_from_ratio, dampening_step
 
 class AnomalyDetector:
-    def __init__(self, policy=None):
+    def __init__(self, policy=None, versions=None, tracks=('traffic', 'optical')):
+        """
+        versions: {트랙: 버전 ID} — 지정한 트랙은 활성 버전이 아니라 그 버전을 로드한다 (승격 게이트가 후보를 추론할 때 사용).
+        tracks  : 로드할 트랙. 게이트는 필요한 트랙만 로드한다. 기본값은 기존 동작(둘 다, 활성 버전).
+        """
         # 알람 판정 정책(동적 임계치 k, 전역 임계치 배율, 댐프닝 횟수 등). 기본값은 기존 동작과 동일.
         self.policy = policy or load_policy()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -27,34 +31,46 @@ class AnomalyDetector:
         self.alert_states = {} # {(ip, cid, lid): {'level': 0, 'count': 0}}
 
         # 초기 구동 시 저장된 모델이 있으면 로드
-        for ft in ['traffic', 'optical']:
-            self.reload_model(ft)
+        versions = versions or {}
+        for ft in tracks:
+            self.reload_model(ft, version=versions.get(ft))
 
-    def reload_model(self, ft):
-        """학습 완료 후 또는 초기화 시 파일로부터 모델 가중치, 스케일러, 설정을 모두 로드"""
+    @staticmethod
+    def _resolve_paths(ft, version=None):
+        """(모델 경로, 스케일러 경로, 메타 경로). version 이 없으면 레지스트리의 활성 버전(없으면 기본 경로)."""
         p = PATHS[ft]
         model_dir = os.path.dirname(p['model'])
         registry_path = os.path.join(model_dir, f"{ft}_registry.json")
-        
+
         actual_model_path = p['model']
         actual_scaler_path = p['scaler']
         meta_path = p['model'].replace('.pth', '.json')
-        
-        # [Phase 11] 레지스트리에서 Active 모델 탐색
+
+        # [Phase 11] 레지스트리에서 Active(또는 지정 버전) 모델 탐색
         if os.path.exists(registry_path):
             try:
                 with open(registry_path, 'r') as f:
                     registry = json.load(f)
-                active_ver = registry.get("active_version")
-                if active_ver:
+                target_ver = version or registry.get("active_version")
+                if target_ver:
                     for v in registry.get("versions", []):
-                        if v["version"] == active_ver:
+                        if v["version"] == target_ver:
                             actual_model_path = os.path.join(model_dir, v["model_path"])
                             actual_scaler_path = os.path.join(os.path.dirname(p['scaler']), v["scaler_path"])
                             meta_path = os.path.join(model_dir, v["config_path"])
                             break
+                    else:
+                        if version:
+                            raise KeyError(f"version '{version}' not found in {registry_path}")
+            except KeyError:
+                raise
             except Exception as e:
                 print(f"[!] Error reading registry for {ft}: {e}")
+        return actual_model_path, actual_scaler_path, meta_path
+
+    def reload_model(self, ft, version=None):
+        """학습 완료 후 또는 초기화 시 파일로부터 모델 가중치, 스케일러, 설정을 모두 로드 (version 미지정 = 활성 버전)"""
+        actual_model_path, actual_scaler_path, meta_path = self._resolve_paths(ft, version)
 
         if not os.path.exists(actual_model_path):
             print(f"[*] {ft.capitalize()} model file not found at {actual_model_path}, skipping load.")

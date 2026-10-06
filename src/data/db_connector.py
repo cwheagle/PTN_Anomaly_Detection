@@ -188,6 +188,41 @@ class DBConnector:
         finally:
             conn.close()
 
+    def fetch_alarm_rows(self, start_time, end_time, min_level=1):
+        """자기 알람 이력 조회 (재학습 시 장애 의심 구간 산출용).
+        lessons #14: 접속/조회 실패는 빈 결과로 넘기지 않고 예외로 전파한다 (이력 없이 학습하면 장애가 정상으로 학습됨)."""
+        start_str = pd.to_datetime(start_time).strftime('%Y-%m-%d %H:%M:%S')
+        end_str = pd.to_datetime(end_time).strftime('%Y-%m-%d %H:%M:%S')
+        conn = self.get_connection()
+        if not conn:
+            raise RuntimeError("[DB] fetch_alarm_rows: 커넥션을 얻지 못했습니다.")
+        try:
+            return pd.read_sql(
+                """SELECT occur_date, ip_addr, cid, lid, alarm_level
+                   FROM anomaly_detection
+                   WHERE alarm_level >= %s AND occur_date BETWEEN %s AND %s""",
+                conn, params=(int(min_level), start_str, end_str))
+        finally:
+            conn.close()
+
+    def fetch_port_score_stats(self, ft, since):
+        """포트별 평균 score (드리프트 감지용). score 0.0 은 '해당 트랙 없음'으로 저장되므로 제외한다."""
+        if ft not in ('traffic', 'optical'):
+            raise ValueError(f"unknown track: {ft}")
+        since_str = pd.to_datetime(since).strftime('%Y-%m-%d %H:%M:%S')
+        conn = self.get_connection()
+        if not conn:
+            raise RuntimeError("[DB] fetch_port_score_stats: 커넥션을 얻지 못했습니다.")
+        try:
+            return pd.read_sql(
+                f"""SELECT ip_addr, cid, lid, AVG({ft}_score) AS mean_score, COUNT(*) AS n
+                    FROM anomaly_detection
+                    WHERE occur_date >= %s AND {ft}_score > 0
+                    GROUP BY ip_addr, cid, lid""",
+                conn, params=(since_str,))
+        finally:
+            conn.close()
+
     def _clean_value(self, val, default=0):
         """NaN, inf 등의 값을 DB에 안전한 None(NULL) 또는 기본값으로 변환"""
         if pd.isna(val) or (isinstance(val, float) and (np.isinf(val) or np.isnan(val))):

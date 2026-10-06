@@ -127,3 +127,48 @@ def test_registry_entry_contains_baseline_and_samples(tiny_train_csv, isolated_p
     _train(tiny_train_csv)
     entry = registry.load(str(tmp_path), 'traffic')['versions'][0]
     assert entry['baseline_mse'] > 0 and entry['samples_used'] > 0
+
+
+def test_metadata_and_registry_record_port_baseline_trigger_and_window(tiny_train_csv, isolated_paths, tmp_path):
+    """T-T1: 드리프트 기준값(포트별 평균 score 분포)과 출처 메타데이터가 메타 JSON 과 레지스트리에 기록"""
+    from src.models import registry
+    window = {'start': '2026-04-01 00:00:00', 'end': '2026-04-01 20:00:00', 'val_port_fraction': 0.1, 'salt': 'ptn'}
+    stats = {'rows': 160, 'excluded_rows': 8, 'fraction': 0.05, 'dropped_ports': [], 'by_source': {'alarm': 8}}
+    trainer = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16},
+                      trigger='drift', window_info=window, suspect_stats=stats)
+    assert trainer.train(train_path=tiny_train_csv, val_path=tiny_train_csv) is True
+
+    meta = json.load(open(tmp_path / 'traffic_ae_v1.json'))
+    assert meta['trigger'] == 'drift' and meta['training_window'] == window and meta['suspect_stats'] == stats
+    assert meta['baseline_ports'] == 2 and meta['baseline_source'] == 'val'
+    assert 0 < meta['baseline_port_median'] <= meta['baseline_port_p90']
+    assert 'baseline_mse' in meta                                           # 하위 호환 유지
+
+    entry = registry.load(str(tmp_path), 'traffic')['versions'][0]
+    for key in ('trigger', 'training_window', 'suspect_stats', 'baseline_port_median', 'baseline_port_p90',
+                'baseline_ports', 'baseline_source'):
+        assert entry[key] == meta[key]
+
+
+def test_baseline_falls_back_to_train_data_when_no_validation_file(tiny_train_csv, isolated_paths, tmp_path):
+    trainer = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16})
+    assert trainer.train(train_path=tiny_train_csv, val_path=str(tmp_path / 'missing.csv')) is True
+    meta = json.load(open(tmp_path / 'traffic_ae_v1.json'))
+    assert meta['baseline_source'] == 'train' and meta['baseline_port_median'] > 0
+    assert meta['trigger'] == 'manual'
+
+
+def test_port_baseline_matches_per_port_mean_of_last_step_mse(tiny_train_csv, isolated_paths):
+    """기준값의 지표가 추론 score 와 같은지(포트별 윈도우 마지막 시점 MSE 평균) 직접 재계산해 확인"""
+    import torch
+    trainer = _train(tiny_train_csv)
+    base = trainer._port_baseline(tiny_train_csv)
+    clean = trainer.processor.preprocess(pd.read_csv(tiny_train_csv), is_train=False)
+    grouped = trainer.processor.create_sequences(clean, is_train=False)
+    means = []
+    with torch.no_grad():
+        for seqs, _ in grouped.values():
+            x = torch.from_numpy(seqs).float().to(trainer.device)
+            means.append(float(((x[:, -1] - trainer.model(x)[:, -1]) ** 2).mean(dim=1).mean()))
+    assert base['baseline_port_median'] == pytest.approx(float(np.median(means)), rel=1e-5)
+    assert base['baseline_port_p90'] == pytest.approx(float(np.percentile(means, 90)), rel=1e-5)

@@ -55,6 +55,7 @@ services:
       - KAFKA_BROKERS=kafka:29092
       - REDIS_HOST=redis
       - ALARM_RENOTIFY_MINUTES=${ALARM_RENOTIFY_MINUTES:-15}   # 지속 중인 CRITICAL 재알림 간격(분). 15=매 스텝, 0=진입 시 1회
+      - DRIFT_RETRAIN_MODE=${DRIFT_RETRAIN_MODE:-candidate}    # off(감지만) / candidate(후보 학습+수동 승격) / auto(게이트 통과 시 자동)
     volumes:
       - ptn_models:/app/models
       - ptn_rca_rules:/app/src/rca/rules
