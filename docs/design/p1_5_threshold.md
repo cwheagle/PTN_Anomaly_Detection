@@ -1,7 +1,7 @@
 # P1-5 설계: 임계치 산출 방식 검토 (운영 레시피 오탐 0.029 의 원인 분해 → 대안 비교)
 
 > 작성: 2026-10-07 (architect) · 근거: plan.md Backlog **P1-5** 행, `docs/design/p1_3_model_promotion.md` 6장 V1·V2·V4, `docs/performance_report.md` 3·7.2장, lessons #23·#29·#30·#31·#36·#37·#38
-> 상태: **초안 — 사용자/lead 결정 대기(11장)**. 구현·실행 전. 판정 기준(6장)은 11장 결정 후 **데이터를 열기 전에 확정**한다.
+> 상태: **확정(2026-10-07, 사용자 승인 Q1~Q7 권장안)** — 판정 기준(6장) 확정, 이후 데이터를 열기 전 고정 효력(변경은 6.4 규칙만). 다음 단계: dev U1(`validation/cli/check_threshold.py`, 인터페이스 8.1) → 첫 1회 학습 소요 측정 → E0 규모 확정(Q4) → E0 실행. 아직 어떤 E0·대안 데이터도 열지 않았다.
 > 범위: **시뮬레이션 한정**. 실데이터 결론이 아니다. 운영 활성 모델·`MODEL_CONFIG`·기본 알람 정책은 바꾸지 않는다(7장).
 
 ---
@@ -67,10 +67,10 @@ P1-3 운영 레시피 그대로: `check_promotion.train_operational`(시뮬레�
 
 ### 3.3 측정 지표
 각 학습 모델(트랙별)에 대해:
-1. **전역 임계치**, best epoch, best val_loss, 학습 시퀀스 수, 홀드아웃 포트 수.
+1. **전역 임계치**(트랙별), 메타의 `final_val_loss`(= best val_loss), `samples_used`(학습 시퀀스 수), 홀드아웃 포트 수(검증 CSV 의 고유 포트), 학습 소요 초. best epoch 는 메타에 없으므로 **기록하지 않는다**(`src` 변경 금지, 8.1).
 2. 개발 시드 7·11 평균: 오탐 억제형의 **오탐/포트·일·이벤트 F1·조기 탐지율·리드타임 중앙값**, AUPRC(순위 품질, 임계치와 무관한 비교용), 기본 정책 병기.
 3. **오라클 임계치 대입**: 별도 정상 기준 데이터(시드 **211**, 4노드 × 14일, 정답 구간 제외 = truth)에서 그 모델의 마지막 시점 MSE 99.5 백분위를 **out-of-sample 임계치 th\*** 로 계산 → 같은 모델 가중치에 th\* 를 대입해 2 를 다시 측정. "같은 가중치·더 나은 임계치 추정" 이 오탐을 얼마나 바꾸는지 본다.
-4. **in-sample 편향**: (학습 시퀀스 99.5 백분위) / (th\*) 비율. 1 보다 작으면 in-sample 임계치가 낮게 잡히는 것.
+4. **in-sample 편향**: `th_in / th*` — `th_in` 은 같은 모델로 그 실행의 학습 CSV 를 **운영 추론 경로**(`score_data`)로 점수화한 99.5 백분위(th\* 와 같은 경로·같은 지표로 비교, 8.1 `oracle`). 1 보다 작으면 in-sample 임계치가 낮게 잡히는 것.
 5. 재계산 검증: 도구가 학습 시퀀스로 재계산한 임계치 = 메타의 `threshold`(상대 오차 < 1e-6) — 도구가 운영 산출식과 같다는 증거(#31).
 
 ### 3.4 E0 판정 질문 (기준 값은 6.1 에 사전 고정)
@@ -109,12 +109,12 @@ P1-3 운영 레시피 그대로: `check_promotion.train_operational`(시뮬레�
 | **새 검증** | **53, 59, 61** | 6노드 × 14일 (V1 과 같은 조건) | **미개봉, 2단계 최종 선택 후 1회**. 23·31·47 은 V3·V4 에서 열어 재사용 금지 |
 | 사용 금지 | 23, 31, 47 (검증 소진), 102 (민감도), 900 (카나리), 33·34·35 (DB 대형 시드) | | |
 
-- **데이터 생성 위치**: 평가·학습 모두 `check_promotion` 과 같이 **시뮬레이터로 메모리에서 생성**(시드가 곧 데이터 정의, 결정적)하는 것을 제안한다. `cowptn_test` 에 넣을 필요가 없고, 넣으면 기존 시드 2·3 의 시각 중복 문제(메모리 기록)와 홀드아웃·의심 비율 오염이 생긴다. lead 지시대로 DB 생성이 필요하면(컨테이너 경로 확인용) 제안: seed 53 → `10.40.0.x`, 59 → `10.41.0.x`, 61 → `10.42.0.x`, 시각은 2026-10-08 00:00 이후(기존 시드와 겹치지 않게), 기존 대역 10.20·10.30·10.31·10.32 회피 → **11장 Q3**.
+- **데이터 생성 위치 (확정 Q3)**: 학습·개발 평가·새 검증·오라클 데이터 모두 `check_promotion` 과 같이 **시뮬레이터로 메모리에서 생성**한다(시드가 곧 데이터 정의, 결정적). `cowptn_test` 에는 생성하지 않는다(기존 시드 2·3 의 시각 중복, 홀드아웃·의심 비율 오염 회피). 컨테이너 경로 확인이 나중에 필요해지면 그때 별도 결정(후보 대역 10.40/41/42.0.x, 2026-10-08 이후 시각).
 - 시뮬레이터 `ip_prefix` 를 바꾸면 홀드아웃 해시가 바뀌므로 학습 데이터는 R0 와 같은 기본 `10.20.0.` 을 유지하고, 구성 변화는 `split_salt` 로만 준다(E0-b).
 - **1회 보장**: 새 검증 시드는 P1-3 의 `evidence_lock`·`check_record` 방식을 그대로 쓴다(잠금 = 결과 폴더의 `p1_5_evidence.json`, 시드는 53·59·61 전체 집합만, 기존 사본·폴더 없음 거부, lessons #38).
 
 ## 6. 판정 기준 (11장 결정 후, 데이터를 열기 전에 확정)
-> 아래 값은 **제안**이다. lead/사용자 확인(11장 Q2) 후 이 문서에 "확정" 표시와 날짜·커밋을 남기고, 그 뒤에는 변경 이력 규칙(6.4)만 따른다.
+> **확정 (2026-10-07, 사용자 승인 Q2 — 제안값 그대로)**. 확정 시점에 E0·대안·새 검증 시드의 데이터는 하나도 열지 않았다. 이후 변경은 6.4 규칙만 따른다.
 
 ### 6.1 E0 (개발 시드 7·11)
 | 질문 | 충족 조건 | 근거 |
@@ -139,6 +139,7 @@ P1-3 운영 레시피 그대로: `check_promotion.train_operational`(시뮬레�
 선택된 Tk 와 R0 를 같은 실행에서 함께 측정(짝 비교). **PASS** = Tk 가 6.2 의 1~4 를 검증 시드에서도 충족(2~4 는 같은 실행의 R0 대비). 롤링 규칙·고정 임계치·항상 알람 베이스라인 병기(#23). FAIL 이어도 기준·대안을 다시 고르지 않는다.
 
 ### 6.4 변경 이력 규칙
+- **확정 기록**: 2026-10-07 6.1~6.3 의 값(Q-A 1.25 / Q-B 설명 몫 50%·th\* 오탐 0.02 / Q-C 0.008·2/3 동부호 / 선택 규칙 1~5 / 검증 PASS 조건)을 사용자 승인으로 확정. 이 시점에 열린 데이터: 없음(P1-3 에서 이미 연 개발 시드 7·11 과 학습 데이터 101·103 의 기존 결과만 참고했고, E0 모델은 아직 학습하지 않음). 이 커밋 이후 기준 값은 데이터를 열기 전 고정 효력을 갖는다.
 - 6장 확정 후 기준 값을 바꾸려면 **새 데이터를 열기 전**에만, 12장에 날짜·사유·이미 본 데이터 범위를 기록한다(lessons #37).
 - 개발 시드 결과를 본 뒤 바꾼 기준은 그 개발 결과를 "탐색" 으로만 표시하고, 근거는 미개봉 검증 시드 1회에서만 얻는다.
 - 검증 시드를 연 뒤에는 기준·대안·정책을 바꾸지 않는다. 필요한 수정은 새 시드로 하는 별도 차수다.
@@ -153,22 +154,82 @@ P1-3 운영 레시피 그대로: `check_promotion.train_operational`(시뮬레�
 ## 8. 구현 단위 (dev, 순서대로; 각 단위 끝에 전체 pytest)
 | 순서 | 단위 | 변경 파일 | 테스트 ID | 완료 조건 |
 |---|---|---|---|---|
-| 1 | **U1 — E0 도구** | `validation/cli/check_threshold.py`(신규, `check_promotion` 의 `train_operational`·`evaluate_models`·잠금 함수 재사용): `train` 에 `--train-seed`·`--split-salt`·`--split {port,time}`·`--exclusion {aub,truth}` 옵션, `oracle`(시드 211 정상 데이터로 th\* 계산), `e0`(3.3 지표 표·결정표 출력, `--record`). `check_promotion.train_operational` 에 salt·분할·정제 인자 추가는 기본값 = 현행으로 | T-P5-U1a~d | 작은 시드로 끝까지 동작, 재계산 임계치 = 메타 임계치(3.3-5) |
+| 1 | **U1 — E0 도구** | `validation/cli/check_threshold.py`(신규, `check_promotion` 함수 재사용): 서브커맨드 `train`·`oracle`·`e0` — **인자·출력·판정 형식은 8.1**. `check_promotion.train_operational` 에 salt·분할·정제 인자 추가는 기본값 = 현행으로 | T-P5-U1a~g | **8.1 인터페이스 그대로**, 작은 시드로 끝까지 동작, 재계산 임계치 = 메타 임계치(3.3-5) |
 | 2 | **E0 실행** (개발 시드만) | 코드 변경 없음, 로그 `validation/runs/p1_5/logs/`(git 제외) | — | 6.1 판정 + 전 수치를 architect 에 전달 → 설계서 기록 |
 | 3 | **U2 — 대안 도구** (E0 결정표가 허용한 것만) | 같은 도구에 `alt --kind {T1,T2,T3}`: T1 = 사후 임계치 재계산(저장 모델 복사본 메타에만 기록, 원본 불변), T2·T3 = 학습 옵션. `select`(6.2 규칙 자동 적용) | T-P5-U2a~c | 6.2 표 출력, 후보 0개면 FAIL 출력·검증 차단 |
 | 4 | **검증 실행** (새 시드 53·59·61, 1회) | `verify`(잠금 `p1_5_evidence.json`, `check_record`) | T-P5-U2d | 6.3 판정 |
 | 5 | **U3 — 채택 구현** (검증 PASS + 11장 Q5 결정 후에만) | T1: `src/models/trainer.py` 임계치 산출원 인자(`threshold_source` = `train`(기본)/`holdout`), 메타에 `threshold_source` 기록 / T2: `src/pipeline/retrain_policy.py` `val_port_fraction`·`min_val_ports` 와 `src/data/train_window.py`·`data_collector.py` 가드 / T3: `trainer.py`·`data_collector.py` 시간 분할. `config.py.example` 주석. **`MODEL_CONFIG`·기본 정책 불변** | T-P5-A1~A4 | 기본값에서 기존 테스트·골든 불변, 새 경로 테스트 |
 
 - 순서 2 의 결과가 "2단계 진행 안 함" 이면 3~5 는 하지 않는다.
+
+### 8.1 U1 인터페이스 (dev 가 바로 구현할 수 있도록 고정, 2026-10-07)
+**원칙**: `src/` 는 바꾸지 않는다. `validation/cli/check_promotion.py` 의 함수(`train_operational`, `make_data`, `score_data`, `use_models`, `evaluate_models`, `metrics_row`, `POLICIES`, `check_record`)는 import 해서 재사용하고, `train_operational` 에 인자를 추가할 때는 **기본값 = 현행 동작**(P1-3 테스트 불변). 시드 상수는 새 도구에 둔다: `DEV_SEEDS=(7,11)`, `P15_VAL_SEEDS=(53,59,61)`, `TRAIN_DATA_SEEDS=(101,103,105)`, `ORACLE_SEED=211`, `FORBIDDEN_SEEDS=(23,31,47,102,900,33,34,35)`.
+
+**서브커맨드 `train`** — 학습 1회(두 트랙) = 실행 폴더 1개
+| 인자 | 기본 | 의미 |
+|---|---|---|
+| `--out` (필수) | — | 실행 폴더. **이미 있으면 거부**(덮어쓰기 금지). 권장 이름 `validation/runs/p1_5/e0/d{data}_t{train}_s{salt}_{split}_{excl}` |
+| `--data-seed` | 101 | 학습 데이터 시드. 평가·검증·오라클·금지 시드(7·11·53·59·61·211·FORBIDDEN)면 거부 |
+| `--train-seed` | 0 | `torch.manual_seed`·`np.random.seed` |
+| `--split-salt` | `ptn` | 홀드아웃 해시 salt(`RetrainPolicy.split_salt` 대체). `--split time` 에서는 무시하고 `run.json` 에 `null` |
+| `--split` | `port` | `port` = R0(홀드아웃 10%), `time` = 정제 후 전 포트를 시간 앞 80% 학습 / 뒤 20% 검증(`compare_train_exclusion.py` 의 분할 식과 같게, 정제는 `--exclusion` 그대로 적용한 뒤 분할. `aub`+`time` 은 R0 와 같은 `collect_and_save` 호출로 만든 `{ft}_train.csv`·`{ft}_test.csv` 를 **합친 뒤**(= 정제된 전 포트) 시간으로 다시 나눈다 — 정제 경로를 R0 와 동일하게 유지하기 위함) |
+| `--exclusion` | `aub` | `aub` = R0(활성 모델 알람 A ∪ 규칙 B, `collect_and_save` 경로), `truth` = 정답 에피소드 [t_start − 1h, t_end + 4h] 제외(`compare_train_exclusion.exclude("truth")` 와 같은 구간, **진단 전용**) |
+| `--nodes`/`--days` | 4 / 21 | R0 조건 |
+| `--epochs` | 30 | 테스트에서만 줄임(`run.json` 에 기록, E0 판정 실행은 30 고정) |
+| `--active-models` | `models` | 규칙 A 의 활성 모델(v1) 폴더 |
+
+출력(실행 폴더 안): 학습된 모델·스케일러·메타·레지스트리(`train_operational` 과 같은 배치), `train_data/{ft}_train.csv`·`{ft}_test.csv`, 그리고 **`run.json`**:
+```json
+{"data_seed": 101, "train_seed": 0, "split": "port", "split_salt": "ptn", "exclusion": "aub", "nodes": 4, "days": 21,
+ "epochs": 30, "code": "<git HEAD>", "started_at": "...", "elapsed_sec": 0.0,
+ "tracks": {"traffic": {"threshold": 0.0, "final_val_loss": 0.0, "samples_used": 0, "val_ports": 0, "train_ports": 0,
+                        "threshold_recomputed": 0.0, "recompute_rel_err": 0.0}, "optical": {}}}
+```
+- `threshold_recomputed`: 학습 CSV 를 Trainer 와 같은 경로(저장 스케일러, `create_sequences(is_train=True, fit_scaler=False)`)로 시퀀스화해 마지막 시점 MSE 의 `threshold_percentile` 백분위를 재계산한 값. `recompute_rel_err` > 1e-6 이면 경고를 출력하고 기록(기준을 완화하지 않음, 원인 미확인이면 architect 에 보고).
+- `elapsed_sec` 는 Q4 규모 확정용(첫 1회 측정값을 보고).
+
+**서브커맨드 `oracle`** — 진단용 out-of-sample 임계치
+| 인자 | 기본 | 의미 |
+|---|---|---|
+| `--runs` (필수) | — | 실행 폴더 목록(쉼표) 또는 glob |
+| `--seed` | 211 | 정상 기준 데이터 시드(다른 값은 거부) |
+| `--nodes`/`--days` | 4 / 14 | |
+
+동작: 시드 211 데이터를 생성하고, 각 실행 폴더 모델로 `score_data`(운영 추론 경로) 점수를 계산 → 정답 구간 [t_start − 1h, t_end + 4h] 밖 행만 남겨 트랙별 점수의 99.5 백분위 = **th\***. 같은 경로로 그 실행의 학습 CSV 점수 99.5 백분위 = **th_in**(in-sample, 추론 경로) 도 계산. 결과를 각 실행 폴더의 **`oracle.json`**(`{"seed": 211, "tracks": {ft: {"th_star": , "th_in": , "bias": th_in/th_star, "n_scores": }}}`)에 쓴다. 이미 있으면 거부.
+
+**서브커맨드 `e0`** — 개발 시드 평가·판정
+| 인자 | 기본 | 의미 |
+|---|---|---|
+| `--runs` (필수) | — | 실행 폴더 목록(쉼표) 또는 glob. 모두 `run.json`·`oracle.json` 필수(없으면 거부) |
+| `--seeds` | `7,11` | **{7, 11} 의 부분집합만 허용**(그 밖은 거부) |
+| `--nodes`/`--days` | 6 / 14 | V1 과 같은 평가 조건 |
+| `--out-csv` (필수) | — | 행 단위 결과. `check_record` 와 같은 규칙(기존 파일·폴더 없음 거부) |
+| `--out-json` (필수) | — | 판정 요약. 같은 규칙 |
+
+- 평가: 각 실행 × 시드 × 정책(오탐억제형, 기본) × 임계치 종류(`own` = 메타 임계치, `oracle` = 트랙별 th\* 로 `score_data` 결과 튜플의 전역 임계치만 교체) → `simulate_alarms`·`evaluate_alarms`·`metrics_row`. 베이스라인(롤링 규칙·고정 임계치·항상 알람)은 시드별 1회 병기.
+- **`--out-csv` 컬럼(고정)**: `run, data_seed, train_seed, split, split_salt, exclusion, seed, policy, th_kind, th_traffic, th_optical, auprc, f1, early, fp, prec, lead`.
+- **`--out-json` 구조(고정)**: `{"seeds": [...], "runs": [...], "R0": [R0 세트 실행 이름], "QA": {ft: {"max_min": , "cv": , "met": bool}}, "QB": {"sd_own": , "sd_oracle": , "explained": , "fp_oracle_mean": , "met": bool}, "QC": {"salt"|"split"|"exclusion": {"pairs": n, "mean_diff": , "same_sign": k, "met": bool}}, "decision": "T1T3T2" | "T2" | "stop", "criteria": {6.1 의 값}}`.
+  - R0 세트 = `split=port, split_salt=ptn, exclusion=aub` 인 실행(E0-a 의 9회). Q-A·Q-B 는 R0 세트, 오탐억제형, 개발 시드 평균의 실행별 값으로 계산.
+  - Q-C 짝: 요인만 다른 R0 실행과 (data_seed, train_seed) 로 짝지음. salt 효과는 같은 (data, train) 의 `ptn` 실행과 각 다른 salt 실행의 차이.
+  - `decision`: 3.4 결정표를 그대로 코드로(Q-B 충족 → `T1T3T2`, 아니면 Q-C 의 salt 또는 split 충족 → `T2`, 아니면 `stop`). exclusion 효과는 보고만(정제는 대안 대상이 아님).
+- 6.1 기준 값은 도구 상수로 두고 `--out-json` 의 `criteria` 에 그대로 기록(인자로 바꿀 수 없음).
+
+**테스트 (U1, `tests/validation/test_check_threshold.py`)** — 소형 데이터(2노드 × 3일, 1에폭), 활성 모델은 `test_check_promotion.py` 와 같은 방식의 더미/임시 폴더 사용
+| ID | 검증 내용 |
+|---|---|
+| T-P5-U1a | `train` → `oracle` → `e0` 를 끝까지 실행, `run.json`·`oracle.json`·CSV 컬럼·JSON 키가 위 고정 형식과 일치 |
+| T-P5-U1b | `threshold_recomputed` 와 메타 `threshold` 의 상대 오차 ≤ 1e-6 (#31) |
+| T-P5-U1c | 같은 salt 면 홀드아웃 포트 집합 동일, 다른 salt 면 달라짐(소형 데이터에서 달라지는 salt 쌍을 테스트에 고정) / `--split time` 은 검증 CSV 가 시간 후반 20% 행만 포함 |
+| T-P5-U1d | 시드 가드: `train --data-seed` 에 7·11·53·59·61·211·금지 시드 거부, `e0 --seeds` 에 7·11 밖 값 거부, `oracle --seed` 211 밖 거부 |
+| T-P5-U1e | 덮어쓰기 거부: `train --out` 기존 폴더, `oracle.json` 기존 파일, `--out-csv`/`--out-json` 기존 파일·폴더 없음 → 측정 전 거부 |
+| T-P5-U1f | 결정표 함수: 합성 입력으로 `T1T3T2` / `T2` / `stop` 세 경로와 Q-A·Q-B·Q-C 경계값(1.25, 50%, 0.02, 0.008, 2/3) 판정 |
+| T-P5-U1g | `train_operational` 기본 인자 호출이 현행과 같은 분할·정제(기존 `test_check_promotion.py` 통과로 갈음 + salt 기본 `ptn` 확인) |
 - `src` → `validation` import 금지 유지(`tests/test_architecture.py`).
 
 ## 9. 테스트 계획 (`tests/` 는 `src/`·`validation/` 구조)
 | 파일 | ID | 내용 |
 |---|---|---|
-| `tests/validation/test_check_threshold.py` | T-P5-U1a | 작은 시드(2노드·3일·1에폭)로 `train`→`e0` 끝까지 실행, 표 컬럼 존재 |
-| 〃 | T-P5-U1b | 도구가 학습 시퀀스로 재계산한 임계치 = 저장 메타 `threshold` (#31) |
-| 〃 | T-P5-U1c | `--split-salt` 를 바꾸면 홀드아웃 포트 집합이 바뀌고, 같은 salt 면 동일 |
-| 〃 | T-P5-U1d | 개발 시드 집합에 검증 시드(53·59·61)나 소진 시드(23·31·47)가 섞이면 거부 |
+| `tests/validation/test_check_threshold.py` | T-P5-U1a~g | **8.1 의 U1 테스트 표가 정본**(형식·재계산 일치·salt/분할·시드 가드·덮어쓰기 거부·결정표 경계·기본 인자 불변) |
 | 〃 | T-P5-U2a | T1 사후 재계산은 원본 모델 폴더의 메타를 바꾸지 않음(복사본에만 기록) |
 | 〃 | T-P5-U2b | `select` 가 6.2 규칙(5개 조건·동률 규칙)을 표 입력에 대해 정확히 적용, 후보 0개면 FAIL |
 | 〃 | T-P5-U2c | 후보 0개 또는 E0 가 2단계 불허면 `verify` 거부 |
@@ -191,18 +252,19 @@ P1-3 운영 레시피 그대로: `check_promotion.train_operational`(시뮬레�
 | 계산 시간 미측정 | 일정 | 첫 학습 1회 소요를 dev 가 보고 후 전체 일정 확정 |
 | 원인이 학습 난수(가중치)로 판정될 수 있음 | 임계치 방식으로 해결 불가 | 결정표대로 2단계 중단·보고(범위 밖 대안은 사용자 결정) |
 
-## 11. 결정이 필요한 항목 (사용자/lead)
-| ID | 질문 | architect 제안 |
+## 11. 결정 사항 (확정 2026-10-07, 사용자 승인 — 권장안 그대로)
+| ID | 질문 | 결정 |
 |---|---|---|
-| **Q1** | plan.md P1-5 행·P1-3 설계서 6장 "원인 추정" 의 "검증 포트 홀드아웃의 99.5 백분위" 문구 정정 | 정정(별도 커밋): "임계치는 학습 시퀀스 in-sample 99.5 백분위, 홀드아웃은 조기 종료 경로로만 영향(미검증), 0.010 대 0.029 는 교란된 비교" |
-| **Q2** | 6장 판정 기준 값(Q-A 1.25, Q-B 50%·0.02, Q-C 0.008, 6.2 의 −0.03/−0.05/분산 조건) 확정 | 제안값대로 확정 후 E0 착수 |
-| **Q3** | 새 검증 시드를 `cowptn_test` 에 생성할지 | **생성하지 않음**(메모리 생성으로 충분, DB 오염·시각 중복 회피). 필요 시 10.40/41/42.0.x, 2026-10-08 이후 |
-| **Q4** | E0 규모(21회 학습)와 일정 | dev 가 첫 1회 소요 측정 후 확정. 줄여야 하면 E0-b 를 난수 1개로 축소 |
-| **Q5** | 대안 PASS 시 채택 형태: (a) 선택 인자만 추가(기본 = 현행), (b) 재학습 기본값으로 켬(드리프트 후보에도 적용) | (a) 로 구현 후, 기본 전환은 P1-6 게이트 보정·섀도 계획과 함께 별도 결정. `MODEL_CONFIG`·기본 정책 불변 유지 |
-| **Q6** | E0 결과가 "주원인 = 학습 난수" 일 때 후속 | P1-5 는 보고로 종료, 다중 실행 선택·앙상블 등은 별도 Backlog 후보로만 제안 |
-| **Q7** | T4(포트별 정규화)를 P1-5 범위에 둘지 | 범위 밖(보류). T1~T3 실패 시 별도 설계 |
+| **Q1** | plan.md P1-5 행·P1-3 설계서 6장 "원인 추정" 정정 | **정정함**: 임계치 = 학습 시퀀스 in-sample 마지막 시점 MSE 99.5 백분위(`trainer.py:234`·`:305`), 홀드아웃은 간접 영향뿐, 0.010 대 0.029 는 교란 비교, 가설은 E0 로 검증 예정 (plan.md·P1-3 설계서 같은 커밋) |
+| **Q2** | 6장 판정 기준 값 | **제안값 그대로 확정** (6장 머리말·6.4 확정 기록). 이후 데이터를 열기 전 고정 효력 |
+| **Q3** | 새 검증 시드의 `cowptn_test` 생성 | **생성하지 않음**. 학습·개발·검증·오라클 데이터 모두 시뮬레이터로 메모리 생성(5장) |
+| **Q4** | E0 규모(21회)·일정 | **첫 1회 학습 소요를 dev 가 측정한 뒤 규모 확정**(`train` 이 `run.json` 에 소요 초 기록, 8.1). 축소가 필요하면 E0-b 를 난수 1개로 줄이는 안부터 검토 — 축소도 E0 데이터를 열기 전에 12장에 기록 |
+| **Q5** | 대안 PASS 시 채택 형태 | **선택 인자만 추가(기본 = 현행 동작)**. `MODEL_CONFIG`(`threshold_percentile` 99.5 포함)·기본 `AlertPolicy`·활성 모델 불변. 기본값 전환은 별도 결정 |
+| **Q6** | E0 결과가 "주원인 = 학습 난수" 일 때 | **P1-5 는 보고로 종료**. 다중 실행 선택·앙상블 등은 별도 Backlog 후보로만 제안 |
+| **Q7** | T4(포트별 정규화) | **범위 밖**. T1~T3 실패 시 별도 설계 |
 
 ## 12. 변경 이력
 | 날짜 | 변경 | 사유 |
 |---|---|---|
 | 2026-10-07 | 초안 작성 (판정 기준은 제안 상태) | lead 지시(P1-5 착수, 사용자 승인 순서 P1-5 → P1-6 → P1-4). 코드 확인 결과 기존 가설의 전제(홀드아웃 백분위)가 코드와 달라 2장에 정정 사실을 먼저 기록 |
+| 2026-10-07 | **결정 Q1~Q7 확정**(11장, 사용자 승인 권장안), 상태 헤더 확정으로 갱신, 6장 판정 기준 확정 표기·6.4 확정 기록(데이터 미개봉 시점), 5장 데이터 생성 위치 확정(메모리), **8.1 U1 인터페이스 고정**(서브커맨드 `train`·`oracle`·`e0` 인자·출력 파일 `run.json`·`oracle.json`·CSV 컬럼·JSON 키, 시드 가드, 덮어쓰기 거부, 테스트 T-P5-U1a~g), 3.3-1 best epoch 제외(메타에 없음, `src` 불변), 3.3-4 in-sample 편향을 추론 경로 `th_in/th*` 로 정의 | lead 지시: dev 가 U1 에 바로 착수할 수 있게 모호성 제거. 기준 값 변경 없음 |
