@@ -154,6 +154,7 @@
 - **Endpoint**: `GET /api/model/versions`
 - **Description**: 트랙별 모델 버전 목록과 상태를 반환합니다. 재학습 결과는 **후보(candidate)** 로 저장되며, 승격해야 활성(active)이 됩니다. 활성이었다가 교체된 버전은 `retired` 입니다.
 - **Query Params**: `ft=traffic|optical` (생략 시 두 트랙 모두)
+- **버전별 추가 필드** (아래 예시는 축약): `trigger`, `suspect_stats`, `gate`, `gate_status`, **`alert_policy`**(모델과 짝인 알람 정책 메타 — 프리셋 이름 + `AlertPolicy` 5개 필드, 없으면 `null` = 기본 정책), `derived_from`(정책 전용 버전의 원 버전). 활성 모델의 정책 확인은 이 응답의 `alert_policy` 로 합니다(별도 `/api/model/list` 엔드포인트는 없음).
 - **Response**:
 ```json
 {
@@ -170,18 +171,22 @@
 #### 2.4.5 모델 승격 (후보 → 활성)
 - **Endpoint**: `POST /api/model/promote`
 - **Description**: 지정한 버전을 활성화하고 Consumer 에 Redis 로 리로드를 알립니다. 후보가 현재 활성 모델과 크게 다르면(임계치 또는 검증 손실이 3배 초과/미만) **409 와 경고 목록**을 반환하며, 확인 후 `force=true` 로 다시 요청해야 합니다.
-- **Query Params**: `ft=traffic|optical`, `version=v2`, `force=false`
+- **Query Params**: `ft=traffic|optical`, `version=v2`, `force=false`, `reason=manual`
+    - `reason` (string, 선택, 기본 `manual`, 2026-10-07 추가): 승격 사유. 레지스트리(`<model_dir>/<ft>_registry.json`)의 활성화 이력 `history[].reason` 에 기록됩니다. 앞뒤 공백을 제거하며, 제거 후 빈 값이면 `manual` 로 기록합니다. 최대 100자(공백 제거 **전** 원본 기준), 초과 시 `422`. `force=true` 승격에도 같은 방식으로 기록됩니다. 응답 형식은 변경 없음(사유는 응답에 포함되지 않음).
+    - 예: `POST /api/model/promote?ft=traffic&version=v2&force=true&reason=v1%20비정상%20기준(G2),%20P1-3%20V1~V4%20합격` (P1-3 설계서 `docs/design/p1_3_model_promotion.md` 7장 4단계의 "사유 기록"이 이 인자로 남음)
+    - 이력에 남는 다른 사유 값: `rollback`(롤백, 2.4.6), `auto-gate`(드리프트 auto 모드 자동 승격), `trained`/`initial`(최초 학습), `legacy`(구 레지스트리 이관).
+    - **한계**: 사용자가 `reason=rollback`(또는 `auto-gate` 등)을 직접 넣어도 막지 않으므로, 이력만으로는 실제 롤백·자동 승격과 구분할 수 없습니다.
 - **Response (200)**: `{"status": "success", "track": "optical", "previous": "v1", "active": "v2", "warnings": []}`
 - **Response (409, 경고)**:
 ```json
 {"detail": {"message": "후보가 현재 활성 모델과 크게 다릅니다. 확인 후 force=true 로 다시 요청하세요.",
             "warnings": ["임계치가 현재 모델 대비 50.9배 (0.1704 -> 8.676)", "검증 손실이 현재 모델 대비 39.3배 (0.01753 -> 0.6886)"]}}
 ```
-- **오류**: `404` 버전 없음 / `409` 이미 활성이거나 모델 파일 누락 / `422` 잘못된 트랙
+- **오류**: `404` 버전 없음 / `409` 이미 활성이거나 모델 파일 누락 / `422` 잘못된 트랙 또는 `reason` 100자 초과
 
 #### 2.4.6 모델 롤백
 - **Endpoint**: `POST /api/model/rollback`
-- **Description**: 직전에 활성이었던 버전으로 되돌립니다(활성화 이력 기준, 파일이 남아 있는 버전만). 한 번 더 호출하면 다시 직전 활성으로 돌아갑니다.
+- **Description**: 직전에 활성이었던 버전으로 되돌립니다(활성화 이력 기준, 파일이 남아 있는 버전만). 한 번 더 호출하면 다시 직전 활성으로 돌아갑니다. 활성화 이력의 사유는 `rollback` 으로 기록됩니다(사유 인자 없음).
 - **Query Params**: `ft=traffic|optical`
 - **Response**: `{"status": "success", "track": "optical", "previous": "v2", "active": "v1", "warnings": []}`
 - **오류**: `409` 되돌릴 이전 활성 버전이 없음
