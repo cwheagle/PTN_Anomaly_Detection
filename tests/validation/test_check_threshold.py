@@ -24,7 +24,7 @@ SALT_A, SALT_B = "ptn", "p15c"
 
 def _targs(out, tiny, **kw):
     base = dict(out=str(out), data_seed=5, train_seed=0, split_salt="ptn", split="port", exclusion="aub", nodes=2, days=3,
-                epochs=1, active_models=str(tiny))
+                epochs=1, active_models=str(tiny), code_rev=None)
     return types.SimpleNamespace(**{**base, **kw})
 
 
@@ -339,3 +339,31 @@ def test_default_run_uses_policy_salt_ptn_and_cli_defaults_are_r0(runs, monkeypa
     assert parsed["split_salt"] == "ptn" and parsed["split"] == "port" and parsed["exclusion"] == "aub"
     assert (parsed["nodes"], parsed["days"], parsed["epochs"], parsed["data_seed"], parsed["train_seed"]) == (4, 21, 30, 101, 0)
     assert parsed["active_models"] == "models"
+
+
+# ── run.json code 필드: --code-rev > PTN_CODE_REV > unknown ──
+def test_code_rev_precedence_argument_then_env_then_unknown(monkeypatch):
+    monkeypatch.delenv("PTN_CODE_REV", raising=False)
+    assert ct._code_rev(None) == "unknown" and ct._code_rev("") == "unknown"
+    monkeypatch.setenv("PTN_CODE_REV", "envrev")
+    assert ct._code_rev(None) == "envrev"
+    assert ct._code_rev("argrev") == "argrev"                                   # 인자가 환경변수보다 우선
+
+
+def test_train_records_code_rev_in_run_json(tmp_path, tiny_model_dir, monkeypatch):
+    monkeypatch.delenv("PTN_CODE_REV", raising=False)
+    run = ct.cmd_train(_targs(tmp_path / "a", tiny_model_dir, code_rev="abc1234"))
+    assert run["code"] == "abc1234" and json.load(open(tmp_path / "a" / "run.json"))["code"] == "abc1234"
+    monkeypatch.setenv("PTN_CODE_REV", "fromenv")
+    assert ct.cmd_train(_targs(tmp_path / "b", tiny_model_dir))["code"] == "fromenv"
+
+
+def test_cli_exposes_code_rev_option_default_none(monkeypatch):
+    parsed = {}
+    monkeypatch.setattr(ct, "cmd_train", lambda a: parsed.update(vars(a)))
+    monkeypatch.setattr("sys.argv", ["check_threshold.py", "train", "--out", "o", "--code-rev", "deadbee"])
+    ct.main()
+    assert parsed["code_rev"] == "deadbee"
+    monkeypatch.setattr("sys.argv", ["check_threshold.py", "train", "--out", "o"])
+    ct.main()
+    assert parsed["code_rev"] is None

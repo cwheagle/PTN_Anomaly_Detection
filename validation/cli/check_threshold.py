@@ -20,7 +20,6 @@ import argparse
 import glob
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -57,12 +56,9 @@ FP_POLICY = "오탐억제형"
 # ─────────────────────────────────────────────
 # 공통
 # ─────────────────────────────────────────────
-def _code_version():
-    try:
-        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=root_dir, text=True,
-                                       stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return "unknown"
+def _code_rev(arg):
+    """run.json 의 code: --code-rev 인자 > 환경변수 PTN_CODE_REV > 'unknown' (컨테이너에서는 git 을 읽지 못하므로 호출자가 넘긴다)"""
+    return arg or os.environ.get("PTN_CODE_REV") or "unknown"
 
 
 def _load_json(path):
@@ -167,7 +163,7 @@ def cmd_train(a):
                       "threshold_recomputed": recomputed, "recompute_rel_err": rel}
     run = {"data_seed": a.data_seed, "train_seed": a.train_seed, "split": a.split,
            "split_salt": a.split_salt if a.split == "port" else None, "exclusion": a.exclusion, "nodes": a.nodes, "days": a.days,
-           "epochs": a.epochs, "code": _code_version(), "started_at": started.strftime("%Y-%m-%d %H:%M:%S"),
+           "epochs": a.epochs, "code": _code_rev(a.code_rev), "started_at": started.strftime("%Y-%m-%d %H:%M:%S"),
            "elapsed_sec": elapsed, "tracks": tracks}
     _dump_json(os.path.join(a.out, "run.json"), run)
     print(f"[OK] {a.out}: {elapsed:.0f}s, " + ", ".join(
@@ -389,6 +385,7 @@ def main():
     t.add_argument("--days", type=int, default=21)
     t.add_argument("--epochs", type=int, default=30)
     t.add_argument("--active-models", default="models")
+    t.add_argument("--code-rev", default=None, help="run.json 의 code 에 기록할 코드 버전(없으면 환경변수 PTN_CODE_REV, 둘 다 없으면 unknown)")
     o = sub.add_parser("oracle")
     o.add_argument("--runs", required=True)
     o.add_argument("--seed", type=int, default=ORACLE_SEED)
