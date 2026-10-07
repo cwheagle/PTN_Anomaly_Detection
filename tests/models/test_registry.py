@@ -359,3 +359,75 @@ def test_g3_relative_fail_needs_force(d):
     assert e.value.warnings == [f"[G3] {msg}"]
     out = reg_mod.promote(str(d), FT, "v2", force=True)
     assert out["active"] == "v2" and out["warnings"] == [f"[G3] {msg}"]
+
+
+# ──────────────────────────────────────────────
+# P1-6 U1: G2 검증 손실 방향 대안 (새 함수만, 기존 경로 불변)
+# ──────────────────────────────────────────────
+@pytest.mark.parametrize("va,vc,mode,blocking,notes", [
+    (1.0, 3.0, "worse", 0, 0), (1.0, 3.0, "lower_warn", 0, 0), (1.0, 3.0, "both_fail", 0, 0),   # 정확히 3배: 경고 없음
+    (3.0, 1.0, "lower_warn", 0, 0), (3.0, 1.0, "both_fail", 0, 0),                            # 정확히 1/3: 경고 없음
+    (1.0, 3.5, "worse", 1, 0), (1.0, 3.5, "lower_warn", 1, 0), (1.0, 3.5, "both_fail", 1, 0),   # 초과: 모두 blocking
+    (3.0, 0.9, "worse", 0, 0),                                                                # worse 는 낮은 쪽 무시
+    (3.0, 0.9, "lower_warn", 0, 1), (3.0, 0.9, "both_fail", 1, 0),
+    (None, 0.9, "both_fail", 0, 0), (3.0, None, "both_fail", 0, 0), (0, 0.9, "both_fail", 0, 0), (3.0, 0, "both_fail", 0, 0),
+])
+def test_val_loss_findings_modes_and_boundaries(va, vc, mode, blocking, notes):
+    """T-P6-U1c"""
+    b, n = reg_mod.val_loss_findings(va, vc, mode)
+    assert (len(b), len(n)) == (blocking, notes)
+    assert all(f.cause == "val_loss" for f in b + n)
+
+
+def test_val_loss_findings_messages_and_unknown_mode():
+    b, n = reg_mod.val_loss_findings(3.01, 0.0259, "lower_warn")
+    assert b == [] and n == ["검증 손실 3.01 → 0.0259 (1/116.2, 기준 ≥ 1/3) — 활성 모델 비정상 또는 후보 과적합·누출 의심, 사람이 검토"]
+    assert reg_mod.val_loss_findings(0.02, 0.07, "worse")[0] == ["검증 손실 0.02 → 0.07 (×3.5, 기준 ≤ ×3)"]
+    with pytest.raises(ValueError):
+        reg_mod.val_loss_findings(1.0, 1.0, "bogus")
+
+
+def _r(act_th=0.3, act_val=0.02):
+    return {"active_version": "v1", "versions": [{"version": "v1", "threshold": act_th, "final_val_loss": act_val}]}
+
+
+@pytest.mark.parametrize("th,val", [(0.3, 0.02), (0.91, 0.02), (0.09, 0.02), (0.3, 0.07), (0.91, 0.07), (0.3, 0.0002),
+                                    (0.3, None), (None, 0.07), (0.3, 0.06), (0.9, 0.02)])
+def test_compare_with_active_split_worse_blocking_equals_existing(th, val):
+    """T-P6-U1d: mode=worse 의 blocking == compare_with_active, notes 는 항상 빈 리스트"""
+    e = {"version": "v2", "threshold": th, "final_val_loss": val}
+    b, n = reg_mod.compare_with_active_split(_r(), e, "worse")
+    assert b == reg_mod.compare_with_active(_r(), e) and n == []
+
+
+def test_compare_with_active_split_cause_tags_and_modes():
+    e = {"version": "v2", "threshold": 0.91, "final_val_loss": 0.07}
+    b, n = reg_mod.compare_with_active_split(_r(), e)
+    assert [f.cause for f in b] == ["threshold", "val_loss"] and n == []
+    low = {"version": "v2", "threshold": 0.3, "final_val_loss": 0.0002}
+    assert reg_mod.compare_with_active_split(_r(act_val=3.01), low, "worse") == ([], [])
+    b, n = reg_mod.compare_with_active_split(_r(act_val=3.01), low, "lower_warn")
+    assert b == [] and [f.cause for f in n] == ["val_loss"]
+    b, n = reg_mod.compare_with_active_split(_r(act_val=3.01), low, "both_fail")
+    assert [f.cause for f in b] == ["val_loss"] and n == []
+    both = {"version": "v2", "threshold": 0.91, "final_val_loss": 0.0002}                # 임계치 blocking + 검증 손실 notes
+    b, n = reg_mod.compare_with_active_split(_r(act_val=3.01), both, "lower_warn")
+    assert [f.cause for f in b] == ["threshold"] and [f.cause for f in n] == ["val_loss"]
+    assert reg_mod.compare_with_active_split({"active_version": None, "versions": []}, e) == ([], [])
+    assert reg_mod.compare_with_active_split(_r(), {"version": "v1", "threshold": 9, "final_val_loss": 9}) == ([], [])
+    with pytest.raises(ValueError):
+        reg_mod.compare_with_active_split(_r(), e, "bogus")
+
+
+def test_is_legacy_meta(tmp_path):
+    def entry(name, meta):
+        if meta is not None:
+            (tmp_path / name).write_text(meta)
+        return {"version": "v1", "config_path": name}
+    assert reg_mod.is_legacy_meta(str(tmp_path), entry("a.json", '{"threshold": 0.3}')) is True
+    assert reg_mod.is_legacy_meta(str(tmp_path), entry("b.json", '{"baseline_port_median": 0.04}')) is False
+    assert reg_mod.is_legacy_meta(str(tmp_path), entry("c.json", '{"baseline_port_median": null}')) is True
+    assert reg_mod.is_legacy_meta(str(tmp_path), entry("d.json", None)) is False          # 메타 없음
+    assert reg_mod.is_legacy_meta(str(tmp_path), entry("e.json", "not json")) is False
+    assert reg_mod.is_legacy_meta(str(tmp_path), {"version": "v1"}) is False
+    assert reg_mod.is_legacy_meta(str(tmp_path), None) is False

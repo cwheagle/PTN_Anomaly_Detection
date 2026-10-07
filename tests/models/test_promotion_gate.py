@@ -361,3 +361,80 @@ def test_overall_follows_g3_c4prime():
     assert by(skip)["G3"] == pg.SKIP and skip.status == pg.WARN
     g3 = {c.id: c for c in warn.checks}["G3"]
     assert (g3.value, g3.limit) == (0.10, 0.05) and g3.detail["cand"] == {"incidents": 1, "port_days": 390}
+
+
+# ──────────────────────────────────────────────
+# P1-6 U1: 새 판정 순수 함수 (기존 경로에서 호출하지 않음)
+# ──────────────────────────────────────────────
+def _rate(r):
+    return {"ports": 60, "incidents": 1, "incidents_per_port_day": r}
+
+
+def test_p6_constants_are_fixed_by_design():
+    assert pg.G3_DELTA == pg.G3_NU == 0.02 and pg.G3_OVERLAP_K == 6
+
+
+def test_g3_delta_boundary_and_no_active():
+    """T-P6-U1a: Δ = 0.02 → 초과 아님(부동소수 0.07-0.05 포함), 0.02+ε → 초과, 활성 없음 → 판정 안 함"""
+    assert pg.g3_delta(_rate(0.25), _rate(0.125)) == (True, 0.125)
+    ex, v = pg.g3_delta(_rate(0.07), _rate(0.05))              # 0.07-0.05 = 0.020000000000000004
+    assert ex is False and v == pytest.approx(0.02)
+    ex, v = pg.g3_delta(_rate(0.0625), _rate(0.0625))   # Δ=0
+    assert ex is False and v == 0
+    ex, v = pg.g3_delta(_rate(0.05 + 1e-6), _rate(0.03))
+    assert ex is True
+    assert pg.g3_delta(_rate(0.1), _rate(0.3)) == (False, pytest.approx(-0.2))   # 활성이 과다 → 음수, 초과 아님
+    assert pg.g3_delta(_rate(0.1), None) == (None, None)
+    assert pg.g3_delta(None, _rate(0.1)) == (None, None)
+    assert pg.g3_delta(_rate(0.1), {"ports": 0}) == (None, None)
+    assert pg.g3_delta(_rate(0.07), _rate(0.05), delta=0.01)[0] is True
+
+
+def _alarms(rows):
+    """rows: [(port 번호, 15분 스텝 번호)] → 알람 프레임(KEY + occur_date + alarm)"""
+    base = pd.Timestamp("2026-03-01 00:00")
+    return pd.DataFrame([{"ip_addr": "10.0.0.1", "cid": "c", "lid": f"p{p}", "occur_date": base + pd.Timedelta(minutes=15 * s),
+                          "alarm": True} for p, s in rows])
+
+
+def test_g3_new_alarm_rate_matches_count_incidents_and_partial_overlap():
+    """T-P6-U1b: 묶음 = count_incidents 와 같은 개수, 부분 겹침 = 공통, 빈 알람 → 0"""
+    from src.pipeline import alerting
+    cand = _alarms([(1, 0), (1, 1), (1, 2), (1, 7), (1, 8), (2, 100), (2, 105), (2, 106)])
+    rate, n_new, n_total = pg.g3_new_alarm_rate(cand, None, port_days=10)
+    assert n_total == alerting.count_incidents(cand) == 4         # (1: 0-2, 7-8 은 간격 5 > 4 → 분리), (2: 100, 105-106 → 간격 5 → 분리)
+    assert (n_new, rate) == (4, 0.4)                               # 활성 없음 → 전부 새 알람
+    act = _alarms([(1, 2)])                                         # 후보 0-2 구간과 부분 겹침 (마지막 행에서)
+    assert pg.g3_new_alarm_rate(cand, act, 10)[1:] == (2, 4)       # 포트 1 의 두 인시던트는 공통(7-8 은 시작 7-6=1 ≤ 활성 2), 포트 2 의 둘은 새 알람
+    act_other_port = _alarms([(2, 2)])                              # 다른 포트의 활성 알람은 겹침이 아님
+    assert pg.g3_new_alarm_rate(cand, act_other_port, 10)[1:] == (4, 4)
+    assert pg.g3_new_alarm_rate(_alarms([]), act, 10) == (0.0, 0, 0)
+    assert pg.g3_new_alarm_rate(cand.iloc[0:0], None, 10) == (0.0, 0, 0)
+    assert pg.g3_new_alarm_rate(cand, act, 0)[0] is None
+
+
+def test_g3_new_alarm_rate_k_boundary():
+    """k 경계: 끝 + 6스텝에 활성 알람 = 공통, + 7스텝 = 새 알람 (시작 앞쪽도 대칭)"""
+    cand = _alarms([(1, 100), (1, 101)])                           # 인시던트 [100, 101]
+    for step, new in [(107, 0), (108, 1), (94, 0), (93, 1), (100, 0)]:   # 끝 101+6=107, 시작 100-6=94
+        act = _alarms([(1, step)])
+        assert pg.g3_new_alarm_rate(cand, act, 3)[1] == new, step
+    assert pg.g3_new_alarm_rate(cand, _alarms([(1, 108)]), 3, k=7)[1] == 0     # k 인자
+
+
+def test_g3_new_alarm_exceeded_boundary():
+    assert pg.g3_new_alarm_exceeded(0.02) is False and pg.g3_new_alarm_exceeded(0.02 + 1e-6) is True
+    assert pg.g3_new_alarm_exceeded(None) is None
+
+
+def test_g2_same_data_ratios_values_and_missing():
+    """T-P6-U1e: 값 계산, 활성·점수 없음 → 해당 키 None"""
+    c = pd.DataFrame({"mse": [0.1, 0.2, 0.9]})
+    a = pd.DataFrame({"mse": [0.05, 0.1, 0.4]})
+    r = pg.g2_same_data_ratios(c, a, 0.04)
+    assert r["mse_median_ratio"] == pytest.approx(2.0) and r["cand_gate_mse_over_val_loss"] == pytest.approx(5.0)
+    assert pg.g2_same_data_ratios(c, None, 0.04) == {"mse_median_ratio": None, "cand_gate_mse_over_val_loss": pytest.approx(5.0)}
+    assert pg.g2_same_data_ratios(None, a, 0.04) == {"mse_median_ratio": None, "cand_gate_mse_over_val_loss": None}
+    assert pg.g2_same_data_ratios(c, a, None)["cand_gate_mse_over_val_loss"] is None
+    assert pg.g2_same_data_ratios(c, a, 0)["cand_gate_mse_over_val_loss"] is None
+    assert pg.g2_same_data_ratios(c, pd.DataFrame({"mse": []}), 0.04)["mse_median_ratio"] is None
