@@ -154,6 +154,7 @@
 - **Endpoint**: `GET /api/model/versions`
 - **Description**: 트랙별 모델 버전 목록과 상태를 반환합니다. 재학습 결과는 **후보(candidate)** 로 저장되며, 승격해야 활성(active)이 됩니다. 활성이었다가 교체된 버전은 `retired` 입니다.
 - **Query Params**: `ft=traffic|optical` (생략 시 두 트랙 모두)
+- **버전별 추가 필드** (아래 예시는 축약): `trigger`, `suspect_stats`, `gate`, `gate_status`, **`alert_policy`**(모델과 짝인 알람 정책 메타 — 프리셋 이름 + `AlertPolicy` 5개 필드, 없으면 `null` = 기본 정책), `derived_from`(정책 전용 버전의 원 버전). 활성 모델의 정책 확인은 이 응답의 `alert_policy` 로 합니다(별도 `/api/model/list` 엔드포인트는 없음).
 - **Response**:
 ```json
 {
