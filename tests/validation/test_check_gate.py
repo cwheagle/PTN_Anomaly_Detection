@@ -335,3 +335,246 @@ def test_rand1_run_leaves_no_log_and_a_second_run_is_refused(e2e):
     assert not any(f.endswith(".log") for d, _, fs in os.walk(root / "g2" / "rand1") for f in fs)
     with pytest.raises(SystemExit):
         cg.cmd_g2_train(_train_args(1))
+
+
+# ══════════════════════════════════════════════
+# U2-G3: g3 · g3-dev · g3-verify
+# ══════════════════════════════════════════════
+def _g3_args(**kw):
+    base = dict(models=None, active_models="models", nodes=2, seeds="79,83,89", record=None)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _write_g3_dev(root, selected="G3-A"):
+    os.makedirs(root, exist_ok=True)
+    (root / cg.G3_DEV_NAME).write_text(json.dumps({"selected": selected}))
+
+
+def test_g3_constants_are_the_pre_registered_values():
+    assert cg.G3_LOCK_NAME == "p1_6_g3_evidence.json" and cg.G3_DEV_NAME == "g3_dev.json"
+    assert set(cg.G3_MODELS) == {"s101", "s103"} and all(p.endswith(("promo_s101", "promo_s103")) for p in cg.G3_MODELS.values())
+    assert cg.G3_ALTS == {"G3-A": "G3_A", "G3-C": "G3_C"}                      # G3-B 는 Q1 으로 제외
+
+
+# ── T-P6-U2b: 시드 가드 (G3) ──
+@pytest.mark.parametrize("seed", FORBIDDEN)
+def test_g3_commands_reject_forbidden_seeds_before_measurement(root, monkeypatch, seed):
+    monkeypatch.setattr(cg, "_g3_tables", _boom)
+    _write_g3_dev(root)
+    for fn, kw in ((cg.cmd_g3, {"seeds": str(seed)}), (cg.cmd_g3_verify, {"seeds": str(seed)})):
+        with pytest.raises(SystemExit, match="사용 금지"):
+            fn(_g3_args(**kw))
+    assert not (root / "locks").exists()
+
+
+@pytest.mark.parametrize("seeds", ["107", "7,79", "79,83,89", "13"])        # G2 시드·근거 혼입·임의 시드는 탐색(g3)에서 거부
+def test_g3_explore_accepts_only_dev_seeds(root, monkeypatch, seeds):
+    monkeypatch.setattr(cg, "_g3_tables", _boom)
+    with pytest.raises(SystemExit, match="허용 집합"):
+        cg.cmd_g3(_g3_args(seeds=seeds))
+
+
+@pytest.mark.parametrize("seeds", ["79", "79,83", "83,89", "7,11", "107", "7,79,83,89"])
+def test_g3_verify_requires_the_whole_evidence_set(root, monkeypatch, seeds):
+    monkeypatch.setattr(cg, "_g3_tables", _boom)
+    _write_g3_dev(root)
+    with pytest.raises(SystemExit):
+        cg.cmd_g3_verify(_g3_args(seeds=seeds))
+    assert not (root / "locks").exists()                                     # 거부는 잠금도 폴더도 남기지 않음
+
+
+# ── T-P6-U2e: 순서 ──
+def test_g3_verify_requires_dev_record_with_selected_alternative(root, monkeypatch):
+    monkeypatch.setattr(cg, "_g3_tables", _boom)
+    with pytest.raises(SystemExit, match="개발 기록"):
+        cg.cmd_g3_verify(_g3_args())
+    for sel in (None, "G3-B", "x"):
+        _write_g3_dev(root, sel)
+        with pytest.raises(SystemExit, match="선택된 대안이 없"):
+            cg.cmd_g3_verify(_g3_args())
+    assert not (root / "locks").exists()
+
+
+def test_g3_dev_record_is_not_overwritten(root, monkeypatch):
+    monkeypatch.setattr(cg, "_g3_tables", _boom)
+    _write_g3_dev(root)
+    with pytest.raises(SystemExit, match="이미 있습니다"):
+        cg.cmd_g3_dev(_g3_args())
+
+
+# ── T-P6-U2d: 기록 가드 ──
+def test_g3_verify_record_guard_runs_before_lock(root, monkeypatch):
+    monkeypatch.setattr(cg, "_g3_tables", _boom)
+    _write_g3_dev(root)
+    old = root / "old.json"
+    old.write_text("{}")
+    lock_path = root / "locks" / cg.G3_LOCK_NAME
+    for record, msg in ((str(old), "이미 있습니다"), (str(root / "nodir" / "x.json"), "폴더"), (str(lock_path), "폴더|잠금 파일")):
+        with pytest.raises(SystemExit, match=msg):
+            cg.cmd_g3_verify(_g3_args(record=record))
+    assert not (root / "locks").exists() and not (root / "nodir").exists()
+
+
+# ── T-P6-U2c: 잠금 ──
+def test_g3_verify_lock_is_fixed_path_exclusive_before_measurement_and_one_shot(root, monkeypatch, tmp_path):
+    seen = []
+
+    def fake_tables(models, active, seeds, nodes):
+        seen.append(((root / "locks" / cg.G3_LOCK_NAME).exists(), sorted(seeds)))      # 측정 시작 전에 잠금이 이미 있음
+        return {m: _mk_table() for m in models}
+    monkeypatch.setattr(cg, "_g3_tables", fake_tables)
+    _write_g3_dev(root, "G3-A")
+    rec1 = tmp_path / "r1.json"
+    cg.cmd_g3_verify(_g3_args(record=str(rec1)))
+    assert seen == [(True, [79, 83, 89])]
+    lock = json.loads((root / "locks" / cg.G3_LOCK_NAME).read_text())
+    assert lock["status"] == "verified" and lock["seeds"] == [79, 83, 89] and lock["selected"] == "G3-A" and "verdict" in lock
+    assert cg.g3_lock_path() == str(root / "locks" / cg.G3_LOCK_NAME)
+    for kw in ({}, {"record": str(tmp_path / "other_name.json")}, {"models": f"x={tmp_path}"}):   # 기록 이름·모델 폴더를 바꿔도 우회 불가
+        with pytest.raises(SystemExit, match="1회만"):
+            cg.cmd_g3_verify(_g3_args(**kw))
+    assert len(seen) == 1 and rec1.exists()
+    assert not (tmp_path / "other_name.json").exists()
+
+
+def test_g3_verify_failed_measurement_still_leaves_the_lock(root, monkeypatch):
+    def fail(*a, **k):
+        raise RuntimeError("측정 실패")
+    monkeypatch.setattr(cg, "_g3_tables", fail)
+    _write_g3_dev(root)
+    with pytest.raises(RuntimeError):
+        cg.cmd_g3_verify(_g3_args())
+    assert json.loads((root / "locks" / cg.G3_LOCK_NAME).read_text())["status"] == "started"
+    with pytest.raises(SystemExit, match="1회만"):
+        cg.cmd_g3_verify(_g3_args())
+
+
+# ── T-P6-U2g: G3 판정 함수 ──
+A_, B_ = cp.V3_ACTIVES[0][0], cp.V3_ACTIVES[1][0]
+
+
+def _t(rows):
+    return pd.DataFrame([{"seed": 79, "density": "d", "track": "traffic", "candidate": "c", "truth_fp": 0.0, "total": 0.0,
+                          "active_total": 0.0, "delta": 0.0, "new_rate": 0.0, "n_new": 0, "caught_new_eps": 0,
+                          "label": l, "active": a, "G3_A": x, "G3_C": y, "G3_C4": z} for l, a, x, y, z in rows])
+
+
+def _mk_table():
+    return _t([("정상", A_, "PASS", "PASS", "PASS"), ("정상", B_, "PASS", "PASS", "WARN"),
+               ("과다", A_, "WARN", "WARN", "WARN"), ("과다", B_, "FAIL", "FAIL", "WARN")])
+
+
+def test_judge_alt_rules_and_boundaries():
+    j = cg.judge_alt(_mk_table(), "G3_A")
+    assert (j["rule1"], j["rule2"], j["rule3"], j["ok"]) == (True, True, True, True)
+    c4 = cg.judge_alt(_mk_table(), "G3_C4")                                   # 현행: 과다(b) 가 WARN → 규칙 2 위반
+    assert (c4["rule2_excess_b_not_fail"], c4["rule2"], c4["ok"]) == (1, False, False)
+    bad1 = _t([("정상", B_, "FAIL", "PASS", "PASS"), ("과다", B_, "FAIL", "FAIL", "FAIL"), ("과다", A_, "WARN", "WARN", "WARN")])
+    assert cg.judge_alt(bad1, "G3_A")["rule1_normal_fail"] == 1 and cg.judge_alt(bad1, "G3_A")["ok"] is False
+    assert cg.judge_alt(bad1, "G3_C")["ok"] is True
+
+
+def test_judge_alt_rule3_is_a_safety_check_and_same_for_both_alternatives():
+    """규칙 3: 과다 후보의 (a) 판정은 절대 상한 WARN 경로가 결정하므로 대안 간 같다 — PASS 가 나오면 두 대안 모두 위반"""
+    t = _t([("정상", A_, "PASS", "PASS", "PASS"), ("과다", A_, "PASS", "PASS", "PASS"), ("과다", B_, "FAIL", "FAIL", "FAIL")])
+    for col in ("G3_A", "G3_C"):
+        j = cg.judge_alt(t, col)
+        assert j["rule3_excess_a_pass"] == 1 and j["rule3"] is False and j["ok"] is False
+
+
+def test_judge_alt_undetermined_without_excess_labels():
+    j = cg.judge_alt(_t([("정상", A_, "PASS", "PASS", "PASS"), ("정상", B_, "PASS", "PASS", "PASS")]), "G3_A")
+    assert j["rule2"] is None and j["rule3"] is None and j["ok"] is None
+
+
+def test_judge_g3_models_selection_rule_requires_both_models_and_prefers_g3a():
+    ok, bad = _mk_table(), _t([("정상", B_, "FAIL", "PASS", "PASS"), ("과다", B_, "FAIL", "FAIL", "WARN"), ("과다", A_, "WARN", "WARN", "WARN")])
+    assert cg.judge_g3_models({"s101": ok, "s103": ok})["selected"] == "G3-A"
+    j = cg.judge_g3_models({"s101": ok, "s103": bad})                           # s103 에서 G3-A 가 정상 후보를 FAIL → G3-A 탈락, G3-C 통과
+    assert j["passed"] == {"G3-A": False, "G3-C": True} and j["selected"] == "G3-C"
+    worse = _t([("정상", B_, "FAIL", "FAIL", "PASS"), ("과다", B_, "FAIL", "FAIL", "WARN"), ("과다", A_, "WARN", "WARN", "WARN")])
+    j = cg.judge_g3_models({"s101": ok, "s103": worse})                         # 둘 다 미충족 → 선택 없음(① FAIL), 값 재선택·조합 없음
+    assert j["selected"] is None and j["passed"] == {"G3-A": False, "G3-C": False}
+    assert cg.judge_g3_models({"s101": ok})["reference_c4"]["s101"]["ok"] is False
+
+
+def _s(total, pd_=180):
+    return {"ports": pd_ / 3, "port_days": pd_, "incidents_per_port_day": total}
+
+
+@pytest.mark.parametrize("cand,act,expected", [
+    (0.07, 0.05, "PASS"),      # Δ = 0.02 (부동소수 0.020000000000000004) → 초과 아님, 절대 상한 0.05 이내 → PASS 는 아님: 0.07 > 0.05 → WARN
+    (0.07, 0.04, "FAIL"),
+    (0.04, 0.02, "PASS"),
+    (0.0625, 0.0625, "WARN"),  # Δ 0, 절대 상한 0.05 초과 → WARN
+])
+def test_alt_status_delta_keeps_absolute_warn_and_boundary(cand, act, expected):
+    if (cand, act) == (0.07, 0.05):
+        expected = "WARN"
+    assert cg.alt_status("delta", _s(cand), _s(act), None) == expected
+
+
+@pytest.mark.parametrize("rate,total,expected", [(0.02, 0.01, "PASS"), (0.02 + 1e-6, 0.01, "FAIL"), (0.0, 0.06, "WARN"), (0.0, 0.05, "PASS")])
+def test_alt_status_new_alarms(rate, total, expected):
+    assert cg.alt_status("new_alarms", _s(total), _s(0.0), rate) == expected
+
+
+def test_alt_status_guard_skip_and_unknown_rule():
+    assert cg.alt_status("delta", _s(0.9, 149), _s(0.0, 149), None) == "SKIP"          # 최소 포트·일 가드(150)
+    assert cg.alt_status("delta", _s(0.9, 150), _s(0.0, 150), None) == "FAIL"
+    assert cg.alt_status("delta", None, _s(0.0), None) == "SKIP"
+    assert cg.alt_status("delta", _s(0.9), None, None) == "WARN"                      # 활성 없음: 상대 판정 안 함, 절대 상한 WARN
+    with pytest.raises(ValueError):
+        cg.alt_status("ratio", _s(0.1), _s(0.1), None)
+
+
+# ── T-P6-U2a: 소형 데이터로 g3 → g3-dev → g3-verify, 라벨은 P1-3 V3 정의 그대로 ──
+@pytest.fixture(scope="module")
+def g3_e2e(tmp_path_factory, tiny_model_dir):
+    root = tmp_path_factory.mktemp("p1_6_g3")
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cg, "RUN_ROOT", str(root / "p1_6"))
+    try:
+        tiny = str(tiny_model_dir)
+        models = f"s101={tiny},s103={tiny}"
+        explore = root / "explore.json"
+        cg.cmd_g3(_g3_args(models=models, active_models=tiny, seeds="7", record=str(explore), nodes=5))
+        cg.cmd_g3_dev(_g3_args(models=models, active_models=tiny, nodes=5))
+        yield root / "p1_6", explore, tiny, models
+    finally:
+        mp.undo()
+
+
+def test_g3_end_to_end_table_columns_and_labels_equal_p1_3(g3_e2e):
+    root, explore, tiny, _ = g3_e2e
+    t = cg.g3_table(tiny, tiny, [7], nodes=5, densities={"기준": 7.0})
+    base = cp.v3_table(tiny, tiny, [7], nodes=5, densities={"기준": 7.0})
+    pd.testing.assert_series_equal(t["label"], base["label"])                  # 라벨 = P1-3 V3 정의(v3_table 그대로)
+    pd.testing.assert_series_equal(t["G3_C4"], base["G3"], check_names=False)  # C4' 열 = src check_g3
+    assert {"G3_A", "G3_C", "delta", "new_rate", "n_new", "caught_new_eps"} <= set(t.columns) and len(t) == 20
+    assert set(t.G3_A) <= {"PASS", "WARN", "FAIL", "SKIP"} and (t.n_new >= 0).all() and (t.caught_new_eps >= 0).all()
+    assert json.load(open(explore))["phase"] == "explore" and os.path.exists(str(explore) + ".csv")
+
+
+def test_g3_dev_end_to_end_writes_record_with_both_models(g3_e2e):
+    root, _, _, _ = g3_e2e
+    rec = json.load(open(root / "g3_dev.json"))
+    assert rec["phase"] == "dev" and rec["seeds"] == [7, 11] and rec["models"] == ["s101", "s103"]
+    assert set(rec["judgement"]["per_alt"]) == {"G3-A", "G3-C"} and rec["selected"] in (None, "G3-A", "G3-C")
+    assert set(rec["judgement"]["per_alt"]["G3-A"]) == {"s101", "s103"}
+
+
+def test_g3_verify_end_to_end_runs_once_on_evidence_seeds_with_tiny_models(g3_e2e, tmp_path):
+    root, _, tiny, models = g3_e2e
+    (root / cg.G3_DEV_NAME).unlink()
+    _write_g3_dev(root, "G3-A")                                                 # 소형 모델의 개발 결과와 무관하게 순서 가드를 통과시킨다
+    rec = tmp_path / "ev.json"
+    cg.cmd_g3_verify(_g3_args(models=models, active_models=tiny, record=str(rec), nodes=2))
+    lock = json.load(open(root / "locks" / cg.G3_LOCK_NAME))
+    assert lock["status"] == "verified" and lock["seeds"] == [79, 83, 89]
+    ev = json.load(open(rec))
+    assert ev["phase"] == "evidence" and ev["verdict"]["selected"] == "G3-A"
+    pd.read_csv(str(rec) + ".csv")
+    with pytest.raises(SystemExit, match="1회만"):
+        cg.cmd_g3_verify(_g3_args(models=models, active_models=tiny, nodes=2))

@@ -5,7 +5,7 @@ P1-6 승격 게이트 보정 검증 도구 (설계서 docs/design/p1_6_gate_corr
 결과를 본 뒤 바꾸지 않는다(설계서 6.6). 판정에 쓰는 함수(검증 손실 판정, 학습, 점수)는 src 를 그대로 호출한다 (lessons #31).
 모든 수치는 시뮬레이션 기준이며 실데이터 검증이 아니다.
 
-  이번 단위(U2-G2)는 공통(시드 가드·잠금·기록 가드)과 ② G2 만 구현한다. ① G3 (g3·g3-dev·g3-verify)는 U2-G3 에서 추가한다.
+  공통(시드 가드·잠금·기록 가드), ② G2(g2-train·g2·g2-verify), ① G3(g3·g3-dev·g3-verify)를 구현한다.
 
   g2-train  G2 사례 학습: 데이터 시드 {107,109,113} × 사례 {N 정상, K 누출(검증⊂학습), W 1에폭}, 각각 두 트랙.
             --train-seed 0 = 개발 사례. --train-seed 1 = 근거 사례: 개발 기록(g2_dev.json)이 있어야 하고, 학습 전에 G2 잠금을
@@ -13,11 +13,17 @@ P1-6 승격 게이트 보정 검증 도구 (설계서 docs/design/p1_6_gate_corr
   g2        개발 사례(난수 0) 표와 판정 → validation/runs/p1_6/g2_dev.json
   g2-verify 근거 사례(난수 1) 표와 판정 (잠금 확인·1회). 학습이 끝난 잠금(status=trained)에서만, 한 번만 읽는다.
 
+  g3        개발 시드(7·11 의 부분집합)로 P1-3 V3 틀의 표 + G3-A·G3-C 열 (탐색, 기록 없음 또는 --record)
+  g3-dev    모델 promo_s101·promo_s103 × 개발 시드 7·11 → 6.2 개발 확인 규칙 1~4 → validation/runs/p1_6/g3_dev.json
+  g3-verify 근거 시드 {79,83,89} **전체** 1회 (g3_dev.json 의 선택 대안이 있어야 하고, 측정 전 G3 잠금을 배타적으로 만든다)
+
 1회 보장(설계서 6.5): 잠금 파일은 **고정 경로**(`validation/runs/p1_6/locks/p1_6_g2_evidence.json`)이며 --record·모델 폴더와
 무관하다. 사례 폴더를 지우고 다시 학습해도 같은 사례 집합이면 거부한다. **한계: 잠금 파일을 직접 지우는 것은 막을 수 없다 —
 운영자 규율이다.**
 
 사용법:
+  python validation/cli/check_gate.py g3-dev
+  python validation/cli/check_gate.py g3-verify                    # g3_dev.json 에서 선택된 대안이 있을 때만
   python validation/cli/check_gate.py g2-train --train-seed 0
   python validation/cli/check_gate.py g2
   python validation/cli/check_gate.py g2-train --train-seed 1      # 개발 확정(g2_dev.json) 후에만
@@ -38,6 +44,7 @@ sys.path.append(root_dir)
 
 from src.models import promotion_gate, registry
 from validation.cli import check_promotion as cp
+from validation.cli.build_canary import TRACK_SCENARIOS      # 트랙별 장애 시나리오 (lessons #35), 병기 열 전용
 
 # ─────────────────────────────────────────────
 # 공통: 시드 (설계서 6.0 — 이 목록이 유일한 목록)
@@ -61,6 +68,10 @@ G2_MODES = {"A": "both_fail", "B": "lower_warn", "현행": "worse"}    # G2-A / 
 # 고정 경로 (--record·모델 폴더와 무관). 테스트는 RUN_ROOT 를 임시 폴더로 바꾼다.
 RUN_ROOT = os.path.join(root_dir, "validation", "runs", "p1_6")
 G2_LOCK_NAME, G2_DEV_NAME = "p1_6_g2_evidence.json", "g2_dev.json"
+G3_LOCK_NAME, G3_DEV_NAME = "p1_6_g3_evidence.json", "g3_dev.json"
+G3_MODELS = {"s101": os.path.join(root_dir, "validation", "runs", "p1_3", "promo_s101"),      # P1-3 의 기존 학습 산출물(평가 데이터 아님)
+             "s103": os.path.join(root_dir, "validation", "runs", "p1_3", "promo_s103")}
+G3_ALTS = {"G3-A": "G3_A", "G3-C": "G3_C"}      # 대안 이름 → 표의 판정 열 (G3-B 는 Q1 으로 제외)
 
 
 def lock_dir():
@@ -69,6 +80,14 @@ def lock_dir():
 
 def g2_lock_path():
     return os.path.join(lock_dir(), G2_LOCK_NAME)
+
+
+def g3_lock_path():
+    return os.path.join(lock_dir(), G3_LOCK_NAME)
+
+
+def g3_dev_path():
+    return os.path.join(RUN_ROOT, G3_DEV_NAME)
 
 
 def g2_dev_path():
@@ -307,6 +326,185 @@ def cmd_g2_verify(a):
         pd.DataFrame(rows).to_csv(a.record + ".csv", index=False)
 
 
+# ─────────────────────────────────────────────
+# G3: 표와 판정 (P1-3 V3 틀 재사용 + G3-A·G3-C 열)
+# ─────────────────────────────────────────────
+def alt_status(rule, cand_stats, act_stats, new_rate, limits=None, delta=promotion_gate.G3_DELTA, nu=promotion_gate.G3_NU):
+    """상대 FAIL 자리만 바꾼 G3 판정 (설계서 5.1·3장 5: 가드·절대 상한 WARN·종합 규칙은 check_g3(C4') 그대로).
+    rule = 'delta'(G3-A, Δ > delta) | 'new_alarms'(G3-C, 새 알람 비율 > nu). 활성이 없으면 상대 판정은 하지 않는다."""
+    limits = limits or cp.RetrainPolicy()
+    if not cand_stats or not cand_stats.get("ports"):
+        return "SKIP"
+    port_days = cand_stats["port_days"]
+    if port_days < limits.gate_min_port_days:
+        return "SKIP"
+    if rule == "delta":
+        exceeded, _ = promotion_gate.g3_delta(cand_stats, act_stats, delta)
+    elif rule == "new_alarms":
+        exceeded = promotion_gate.g3_new_alarm_exceeded(new_rate, nu)
+    else:
+        raise ValueError(f"알 수 없는 G3 규칙: {rule!r}")
+    if exceeded:
+        return "FAIL"
+    if cand_stats["incidents_per_port_day"] > limits.gate_max_incidents_per_port_day:
+        return "WARN"
+    return "PASS"
+
+
+def _stats_of(total, port_days):
+    ports = port_days / cp.GATE_DAYS
+    return {"ports": ports, "port_days": port_days, "incidents_per_port_day": total}
+
+
+def _detected_episodes(alarms, episodes):
+    """알람이 활성 구간([t_start − 1스텝, t_end + 4스텝], 평가 도구의 event_metrics 와 같은 정의)에 1행이라도 있는 에피소드 id 집합"""
+    if alarms is None or len(alarms) == 0:
+        return set()
+    a = alarms[alarms["alarm"].astype(bool)][cp.KEY + ["occur_date"]]
+    ep = episodes[["episode_id"] + cp.KEY + ["t_start", "t_end"]].copy()
+    step = pd.Timedelta(minutes=15)
+    ep["lo"], ep["hi"] = ep["t_start"] - step, ep["t_end"] + 4 * step
+    m = a.merge(ep, on=cp.KEY)
+    m = m[(m["occur_date"] >= m["lo"]) & (m["occur_date"] <= m["hi"])]
+    return set(m["episode_id"])
+
+
+def g3_table(model_dir, active_models_dir, seeds, nodes=6, densities=None):
+    """V3 표(`check_promotion.v3_table`, 라벨·C4' 판정 열은 P1-3 그대로) + G3-A·G3-C 열.
+    열: G3_C4(= 표의 G3, C4'), G3_A, G3_C, delta, new_rate, n_new, n_cand_incidents, caught_new_eps(병기: 활성이 놓친 truth 에피소드를 후보가 잡은 수)"""
+    densities = densities or {"기준(7일 간격)": 7.0, "잦음(2일 간격)": 2.0}
+    t, alarms = cp.v3_table(model_dir, active_models_dir, seeds, nodes, densities=densities, return_alarms=True)
+    aref = dict(cp.V3_ACTIVES)
+    rows, ep_cache = [], {}
+    for r in t.to_dict("records"):
+        key_c = (r["seed"], r["density"], r["track"], r["candidate"])
+        key_a = (r["seed"], r["density"], r["track"], aref[r["active"]])
+        cs, as_ = _stats_of(r["total"], r["port_days"]), _stats_of(r["active_total"], r["port_days"])
+        rate, n_new, n_tot = promotion_gate.g3_new_alarm_rate(alarms[key_c], alarms[key_a], r["port_days"])
+        _, delta = promotion_gate.g3_delta(cs, as_)
+        ck = (r["seed"], r["density"])
+        if ck not in ep_cache:
+            ep_cache[ck] = cp.make_data(r["seed"], nodes, cp.GATE_DAYS + 1, mean_gap_days=densities[r["density"]])["episodes"]
+        eps = ep_cache[ck]
+        eps = eps[eps["scenario"].isin(TRACK_SCENARIOS[r["track"]])]
+        caught = len(_detected_episodes(alarms[key_c], eps) - _detected_episodes(alarms[key_a], eps))
+        rows.append({**r, "G3_C4": r["G3"], "G3_A": alt_status("delta", cs, as_, rate), "G3_C": alt_status("new_alarms", cs, as_, rate),
+                     "delta": delta, "new_rate": rate, "n_new": n_new, "n_cand_incidents": n_tot, "caught_new_eps": caught})
+    return pd.DataFrame(rows)
+
+
+def judge_alt(table, col):
+    """6.2 개발 확인 규칙 1~3 (한 모델의 표, 한 판정 열). 규칙 4(두 모델 모두 충족)는 `judge_g3_models` 가 합친다.
+    1 정상 후보 FAIL 0건(변별) / 2 과다 후보 (b) 에서 FAIL 아닌 경우 0건(변별) / 3 과다 후보 (a) 에서 PASS 0건(변별 규칙 아님, 안전 확인).
+    과다 라벨이 전혀 없으면 규칙 2·3 은 판정 불가(None)."""
+    normal = table[table.label == "정상"]
+    excess = table[table.label == "과다"]
+    a, b = excess[excess.active == cp.V3_ACTIVES[0][0]], excess[excess.active == cp.V3_ACTIVES[1][0]]
+    out = {"normal_rows": int(len(normal)), "excess_rows_a": int(len(a)), "excess_rows_b": int(len(b)),
+           "rule1_normal_fail": int((normal[col] == "FAIL").sum()),
+           "rule2_excess_b_not_fail": int((b[col] != "FAIL").sum()),
+           "rule3_excess_a_pass": int((a[col] == "PASS").sum())}
+    out["rule1"] = out["rule1_normal_fail"] == 0
+    out["rule2"] = (out["rule2_excess_b_not_fail"] == 0) if len(b) else None
+    out["rule3"] = (out["rule3_excess_a_pass"] == 0) if len(a) else None
+    out["ok"] = bool(out["rule1"] and out["rule2"] is True and out["rule3"] is not False) if len(excess) else None
+    return out
+
+
+def judge_g3_models(tables):
+    """tables: {모델 이름: 표}. 대안별로 모든 모델이 1~3 을 충족해야 통과(규칙 4). 둘 다 통과하면 G3-A(코드 변경이 작음), 하나면 그 대안,
+    없으면 selected=None(① FAIL — 값 재선택·조합 금지, 근거 시드를 열지 않음)."""
+    per = {alt: {m: judge_alt(t, col) for m, t in tables.items()} for alt, col in G3_ALTS.items()}
+    passed = {alt: all(v["ok"] is True for v in per[alt].values()) for alt in G3_ALTS}
+    selected = "G3-A" if passed["G3-A"] else ("G3-C" if passed["G3-C"] else None)
+    ref = {m: judge_alt(t, "G3_C4") for m, t in tables.items()}                # 참고: 현행 C4'
+    return {"per_alt": per, "passed": passed, "selected": selected, "reference_c4": ref}
+
+
+def _print_g3(tables, judged, title):
+    pd.set_option("display.width", 250)
+    for m, t in tables.items():
+        cols = ["seed", "density", "track", "candidate", "active", "label", "truth_fp", "total", "active_total", "G3_C4", "G3_A",
+                "G3_C", "delta", "new_rate", "n_new", "caught_new_eps"]
+        print(f"== G3 [{title}] 모델 {m} ==")
+        print(t[cols].round(4).to_string(index=False))
+    print()
+    for alt in G3_ALTS:
+        for m, j in judged["per_alt"][alt].items():
+            print(f"[{alt}] {m}: 규칙1 정상 FAIL {j['rule1_normal_fail']}건 / 규칙2 과다(b) FAIL 아님 {j['rule2_excess_b_not_fail']}건"
+                  f"(과다(b) {j['excess_rows_b']}행) / 규칙3 과다(a) PASS {j['rule3_excess_a_pass']}건(과다(a) {j['excess_rows_a']}행) → ok={j['ok']}")
+    for m, j in judged["reference_c4"].items():
+        print(f"[C4' 참고] {m}: 정상 FAIL {j['rule1_normal_fail']}건 / 과다(b) FAIL 아님 {j['rule2_excess_b_not_fail']}건 / 과다(a) PASS {j['rule3_excess_a_pass']}건")
+    print(f"통과: {judged['passed']} → 선택 대안: {judged['selected']}")
+
+
+def _g3_tables(models, active_models, seeds, nodes):
+    return {m: g3_table(path, active_models, seeds, nodes) for m, path in models.items()}
+
+
+def _models_arg(text):
+    return dict(kv.split("=", 1) for kv in text.split(","))
+
+
+def _dump(path, rec, tables):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=2, default=str)
+    pd.concat([t.assign(model=m) for m, t in tables.items()]).to_csv(path + ".csv", index=False)
+
+
+def cmd_g3(a):
+    seeds = check_seeds(a.seeds.split(","), P16_SEEDS["g3_dev"])           # 근거 시드는 g3-verify 로만
+    cp.check_record(a.record)
+    models = _models_arg(a.models) if a.models else G3_MODELS
+    tables = _g3_tables(models, a.active_models, seeds, a.nodes)
+    judged = judge_g3_models(tables)
+    _print_g3(tables, judged, f"탐색 — 개발 시드 {seeds}")
+    if a.record:
+        _dump(a.record, {"phase": "explore", "seeds": seeds, "judgement": judged}, tables)
+
+
+def cmd_g3_dev(a):
+    seeds = check_seeds(P16_SEEDS["g3_dev"], P16_SEEDS["g3_dev"])
+    out = g3_dev_path()
+    os.makedirs(RUN_ROOT, exist_ok=True)                  # 도구 소유의 고정 폴더(사용자 입력 경로가 아님)
+    cp.check_record(out)
+    models = _models_arg(a.models) if a.models else G3_MODELS
+    tables = _g3_tables(models, a.active_models, seeds, a.nodes)
+    judged = judge_g3_models(tables)
+    _print_g3(tables, judged, "개발 — 시드 7·11")
+    os.makedirs(RUN_ROOT, exist_ok=True)
+    _dump(out, {"phase": "dev", "seeds": seeds, "models": list(models), "judgement": judged, "selected": judged["selected"]}, tables)
+    print(f"[OK] 개발 기록 -> {out}")
+
+
+def cmd_g3_verify(a):
+    seeds = check_seeds(a.seeds.split(","), P16_SEEDS["g3_evidence"])
+    if set(seeds) != set(P16_SEEDS["g3_evidence"]):
+        raise SystemExit(f"[!] G3 근거는 시드 {P16_SEEDS['g3_evidence']} 전체만 허용합니다 (부분집합 거부): {seeds}")
+    dev = g3_dev_path()
+    if not os.path.isfile(dev):
+        raise SystemExit(f"[!] 개발 기록 {dev} 가 없습니다 — g3-dev 를 먼저 실행하세요.")
+    with open(dev, "r", encoding="utf-8") as f:
+        selected = json.load(f).get("selected")
+    if selected not in G3_ALTS:
+        raise SystemExit("[!] 개발 확인(6.2)에서 선택된 대안이 없습니다(① FAIL) — 근거 시드를 열지 않습니다.")
+    models = _models_arg(a.models) if a.models else G3_MODELS
+    cp.check_record(a.record, reserved=[g3_lock_path()])
+    os.makedirs(lock_dir(), exist_ok=True)                # 모든 가드를 통과한 뒤에만 고정 잠금 폴더를 만든다
+    cp.evidence_lock(g3_lock_path(), {"kind": "P1-6 G3", "seeds": seeds, "models": list(models), "selected": selected})
+    tables = _g3_tables(models, a.active_models, seeds, a.nodes)
+    judged = judge_g3_models(tables)
+    # 근거 판정은 개발에서 선택된 대안 하나로만 한다 (다른 대안·조합으로 갈아타지 않음). C4' 는 같은 실행의 참고.
+    sel = judged["per_alt"][selected]
+    verdict = {"selected": selected, "per_model": sel, "pass": all(v["ok"] is True for v in sel.values()),
+               "undetermined": any(v["ok"] is None for v in sel.values())}
+    _print_g3(tables, judged, f"근거 — 시드 {seeds} (1회)")
+    print(f"근거 판정({selected}): {'판정 불가(과다 라벨 없음)' if verdict['undetermined'] else ('PASS' if verdict['pass'] else 'FAIL')}")
+    _lock_update(g3_lock_path(), {"status": "verified", "verdict": verdict, "reference_c4": judged["reference_c4"]})
+    if a.record:
+        _dump(a.record, {"phase": "evidence", "seeds": seeds, "judgement": judged, "verdict": verdict}, tables)
+
+
 def main():
     p = argparse.ArgumentParser(description="P1-6 게이트 보정 검증 (U2-G2: 공통 + G2)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -327,6 +525,20 @@ def main():
             s.add_argument("--record", default=None, help="결과 사본 JSON (이미 있으면 거부)")
         s.set_defaults(func=fn)
     t.set_defaults(func=cmd_g2_train)
+    for name, fn, doc in (("g3", cmd_g3, "개발 시드(7·11 부분집합) 탐색 표"),
+                          ("g3-dev", cmd_g3_dev, "개발 확인 6.2 → g3_dev.json"),
+                          ("g3-verify", cmd_g3_verify, "근거 시드 79·83·89 전체 1회")):
+        s = sub.add_parser(name, help=doc)
+        s.add_argument("--models", default=None, help="이름=폴더,... (기본: P1-3 promo_s101·promo_s103)")
+        s.add_argument("--active-models", default="models", help="(a) 활성 = v1 + 기본 정책의 v1 모델 폴더")
+        s.add_argument("--nodes", type=int, default=6, help="게이트 데이터 노드 수 (6 = 60포트, 설계서 6.1)")
+        if name == "g3":
+            s.add_argument("--seeds", default=",".join(map(str, P16_SEEDS["g3_dev"])))
+            s.add_argument("--record", default=None)
+        if name == "g3-verify":
+            s.add_argument("--seeds", default=",".join(map(str, P16_SEEDS["g3_evidence"])))
+            s.add_argument("--record", default=None, help="결과 사본 JSON (이미 있으면 거부)")
+        s.set_defaults(func=fn)
     a = p.parse_args()
     a.func(a)
 
