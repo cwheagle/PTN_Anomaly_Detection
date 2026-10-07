@@ -209,6 +209,80 @@ def compare_with_active(reg, entry):
     return warnings
 
 
+# ─────────────────────────────────────────────
+# P1-6 U1: G2 검증 손실 판정의 방향 대안 (새 함수만 — 기존 경로에서 호출하지 않는다, 설계서 8장)
+# ─────────────────────────────────────────────
+VAL_LOSS_MODES = ("worse", "lower_warn", "both_fail")
+
+
+class Finding(str):
+    """경고 문자열 + 원인 태그(`threshold` / `val_loss`). 문자열로는 기존 경고와 같다."""
+    cause = ""
+
+    def __new__(cls, text, cause):
+        obj = super().__new__(cls, text)
+        obj.cause = cause
+        return obj
+
+
+def val_loss_findings(va, vc, mode):
+    """검증 손실(활성 va, 후보 vc) 항목만 판정해 (blocking, notes) 반환 (순수).
+
+    mode: `worse`      후보가 활성의 3배 초과로 나쁘면 blocking (현행과 같음, 낮은 쪽 무시)
+          `lower_warn` worse + 1/3 미만(비정상적으로 낮음)이면 notes
+          `both_fail`  worse + 1/3 미만이면 blocking
+    어느 한쪽이 없거나 0 이하이면 비교하지 않는다. 경계(정확히 3배·1/3)는 경고 없음."""
+    if mode not in VAL_LOSS_MODES:
+        raise ValueError(f"알 수 없는 검증 손실 모드: {mode!r} (허용: {', '.join(VAL_LOSS_MODES)})")
+    blocking, notes = [], []
+    if not (va and vc and va > 0 and vc > 0):
+        return blocking, notes
+    ratio = vc / va
+    if ratio > VAL_LOSS_RATIO_LIMIT:
+        blocking.append(Finding(f"검증 손실 {va:.4g} → {vc:.4g} ({format_ratio(ratio)}, 기준 ≤ ×{VAL_LOSS_RATIO_LIMIT:g})",
+                                "val_loss"))
+    elif ratio < 1 / VAL_LOSS_RATIO_LIMIT and mode != "worse":
+        msg = Finding(f"검증 손실 {va:.4g} → {vc:.4g} ({format_ratio(ratio)}, 기준 ≥ 1/{VAL_LOSS_RATIO_LIMIT:g}) — "
+                      f"활성 모델 비정상 또는 후보 과적합·누출 의심, 사람이 검토", "val_loss")
+        (blocking if mode == "both_fail" else notes).append(msg)
+    return blocking, notes
+
+
+def compare_with_active_split(reg, entry, mode="worse"):
+    """`compare_with_active` 의 (차단 사유, 참고 메모) 분리판. 임계치 항목은 현행 그대로 blocking,
+    검증 손실은 `val_loss_findings(mode)`. 각 항목은 원인 태그(`.cause`)를 가진다.
+    mode="worse" 의 blocking 은 `compare_with_active` 의 반환과 같고 notes 는 빈 리스트다."""
+    active = find(reg, reg.get("active_version")) if reg.get("active_version") else None
+    if mode not in VAL_LOSS_MODES:
+        raise ValueError(f"알 수 없는 검증 손실 모드: {mode!r} (허용: {', '.join(VAL_LOSS_MODES)})")
+    if not active or active.get("version") == entry.get("version"):
+        return [], []
+    blocking = []
+    ta, tc = active.get("threshold"), entry.get("threshold")
+    if ta and tc and ta > 0 and tc > 0:
+        ratio = tc / ta
+        if ratio > THRESHOLD_RATIO_LIMIT or ratio < 1 / THRESHOLD_RATIO_LIMIT:
+            blocking.append(Finding(f"임계치 {ta:.4g} → {tc:.4g} ({format_ratio(ratio)}, "
+                                    f"기준 1/{THRESHOLD_RATIO_LIMIT:g} ~ ×{THRESHOLD_RATIO_LIMIT:g})", "threshold"))
+    vb, vn = val_loss_findings(active.get("final_val_loss"), entry.get("final_val_loss"), mode)
+    return blocking + vb, vn
+
+
+def is_legacy_meta(model_dir, entry):
+    """활성 모델 메타 파일에 드리프트 기준 `baseline_port_median`(양수)이 없으면 레거시(P1-1 이전).
+    메타가 없거나 읽을 수 없으면 판단하지 않고 False."""
+    path = os.path.join(model_dir, (entry or {}).get("config_path") or "")
+    if not (entry or {}).get("config_path") or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return False
+    median = meta.get("baseline_port_median") if isinstance(meta, dict) else None
+    return not (isinstance(median, (int, float)) and median > 0)
+
+
 def set_gate(model_dir, ft, version, gate):
     """승격 게이트 결과(dict)를 버전 엔트리에 저장"""
     with transaction(model_dir, ft) as reg:

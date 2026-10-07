@@ -142,6 +142,97 @@ def check_g3(cand_stats, active_stats, limits) -> GateCheck:
     return GateCheck("G3", PASS, cand, limit, f"{head} ≤ {limit:.3f} ({count})", detail)
 
 
+# ─────────────────────────────────────────────
+# P1-6 U1: 새 판정 순수 함수 (기존 경로에서 호출하지 않는다 — 채택은 U3, 설계서 8장)
+# ─────────────────────────────────────────────
+G3_DELTA = 0.02            # G3-A: 후보 − 활성 인시던트/포트·일 증가분 상한 (= C1 오탐 부하 상한, 설계서 6.2)
+G3_NU = 0.02               # G3-C: 후보만의 새 알람 인시던트/포트·일 상한
+G3_OVERLAP_K = 6           # G3-C: 활성 알람과 겹침으로 인정하는 앞뒤 허용 스텝(90분, 설계서 6.1)
+_EPS = 1e-12               # 부동소수 경계 허용 (0.07 − 0.05 가 0.02 를 넘는 것으로 계산되지 않게)
+
+
+def g3_delta(cand_stats, active_stats, delta=G3_DELTA):
+    """G3-A: (초과 여부, 증가분). 활성이 없거나 비율이 없으면 판정하지 않고 (None, None). 증가분 > delta 일 때만 초과."""
+    if not cand_stats or not active_stats or not cand_stats.get("ports") or not active_stats.get("ports"):
+        return None, None
+    value = cand_stats["incidents_per_port_day"] - active_stats["incidents_per_port_day"]
+    return value > delta + _EPS, value
+
+
+def g3_new_alarm_exceeded(rate, nu=G3_NU):
+    """G3-C 의 판정: 새 알람 비율 > nu (경계 포함은 초과 아님). rate 가 None 이면 None."""
+    return None if rate is None else rate > nu + _EPS
+
+
+def _incident_spans(alarms):
+    """포트별 (시작, 끝) 인시던트 목록 — `alerting.count_incidents` 와 같은 묶음(간격 > 4스텝이면 새 인시던트),
+    시각은 occur_date 15분 반올림. {포트키: [(start, end), ...]}"""
+    if alarms is None or len(alarms) == 0:
+        return {}
+    a = alarms[alarms["alarm"].astype(bool)][KEY + ["occur_date"]].copy()
+    if a.empty:
+        return {}
+    a["occur_date"] = pd.to_datetime(a["occur_date"]).dt.round("15min")
+    a = a.sort_values(KEY + ["occur_date"])
+    out = {}
+    for key, g in a.groupby(KEY):
+        times = g["occur_date"].tolist()
+        start = prev = times[0]
+        spans = []
+        for t in times[1:]:
+            if t - prev > alerting.STEP * 4:
+                spans.append((start, prev))
+                start = t
+            prev = t
+        spans.append((start, prev))
+        out[key] = spans
+    return out
+
+
+def g3_new_alarm_rate(cand_alarms, act_alarms, port_days, k=G3_OVERLAP_K):
+    """G3-C: (새 알람 비율(건/포트·일), 새 알람 인시던트 수, 후보 인시던트 수).
+
+    후보 인시던트 구간 [시작 − k스텝, 끝 + k스텝] 안에 같은 포트의 활성 알람 행이 1행이라도 있으면 공통(부분 겹침 포함),
+    없으면 새 알람. port_days 가 0 이하면 비율은 None."""
+    cand = _incident_spans(cand_alarms)
+    n_total = sum(len(v) for v in cand.values())
+    act = {}
+    if act_alarms is not None and len(act_alarms):
+        a = act_alarms[act_alarms["alarm"].astype(bool)][KEY + ["occur_date"]].copy()
+        a["occur_date"] = pd.to_datetime(a["occur_date"]).dt.round("15min")
+        for key, g in a.groupby(KEY):
+            act[key] = np.sort(g["occur_date"].values)
+    margin = np.timedelta64(int(k) * 15, "m")
+    n_new = 0
+    for key, spans in cand.items():
+        times = act.get(key)
+        for s, e in spans:
+            if times is None or len(times) == 0:
+                n_new += 1
+                continue
+            lo, hi = np.datetime64(s) - margin, np.datetime64(e) + margin
+            i = np.searchsorted(times, lo, side="left")
+            if not (i < len(times) and times[i] <= hi):
+                n_new += 1
+    rate = (n_new / port_days) if port_days and port_days > 0 else None
+    return rate, n_new, n_total
+
+
+def g2_same_data_ratios(cand_scores, act_scores, cand_val_loss):
+    """G2-C(정보): 같은 게이트 데이터의 점수(`mse` 컬럼)로 계산한 두 비율. 계산할 수 없으면 해당 키는 None.
+    mse_median_ratio = 후보 MSE 중앙값 / 활성 MSE 중앙값, cand_gate_mse_over_val_loss = 후보 MSE 중앙값 / 후보 검증 손실"""
+    def med(s):
+        if s is None or len(s) == 0 or "mse" not in s:
+            return None
+        v = float(np.median(s["mse"].to_numpy(dtype=float)))
+        return v if math.isfinite(v) else None
+
+    mc, ma = med(cand_scores), med(act_scores)
+    ok = lambda x: isinstance(x, (int, float)) and math.isfinite(x) and x > 0
+    return {"mse_median_ratio": mc / ma if mc is not None and ok(ma) else None,
+            "cand_gate_mse_over_val_loss": mc / cand_val_loss if mc is not None and ok(cand_val_loss) else None}
+
+
 def check_g4(canary, limits) -> GateCheck:
     if not canary:
         return GateCheck("G4", SKIP, None, None, "카나리 데이터 없음")
