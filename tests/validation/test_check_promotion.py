@@ -274,6 +274,7 @@ def test_gate_evidence_lock_is_fixed_per_model_and_cannot_be_bypassed_with_anoth
     """1회 잠금은 모델 폴더의 v3_evidence.json — --record 이름을 바꿔도 우회 불가, 잠금이 있으면 측정 전에 거부"""
     monkeypatch.setattr(cp, "v3_table", _boom)
     (tmp_path / cp.V3_LOCK).write_text("{}")                          # 이미 근거 실행을 한 모델
+    (tmp_path / "x").mkdir()                                           # 사본 폴더 검사(check_record)를 통과시켜 잠금 거부를 확인
     for record in (None, str(tmp_path / "other_name.json"), str(tmp_path / "x" / "y.json")):
         with pytest.raises(SystemExit, match="1회만"):
             cp.cmd_gate(_gate_args(tmp_path, "23,31,47", record=record))
@@ -434,3 +435,77 @@ def test_v4_individual_rows_report_keeps_each_model_and_seed_visible():
     assert v2.loc[("s103", 31), "auprc_rank"] == pytest.approx(0.62)             # v2 의 AUPRC(순위 품질)는 기본 정책 행 값
     d = cp.judge_v4(_fake_v4_df(), "v1", ["s101", "s103"])                       # 판정 상수·방식 불변: v2 6개 평균 vs v1 3개 평균
     assert d["f1"] == pytest.approx(0.31 - 0.0) and d["pass"] is True
+
+
+# ──────────────────────────────────────────────
+# --record 사본 덮어쓰기 거부 / evidence_lock 폴더 미생성 거부 (reviewer 보류 2건)
+# ──────────────────────────────────────────────
+def test_check_record_rejects_existing_copy_or_csv_missing_folder_and_lock_path(tmp_path):
+    cp.check_record(None)                                                       # 사본 없음 = 통과
+    cp.check_record(str(tmp_path / "new.json"))                                 # 새 사본 = 통과
+    (tmp_path / "a.json").write_text("old")
+    with pytest.raises(SystemExit, match="덮어쓰지 않습니다"):
+        cp.check_record(str(tmp_path / "a.json"))
+    (tmp_path / "b.json.csv").write_text("old")                                 # .csv 사본만 있어도 거부
+    with pytest.raises(SystemExit, match="덮어쓰지 않습니다"):
+        cp.check_record(str(tmp_path / "b.json"))
+    with pytest.raises(SystemExit, match="폴더"):
+        cp.check_record(str(tmp_path / "nodir" / "c.json"))
+    with pytest.raises(SystemExit, match="잠금 파일과 같은 경로"):
+        cp.check_record(str(tmp_path / "lock.json"), reserved=[str(tmp_path / "lock.json")])
+
+
+def test_evidence_lock_refuses_missing_folder_without_creating_it(tmp_path):
+    target = tmp_path / "typo_model" / cp.V3_LOCK
+    with pytest.raises(SystemExit, match="폴더"):
+        cp.evidence_lock(str(target), {"kind": "V3"})
+    assert not (tmp_path / "typo_model").exists()                               # 폴더도 잠금도 만들지 않음
+
+
+def test_gate_evidence_existing_record_is_rejected_before_lock_and_measurement_and_left_untouched(tmp_path, monkeypatch):
+    monkeypatch.setattr(cp, "v3_table", _boom)
+    rec = tmp_path / "copy.json"
+    rec.write_text("ORIGINAL")
+    with pytest.raises(SystemExit, match="덮어쓰지 않습니다"):
+        cp.cmd_gate(_gate_args(tmp_path, "23,31,47", record=str(rec)))
+    assert rec.read_text() == "ORIGINAL" and not (tmp_path / cp.V3_LOCK).exists()   # 사본 보존, 잠금 안 남김(검증 시드를 열지 않음)
+
+
+def test_gate_explore_existing_record_is_also_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(cp, "v3_table", _boom)
+    rec = tmp_path / "explore.json"
+    rec.write_text("ORIGINAL")
+    with pytest.raises(SystemExit, match="덮어쓰지 않습니다"):
+        cp.cmd_gate(_gate_args(tmp_path, "7,11", record=str(rec)))
+    assert rec.read_text() == "ORIGINAL"
+
+
+def test_gate_evidence_with_missing_model_folder_creates_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(cp, "v3_table", _boom)
+    with pytest.raises(SystemExit, match="폴더"):
+        cp.cmd_gate(_gate_args(tmp_path / "typo", "23,31,47"))
+    assert not (tmp_path / "typo").exists()
+
+
+def test_confirm_existing_record_is_rejected_before_lock_and_measurement(tmp_path, monkeypatch):
+    monkeypatch.setattr(cp, "evaluate_models", _boom)
+    rec = tmp_path / "copy.json"
+    rec.write_text("ORIGINAL")
+    with pytest.raises(SystemExit, match="덮어쓰지 않습니다"):
+        cp.cmd_confirm(_confirm_args(tmp_path, "23,31,47", record=str(rec)))
+    assert rec.read_text() == "ORIGINAL" and not (tmp_path / cp.CONFIRM_LOCK).exists()
+
+
+def test_v4_existing_record_or_missing_model_folder_is_rejected_without_any_lock(tmp_path, monkeypatch):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        d.mkdir()
+    monkeypatch.setattr(cp, "evaluate_models", _boom)
+    rec = tmp_path / "copy.json"
+    rec.write_text("ORIGINAL")
+    with pytest.raises(SystemExit, match="덮어쓰지 않습니다"):
+        cp.cmd_vs_v1(_v4_args({"s101": str(a), "s103": str(b)}, record=str(rec)))
+    assert rec.read_text() == "ORIGINAL"
+    with pytest.raises(SystemExit, match="폴더"):                                # 두 번째 모델 폴더가 없으면 첫 폴더에도 잠금을 만들지 않음
+        cp.cmd_vs_v1(_v4_args({"s101": str(a), "s103": str(tmp_path / "typo")}))
+    assert not (a / cp.V4_LOCK).exists() and not (b / cp.V4_LOCK).exists() and not (tmp_path / "typo").exists()

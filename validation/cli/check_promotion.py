@@ -21,6 +21,7 @@ U4(C3 를 게이트에 구현)를 하게 되면 두 함수를 src/models/promoti
 
 근거 실행(검증 시드 23·31·47)의 1회 보장: 시드는 **전체 집합만** 허용(부분집합·개발 시드 혼입 거부)하고, 측정 전에 잠금 파일을
 만든다 (V3 = <모델 폴더>/v3_evidence.json, confirm = <정책 JSON 폴더>/v2_confirm.json). --record 를 바꿔도 우회할 수 없다.
+--record 사본이 이미 있으면(.csv 포함) 덮어쓰지 않고 측정·잠금 전에 거부하며, 모델 폴더가 없으면 폴더를 만들지 않고 거부한다.
 **한계**: 잠금 파일을 직접 지우거나 다른 모델 폴더를 쓰는 것은 막을 수 없다 — 운영자 규율이다 (lessons #30).
 
 사용법:
@@ -357,9 +358,27 @@ def v3_phase(seeds):
     raise ValueError(f"V3 시드는 개발 {DEV_SEEDS}(탐색, 일부 가능) 또는 검증 {VAL_SEEDS} 전체(근거, 1회) 중 하나여야 합니다: {sorted(ss)}")
 
 
+def check_record(record, reserved=()):
+    """--record 사본 경로를 측정 전에 검사한다: 사본(및 .csv)이 이미 있으면 덮어쓰지 않고 거부, 상위 폴더가 없거나
+    잠금 파일(reserved)과 같은 경로여도 거부 (측정이 끝난 뒤에야 저장 실패하는 것을 막는다). record 가 없으면 아무것도 하지 않는다."""
+    if not record:
+        return
+    path = os.path.abspath(record)
+    for existing in (path, path + ".csv"):
+        if os.path.exists(existing):
+            raise SystemExit(f"[!] --record 사본 {existing} 가 이미 있습니다 — 덮어쓰지 않습니다. 다른 파일 이름을 쓰거나 기존 파일을 직접 옮기세요.")
+    if not os.path.isdir(os.path.dirname(path)):
+        raise SystemExit(f"[!] --record 사본의 폴더 {os.path.dirname(path)} 가 없습니다 — 폴더를 먼저 만드세요.")
+    if path in {os.path.abspath(r) for r in reserved}:
+        raise SystemExit(f"[!] --record 가 1회 잠금 파일과 같은 경로입니다: {path}")
+
+
 def evidence_lock(path, info):
-    """근거 실행의 1회 잠금을 측정 전에 만든다 (고정 위치, 배타적 생성). 이미 있으면 SystemExit — 측정은 시작되지 않는다."""
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    """근거 실행의 1회 잠금을 측정 전에 만든다 (고정 위치, 배타적 생성). 이미 있으면 SystemExit — 측정은 시작되지 않는다.
+    폴더는 만들지 않는다: 모델 폴더가 없으면(경로 오타) 빈 폴더와 잠금을 남기지 않고 거부한다."""
+    folder = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(folder):
+        raise SystemExit(f"[!] 폴더 {folder} 가 없습니다 — 모델 폴더 경로를 확인하세요 (잠금용 폴더를 만들지 않습니다).")
     try:
         fh = open(path, "x", encoding="utf-8")
     except FileExistsError:
@@ -464,6 +483,7 @@ def cmd_gate(a):
     import json
     seeds = [int(x) for x in a.seeds.split(",")]
     phase = v3_phase(seeds)
+    check_record(a.record, reserved=[os.path.join(a.model, V3_LOCK)])    # 사본 검사는 잠금·측정 전에
     lock = None
     if phase == "근거":                                   # 검증 시드: 전체 집합만, 잠금은 모델 폴더 안 고정 파일(--record 와 무관), 측정 전에 잠금
         lock = evidence_lock(os.path.join(a.model, V3_LOCK), {"kind": "V3", "seeds": seeds, "model": a.model, "final_policy": a.final_policy})
@@ -508,6 +528,10 @@ def cmd_vs_v1(a):
     if set(seeds) != set(VAL_SEEDS):                      # 근거 실행: 검증 시드 전체만 (부분집합·개발 시드 혼입 거부)
         raise SystemExit(f"[!] vs-v1(V4)는 검증 시드 {VAL_SEEDS} 전체로만 실행합니다 (받은 값: {sorted(seeds)}).")
     models = _models_arg(a.models)
+    check_record(a.record, reserved=[os.path.join(m, V4_LOCK) for m in models.values()])
+    for mdir in models.values():                          # 폴더가 하나라도 없으면 잠금을 하나도 만들기 전에 거부
+        if not os.path.isdir(mdir):
+            raise SystemExit(f"[!] 모델 폴더 {mdir} 가 없습니다 — 경로를 확인하세요 (잠금용 폴더를 만들지 않습니다).")
     locks = []
     for name, mdir in models.items():                     # v2 모델 폴더마다 1회 잠금 (하나라도 이미 있으면 측정 전 거부, 거부 시 새 잠금을 남기지 않음)
         if os.path.exists(os.path.join(mdir, V4_LOCK)):
@@ -567,7 +591,9 @@ def cmd_confirm(a):
         raise SystemExit(f"[!] confirm 은 검증 시드 {VAL_SEEDS} 전체로만 실행합니다 (받은 값: {sorted(seeds)}).")
     models = _models_arg(a.models)
     sel = json.load(open(a.policy_json, encoding="utf-8"))
-    lock = evidence_lock(os.path.join(os.path.dirname(os.path.abspath(a.policy_json)), CONFIRM_LOCK),
+    confirm_lock = os.path.join(os.path.dirname(os.path.abspath(a.policy_json)), CONFIRM_LOCK)
+    check_record(a.record, reserved=[confirm_lock])
+    lock = evidence_lock(confirm_lock,
                          {"kind": "confirm", "seeds": seeds, "models": a.models, "policy": sel})
     cand = policy_from_row(sel)
     policies = {"기본": POLICIES["기본"], "오탐억제형(기존)": POLICIES["오탐억제형"], "후보": cand}
