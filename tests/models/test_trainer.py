@@ -172,3 +172,18 @@ def test_port_baseline_matches_per_port_mean_of_last_step_mse(tiny_train_csv, is
             means.append(float(((x[:, -1] - trainer.model(x)[:, -1]) ** 2).mean(dim=1).mean()))
     assert base['baseline_port_median'] == pytest.approx(float(np.median(means)), rel=1e-5)
     assert base['baseline_port_p90'] == pytest.approx(float(np.percentile(means, 90)), rel=1e-5)
+
+
+def test_alert_policy_is_recorded_in_meta_and_registry_only_when_given(tiny_train_csv, isolated_paths, tmp_path):
+    """T-P3-T1: alert_policy 지정 시 메타·레지스트리 엔트리에 기록, 미지정이면 어디에도 기록하지 않음(= 기본 정책)"""
+    policy = {"preset": "precision", "sigma_k": 2.0, "dyn_cap": 1.2, "threshold_scale": 3.0, "severity_decay": 0.5,
+              "dampening_steps": {"1": 6, "2": 4, "3": 3}}
+    plain = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16}, activate=False)
+    assert plain.train(train_path=tiny_train_csv, val_path=tiny_train_csv) is True
+    with_policy = Trainer('traffic', config_override={'epochs': 1, 'batch_size': 16}, activate=False, alert_policy=policy)
+    assert with_policy.train(train_path=tiny_train_csv, val_path=tiny_train_csv) is True
+
+    assert "alert_policy" not in json.load(open(tmp_path / 'traffic_ae_v1.json'))
+    assert json.load(open(tmp_path / 'traffic_ae_v2.json'))["alert_policy"] == policy
+    versions = {v["version"]: v for v in json.load(open(tmp_path / 'traffic_registry.json'))["versions"]}
+    assert "alert_policy" not in versions["v1"] and versions["v2"]["alert_policy"] == policy

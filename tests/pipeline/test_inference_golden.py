@@ -44,3 +44,12 @@ def test_policy_override_changes_alarm_count():
     res = relaxed.detect(df_traffic=d["traffic"], df_optical=d["optical"], latest_only=False)
     assert int(res.is_anomaly.sum()) > GOLDEN["alarms"]               # 억제됐던 127건이 알람으로 풀림
     assert (res.alarm_label == "NORMAL (DAMPENED)").sum() == 0
+
+
+def test_models_without_policy_meta_use_the_default_policy_unchanged():
+    """T-P3-I1: 정책 메타가 없는 모델(v1)은 모델별 정책 도입 후에도 기본 정책으로 동작 -> 위 골든이 그대로 성립"""
+    from src.pipeline.alerting import AlertPolicy
+    from src.pipeline.inference import AnomalyDetector
+    det = AnomalyDetector()
+    assert det.policies == {}                                           # v1 메타에는 alert_policy 가 없음
+    assert det.policy_for("traffic") == AlertPolicy() and det.policy_for("optical") == AlertPolicy()

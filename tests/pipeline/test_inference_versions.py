@@ -47,3 +47,61 @@ def test_reload_model_without_version_follows_registry_active(tiny_env):
     registry.promote(str(tiny_env), "traffic", "v2", force=True)
     det.reload_model("traffic")
     assert det.tracks["traffic"]["th"] == pytest.approx(_threshold(tiny_env, "v2"))
+
+
+# ──────────────────────────────────────────────
+# T-P3-I2/I3: 모델별 알람 정책 (P1-3)
+# ──────────────────────────────────────────────
+def _precision_version(tiny_env, ft="traffic", src="v1"):
+    from src.models import registry
+    from src.pipeline.alerting import get_preset, policy_to_meta
+    return registry.create_policy_version(str(tiny_env), ft, src, policy_to_meta(get_preset("precision"), "precision"))["version"]
+
+
+def test_policy_is_applied_per_track(tiny_env):
+    """T-P3-I2: traffic 만 precision 메타 -> traffic 은 precision, optical 은 (메타 없음) 기본 정책"""
+    from src.models import registry
+    from src.pipeline.alerting import AlertPolicy, get_preset
+    ver = _precision_version(tiny_env)
+    registry.promote(str(tiny_env), "traffic", ver, force=True)
+    det = AnomalyDetector()
+    assert det.policy_for("traffic") == get_preset("precision")
+    assert det.policy_for("optical") == AlertPolicy()
+    assert set(det.policies) == {"traffic"}
+
+
+def test_reload_to_version_without_policy_restores_default_and_priority(tiny_env, monkeypatch):
+    """T-P3-I3: 롤백(정책 있는 버전 -> 없는 버전)이면 정책도 복귀. 우선순위: 모델 메타 > 기본(config) 정책"""
+    from src.models import registry
+    from src.pipeline import inference
+    from src.pipeline.alerting import AlertPolicy, get_preset
+    configured = AlertPolicy(sigma_k=2.5)                                  # config.ALERT_POLICY 가 있는 환경을 흉내
+    monkeypatch.setattr(inference, "load_policy", lambda: configured)
+    ver = _precision_version(tiny_env)
+    det = AnomalyDetector(tracks=("traffic",))
+    assert det.policy_for("traffic") == configured                         # 메타 없음 -> config 정책
+    registry.promote(str(tiny_env), "traffic", ver, force=True)
+    det.reload_model("traffic")
+    assert det.policy_for("traffic") == get_preset("precision")            # 메타가 config 보다 우선
+    registry.rollback(str(tiny_env), "traffic")
+    det.reload_model("traffic")
+    assert det.policy_for("traffic") == configured and "traffic" not in det.policies   # 롤백 -> 정책도 복귀
+
+
+def test_dampening_follows_the_dominant_tracks_policy(tiny_env, tiny_scenario, monkeypatch):
+    """P1-3: 두 트랙 결합 등급의 댐프닝은 우세 트랙(traffic 심각도 >= optical 이면 traffic)의 정책을 쓴다.
+    traffic=precision(6/4/3), optical=기본(3/2/1)일 때 행마다 우세 트랙이 바뀌면 적용 정책도 따라간다."""
+    from src.pipeline import inference
+    from src.pipeline.alerting import AlertPolicy, get_preset
+    det = AnomalyDetector()
+    det.policies["traffic"] = get_preset("precision")               # optical 은 메타 없음 -> 기본 정책
+    seen = []
+    real = inference.dampening_step
+    monkeypatch.setattr(inference, "dampening_step", lambda state, level, policy: seen.append(policy) or real(state, level, policy))
+    res = det.detect(df_traffic=tiny_scenario["traffic"], df_optical=tiny_scenario["optical"], latest_only=False)
+
+    expected = [get_preset("precision") if t >= o else AlertPolicy()
+                for t, o in zip(res["traffic_severity"], res["optical_severity"])]
+    assert len(seen) == len(res) == len(expected)
+    assert seen == expected
+    assert get_preset("precision") in seen and AlertPolicy() in seen         # 두 갈래가 실제로 모두 실행됨 (공허한 통과 방지)

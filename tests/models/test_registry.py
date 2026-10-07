@@ -295,3 +295,67 @@ def test_compare_with_active_messages_show_inverse_ratio_with_values_and_limits(
     assert w[0] == "임계치 16.48 → 0.4399 (1/37.5, 기준 1/3 ~ ×3)"
     assert w[1] == "검증 손실 0.01 → 0.05 (×5.0, 기준 ≤ ×3)"
     assert not any("0.0배" in m for m in w)
+
+
+# T-P3-R1: 정책 전용 버전 (P1-3, 재학습 없이 같은 가중치 + 다른 알람 정책)
+def _with_meta_file(d, version="v1"):
+    (d / f"{FT}_ae_{version}.json").write_text(json.dumps({"threshold": 0.3, "trained_at": "2026-10-01 10:00:00"}))
+
+
+PRECISION = {"preset": "precision", "sigma_k": 2.0, "dyn_cap": 1.2, "threshold_scale": 3.0, "severity_decay": 0.5,
+             "dampening_steps": {"1": 6, "2": 4, "3": 3}}
+
+
+def test_policy_version_shares_weights_and_differs_only_in_policy(d):
+    _add(d, "v1", True); _add(d, "v2", False)
+    _with_meta_file(d, "v2")
+    reg_mod.set_gate(str(d), FT, "v2", {"status": "PASS", "checks": []})
+    e = reg_mod.create_policy_version(str(d), FT, "v2", PRECISION)
+    assert e["version"] == "v3" and e["derived_from"] == "v2" and e["trigger"] == "policy"
+    assert e["model_path"] == "traffic_ae_v2.pth" and e["scaler_path"] == "traffic_scaler_v2.joblib"   # 가중치·스케일러 공유
+    assert e["config_path"] == "traffic_ae_v3.json" and e["alert_policy"] == PRECISION
+    assert e["threshold"] == 0.3 and "gate" not in e                       # 원 버전의 게이트 결과는 가져오지 않음
+    meta = json.load(open(d / "traffic_ae_v3.json"))
+    assert meta["alert_policy"] == PRECISION and meta["derived_from"] == "v2" and meta["threshold"] == 0.3
+    assert "alert_policy" not in json.load(open(d / "traffic_ae_v2.json"))  # 원 버전 메타는 불변
+
+
+def test_policy_version_is_a_candidate_and_rollback_target_is_unchanged(d):
+    _add(d, "v1", True); _add(d, "v2", False); _with_meta_file(d, "v2")
+    reg_mod.create_policy_version(str(d), FT, "v2", PRECISION)
+    reg = reg_mod.load(str(d), FT)
+    assert reg["active_version"] == "v1" and reg_mod.status_of(reg, "v3") == "candidate"
+    assert [h["version"] for h in reg["history"]] == ["v1"]
+    reg_mod.promote(str(d), FT, "v3", force=True)
+    assert reg_mod.rollback(str(d), FT)["active"] == "v1"                   # 롤백 대상은 직전 활성
+    listing = {v["version"]: v for v in reg_mod.list_versions(str(d), FT)["versions"]}
+    assert listing["v3"]["alert_policy"] == PRECISION and listing["v3"]["derived_from"] == "v2"
+    assert listing["v1"]["alert_policy"] is None
+
+
+def test_policy_version_errors(d):
+    _add(d, "v1", True); _with_meta_file(d, "v1")
+    with pytest.raises(reg_mod.VersionNotFound):
+        reg_mod.create_policy_version(str(d), FT, "v9", PRECISION)
+    (d / "traffic_scaler_v1.joblib").unlink()
+    with pytest.raises(RegistryError):
+        reg_mod.create_policy_version(str(d), FT, "v1", PRECISION)
+    assert [v["version"] for v in reg_mod.load(str(d), FT)["versions"]] == ["v1"]   # 실패 시 등록 안 됨
+
+
+# T-P3-G7 (U4'): G3 의 절대 상한 위반(WARN)은 수동 승격을 막지 않고, 상대 기준 위반(FAIL)은 force 가 필요
+def test_g3_absolute_limit_warn_promotes_without_force_and_returns_the_message(d):
+    msg = "홀드아웃 130포트 알람 0.100건/포트·일 > 절대 상한 0.050 (×2.0, 절대 상한 초과 — 장애가 많은 기간일 수 있음, 사람이 검토)"
+    _setup_gated(d, _gate("WARN", [_chk("G1", "PASS"), _chk("G3", "WARN", msg)]))
+    out = reg_mod.promote(str(d), FT, "v2")
+    assert out["active"] == "v2" and out["warnings"] == [f"[G3] {msg}"]
+
+
+def test_g3_relative_fail_needs_force(d):
+    msg = "홀드아웃 130포트 알람 0.200건/포트·일 > 기준 0.150 (×1.3, 활성 모델 대비 과다)"
+    _setup_gated(d, _gate("FAIL", [_chk("G1", "PASS"), _chk("G3", "FAIL", msg)]))
+    with pytest.raises(PromotionWarning) as e:
+        reg_mod.promote(str(d), FT, "v2")
+    assert e.value.warnings == [f"[G3] {msg}"]
+    out = reg_mod.promote(str(d), FT, "v2", force=True)
+    assert out["active"] == "v2" and out["warnings"] == [f"[G3] {msg}"]

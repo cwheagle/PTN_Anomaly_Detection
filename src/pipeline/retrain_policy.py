@@ -61,7 +61,7 @@ class RetrainPolicy:
     # 승격 게이트
     gate_max_alarm_ratio: float = 1.5
     gate_alarm_floor: float = 0.01
-    gate_max_incidents_per_port_day: float = 0.05
+    gate_max_incidents_per_port_day: float = 0.05   # G3 절대 상한: 초과 시 WARN (P1-3 C4' — FAIL 이 아님. FAIL 은 활성 대비 gate_max_alarm_ratio 초과)
     gate_min_port_days: int = 150        # 홀드아웃 포트 x 일수가 이보다 작으면 G3 판정 불가(SKIP -> 종합 WARN)
     gate_canary_auprc_drop: float = 0.05
     gate_threshold_trend_versions: int = 3
