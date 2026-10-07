@@ -133,9 +133,38 @@ def active_model_alarm_rows(data, active_models_dir, policy=None):
     return sim[sim["alarm"]][["occur_date"] + KEY]
 
 
+def truth_exclusions(data):
+    """정답 에피소드 [t_start - 1h, t_end + 4h] 제외 구간 (compare_train_exclusion.exclude('truth') 와 같은 구간, 진단 전용)"""
+    ep = data["episodes"]
+    return pd.DataFrame({"ip_addr": ep["ip_addr"], "cid": ep["cid"], "lid": ep["lid"],
+                         "start_time": ep["t_start"] - pd.Timedelta(hours=1), "end_time": ep["t_end"] + pd.Timedelta(hours=4)})
+
+
+def resplit_by_time(out_dir, ft, start, days, fraction=0.8):
+    """정제된 {ft}_train.csv + {ft}_test.csv 를 합쳐 전 포트를 시간 앞 fraction 은 학습, 뒤는 검증으로 다시 나눠 같은 파일에 쓴다
+    (compare_train_exclusion 의 분할 식: occur_date < start + days x 0.8). Returns: (학습 행 수, 검증 행 수)"""
+    d = os.path.join(out_dir, "train_data")
+    tr_path, va_path = os.path.join(d, f"{ft}_train.csv"), os.path.join(d, f"{ft}_test.csv")
+    df = pd.concat([pd.read_csv(tr_path), pd.read_csv(va_path)], ignore_index=True)
+    df["occur_date"] = pd.to_datetime(df["occur_date"])
+    df = df.sort_values(["ip_addr", "cid", "lid", "occur_date"])
+    cut = pd.Timestamp(start) + pd.Timedelta(days=days * fraction)
+    tr, va = df[df["occur_date"] < cut], df[df["occur_date"] >= cut]
+    tr.to_csv(tr_path, index=False)
+    va.to_csv(va_path, index=False)
+    return len(tr), len(va)
+
+
 def train_operational(out_dir, data_seed, train_seed, nodes=4, days=21, epochs=None, active_models_dir="models",
-                      batch_size=None, patience=None, alert_policy=None):
-    """운영 레시피로 두 트랙을 학습해 out_dir 에 저장한다. Returns: {track: {train, test, suspect_stats, threshold}}"""
+                      batch_size=None, patience=None, alert_policy=None, split_salt=None, split="port", exclusion="aub"):
+    """운영 레시피로 두 트랙을 학습해 out_dir 에 저장한다. Returns: {track: {train, test, suspect_stats, threshold}}
+
+    기본 인자는 P1-3 의 운영 레시피 그대로다. P1-5 원인 분해용 요인(기본값 = 현행):
+      split_salt  포트 홀드아웃 해시 salt (None = RetrainPolicy.split_salt)
+      split       'port' = 포트 홀드아웃 10%, 'time' = 정제 후 전 포트를 시간 앞 80% 학습 / 뒤 20% 검증
+      exclusion   'aub' = 활성 모델 알람 A ∪ 규칙 B, 'truth' = 정답 에피소드 제외(진단 전용, 운영 불가)"""
+    if split not in ("port", "time") or exclusion not in ("aub", "truth"):
+        raise ValueError(f"split 은 port|time, exclusion 은 aub|truth 여야 합니다: {split}, {exclusion}")
     import torch
     from src.config import PATHS
     from src.models.trainer import Trainer
@@ -145,14 +174,22 @@ def train_operational(out_dir, data_seed, train_seed, nodes=4, days=21, epochs=N
     cfg = ScenarioConfig(seed=data_seed, nodes=nodes, days=days)
     data = generate(cfg)
     policy = RetrainPolicy()
-    alarms = active_model_alarm_rows(data, active_models_dir)
+    salt = policy.split_salt if split_salt is None else split_salt
     collector = DataCollector.__new__(DataCollector)          # __init__ 은 DB 풀을 만들므로 건너뛰고 시뮬레이터 DB 주입
-    collector.db = _SimDB(data, alarms)
     os.makedirs(out_dir, exist_ok=True)
     start = pd.Timestamp(cfg.start)
-    results = collector.collect_and_save(
-        train_start=start, train_end=start + pd.Timedelta(days=days), output_dir=os.path.join(out_dir, "train_data"),
-        val_port_fraction=policy.val_port_fraction, split_salt=policy.split_salt, suspect_policy=policy)
+    common = dict(train_start=start, train_end=start + pd.Timedelta(days=days), output_dir=os.path.join(out_dir, "train_data"),
+                  val_port_fraction=policy.val_port_fraction, split_salt=salt)
+    if exclusion == "aub":
+        collector.db = _SimDB(data, active_model_alarm_rows(data, active_models_dir))
+        results = collector.collect_and_save(suspect_policy=policy, **common)
+    else:                                                     # truth: 정답 구간만 제외 (규칙·자기 알람 없음)
+        collector.db = _SimDB(data, pd.DataFrame(columns=["occur_date"] + KEY))
+        results = collector.collect_and_save(exclusions=truth_exclusions(data), **common)
+    if split == "time":                                       # 같은 collect_and_save 결과(정제된 전 포트)를 시간으로 다시 나눔
+        for ft, res in results.items():
+            if "train" in res:
+                res["train"], res["test"] = resplit_by_time(out_dir, ft, start, days)
 
     saved = {ft: dict(PATHS[ft]) for ft in TRACKS}
     out = {}
