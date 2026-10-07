@@ -156,13 +156,15 @@ def resplit_by_time(out_dir, ft, start, days, fraction=0.8):
 
 
 def train_operational(out_dir, data_seed, train_seed, nodes=4, days=21, epochs=None, active_models_dir="models",
-                      batch_size=None, patience=None, alert_policy=None, split_salt=None, split="port", exclusion="aub"):
+                      batch_size=None, patience=None, alert_policy=None, split_salt=None, split="port", exclusion="aub",
+                      val_fraction=None):
     """운영 레시피로 두 트랙을 학습해 out_dir 에 저장한다. Returns: {track: {train, test, suspect_stats, threshold}}
 
     기본 인자는 P1-3 의 운영 레시피 그대로다. P1-5 원인 분해용 요인(기본값 = 현행):
       split_salt  포트 홀드아웃 해시 salt (None = RetrainPolicy.split_salt)
       split       'port' = 포트 홀드아웃 10%, 'time' = 정제 후 전 포트를 시간 앞 80% 학습 / 뒤 20% 검증
-      exclusion   'aub' = 활성 모델 알람 A ∪ 규칙 B, 'truth' = 정답 에피소드 제외(진단 전용, 운영 불가)"""
+      exclusion   'aub' = 활성 모델 알람 A ∪ 규칙 B, 'truth' = 정답 에피소드 제외(진단 전용, 운영 불가)
+      val_fraction 포트 홀드아웃 비율 (None = RetrainPolicy.val_port_fraction)"""
     if split not in ("port", "time") or exclusion not in ("aub", "truth"):
         raise ValueError(f"split 은 port|time, exclusion 은 aub|truth 여야 합니다: {split}, {exclusion}")
     import torch
@@ -179,7 +181,7 @@ def train_operational(out_dir, data_seed, train_seed, nodes=4, days=21, epochs=N
     os.makedirs(out_dir, exist_ok=True)
     start = pd.Timestamp(cfg.start)
     common = dict(train_start=start, train_end=start + pd.Timedelta(days=days), output_dir=os.path.join(out_dir, "train_data"),
-                  val_port_fraction=policy.val_port_fraction, split_salt=salt)
+                  val_port_fraction=policy.val_port_fraction if val_fraction is None else val_fraction, split_salt=salt)
     if exclusion == "aub":
         collector.db = _SimDB(data, active_model_alarm_rows(data, active_models_dir))
         results = collector.collect_and_save(suspect_policy=policy, **common)
