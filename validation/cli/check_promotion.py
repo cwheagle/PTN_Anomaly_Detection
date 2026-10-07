@@ -157,14 +157,17 @@ def resplit_by_time(out_dir, ft, start, days, fraction=0.8):
 
 def train_operational(out_dir, data_seed, train_seed, nodes=4, days=21, epochs=None, active_models_dir="models",
                       batch_size=None, patience=None, alert_policy=None, split_salt=None, split="port", exclusion="aub",
-                      val_fraction=None):
+                      val_fraction=None, leak_val_into_train=False):
     """운영 레시피로 두 트랙을 학습해 out_dir 에 저장한다. Returns: {track: {train, test, suspect_stats, threshold}}
 
     기본 인자는 P1-3 의 운영 레시피 그대로다. P1-5 원인 분해용 요인(기본값 = 현행):
       split_salt  포트 홀드아웃 해시 salt (None = RetrainPolicy.split_salt)
       split       'port' = 포트 홀드아웃 10%, 'time' = 정제 후 전 포트를 시간 앞 80% 학습 / 뒤 20% 검증
       exclusion   'aub' = 활성 모델 알람 A ∪ 규칙 B, 'truth' = 정답 에피소드 제외(진단 전용, 운영 불가)
-      val_fraction 포트 홀드아웃 비율 (None = RetrainPolicy.val_port_fraction)"""
+      val_fraction 포트 홀드아웃 비율 (None = RetrainPolicy.val_port_fraction)
+    P1-6 G2 누출 사례용(기본값 = 현행):
+      leak_val_into_train  True 면 학습 직전에 홀드아웃(검증) CSV 를 학습 CSV 에 합친 사본(`<ft>_train_leak.csv`)으로
+                           학습한다 — 검증 ⊂ 학습(진단 전용, 운영 불가). 검증 CSV·임계치 산출 코드는 그대로다."""
     if split not in ("port", "time") or exclusion not in ("aub", "truth"):
         raise ValueError(f"split 은 port|time, exclusion 은 aub|truth 여야 합니다: {split}, {exclusion}")
     import torch
@@ -206,7 +209,11 @@ def train_operational(out_dir, data_seed, train_seed, nodes=4, days=21, epochs=N
             d = os.path.join(out_dir, "train_data")
             trainer = Trainer(ft, config_override=override, activate=True, trigger="manual",
                               suspect_stats=res.get("suspect_stats"), alert_policy=alert_policy)
-            if not trainer.train(train_path=os.path.join(d, f"{ft}_train.csv"), val_path=os.path.join(d, f"{ft}_test.csv")):
+            train_path, val_path = os.path.join(d, f"{ft}_train.csv"), os.path.join(d, f"{ft}_test.csv")
+            if leak_val_into_train:
+                train_path = os.path.join(d, f"{ft}_train_leak.csv")
+                pd.concat([pd.read_csv(os.path.join(d, f"{ft}_train.csv")), pd.read_csv(val_path)]).to_csv(train_path, index=False)
+            if not trainer.train(train_path=train_path, val_path=val_path):
                 raise RuntimeError(f"{ft} 학습 실패")
             out[ft] = {**res, "version": trainer.version}
     finally:
@@ -428,14 +435,18 @@ def evidence_lock(path, info):
     return path
 
 
-def v3_table(model_dir, active_models_dir, seeds, nodes=6, densities=None, tracks=TRACKS, weights=None, final="오탐억제형"):
+def v3_table(model_dir, active_models_dir, seeds, nodes=6, densities=None, tracks=TRACKS, weights=None, final="오탐억제형",
+             return_alarms=False):
     """V3 표: (시드 x 장애 밀도 x 트랙) 게이트 데이터마다 후보 풀 5개 x 활성 2가지의 G3 판정.
     판정 열(G3)은 src 의 promotion_gate.check_g3(C4') 를 그대로 호출한다. truth-FP 라벨은 게이트와 독립(시뮬레이터 정답).
-    C0·C3 는 참고 열이다 (C3 는 도구 구현값)."""
+    C0·C3 는 참고 열이다 (C3 는 도구 구현값).
+    return_alarms=True 면 (표, 알람) 을 반환한다 — 알람 = {(seed, 밀도, 트랙, 후보 이름): 알람 프레임} (P1-6 G3-C 용, 활성의
+    알람은 활성이 가리키는 후보 풀 항목의 것). 기본값은 현행(표만 반환)."""
     densities = densities or {"기준(7일 간격)": 7.0, "잦음(2일 간격)": 2.0}
     rp = RetrainPolicy()
     policies = {"final": POLICIES[final], "default": POLICIES["기본"]}
     rows = []
+    alarm_frames = {}
     for seed in seeds:
         for dname, gap in densities.items():
             extra = {"scenario_weights": weights} if weights else {}
@@ -452,6 +463,8 @@ def v3_table(model_dir, active_models_dir, seeds, nodes=6, densities=None, track
                     cand[name] = {"stats": stats, "alarms": alarms, "truth_fp": fp}
                 base = cand[V3_BASE]["truth_fp"]
                 for name, *_ in V3_POOL:
+                    alarm_frames[(seed, dname, ft, name)] = cand[name]["alarms"]
+                for name, *_ in V3_POOL:
                     c = cand[name]
                     label = "정상" if name == V3_BASE else truth_fp_label(c["truth_fp"], base)
                     cfp = fp_incidents_per_port_day(c["alarms"], data[ft], c["stats"]["port_days"], rp)
@@ -463,7 +476,8 @@ def v3_table(model_dir, active_models_dir, seeds, nodes=6, densities=None, track
                                      "total": c["stats"]["incidents_per_port_day"], "active_total": act["incidents_per_port_day"],
                                      "port_days": c["stats"]["port_days"], "G3": g3.status, "G3_value": g3.value, "G3_limit": g3.limit,
                                      "C0": c0_status(c["stats"], act, rp), "C3": c3_status(c["stats"], act, cfp, rp)})
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    return (table, alarm_frames) if return_alarms else table
 
 
 def judge_v3(table):
