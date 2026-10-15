@@ -16,7 +16,7 @@ AI가 도출한 **'기여도(Contribution)'**와 **'추세 기울기(Slope)'**�
    - **조건**: `rx_packet` 기여도 ≥ 80%, `rx_packet_ratio` ≥ 2.0 (JSON: `min_rx_packet_ratio: 2.0`)
    - **Diagnosis**: 단방향 수신 트래픽 비정상 폭주. 과다 트래픽 유입(DDoS/플러딩) 공격 의심.
    - **Action**: 유입 트래픽 NetFlow 분석(출발지 IP 추적) 및 대역폭 제한(QoS) 적용
-3. **상위 네트워크 논리적 완전 단절 (Silent Drop) (Priority: 70)**
+3. **수신 트래픽 완전 단절 (물리 링크 단절 또는 논리적 차단) (Priority: 70)**
    - **조건**: `rx_packet` 기여도 ≥ 70%, `rx_packet` == 0 (JSON: `max_rx_packet: 0`)
    - **Diagnosis**: 수신 트래픽 100% 단절 (물리 링크 단절 또는 논리적 차단 의심)
    - **Action**: 링크 상태·광 수신 레벨(Rx power)을 먼저 확인하고, 링크 정상이면 상위 라우터 포트 셧다운 여부 및 방화벽/ACL 차단 정책 확인
@@ -29,7 +29,7 @@ AI가 도출한 **'기여도(Contribution)'**와 **'추세 기울기(Slope)'**�
    - **Diagnosis**: 수신 트래픽 비정상적 급감 추세 (상위 네트워크 병목 또는 라우팅 플래핑 의심)
    - **Action**: 업스트림(상위) 노드의 라우팅 테이블 및 네이버(Neighbor) 세션 안정성 예방 점검
 6. **[예지정비] 비트 에러 점진적 증가 (Priority: 40)**
-   - **조건**: `error_packet` 기여도 ≥ 60%, `error_packet_trend_slope` > 0 (JSON: `min_error_trend_slope: 0.1`)
+   - **조건**: `error_packet` 기여도 ≥ 60%, `error_packet_trend_slope` > 0 (JSON: `min_error_packet_trend_slope: 0.1`)
    - **Diagnosis**: 이더넷 프레임 에러(FCS/CRC) 점진적 증가 징후 포착
    - **Action**: 케이블 차폐 상태 점검 및 SFP 전기 포트 이물질 예방 점검 요망
 

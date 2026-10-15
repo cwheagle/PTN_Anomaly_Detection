@@ -167,7 +167,7 @@
 
 | 룰 | 룰 조건 [확인] | 대응 가능 알람 [추정] | 비고 |
 |---|---|---|---|
-| TR-001 수신 단절 | `max_rx_packet 0` | ETH-NO-RX-TRAFFIC, ETH-LINK-FAIL, CLI-LINK-FAIL, OTU-ETH-LINKDOWN | 가장 직접적. 다만 룰 진단문 "물리 연결은 정상이나 논리적 단절(블랙홀)"은 LINK-FAIL 류(물리 단절)와 원인이 다름 → 같은 현상(rx=0)에 원인을 단정하는 문구 점검 필요 |
+| TR-001 수신 단절 | `max_rx_packet 0` | ETH-NO-RX-TRAFFIC, ETH-LINK-FAIL, CLI-LINK-FAIL, OTU-ETH-LINKDOWN | 가장 직접적. 룰 진단문은 "수신 트래픽 100% 단절 (물리 링크 단절 또는 논리적 차단 의심)"(team/dev `fcec403`)으로, 원인을 물리/논리 중 하나로 단정하지 않아 LINK-FAIL 류(물리 단절)와도 어긋나지 않음 → 이전에 지적한 문구 점검(구 문구 "물리 연결은 정상이나 논리적 단절(블랙홀)")은 해소됨 |
 | TR-002 에러 폭주 | `min_error_packet_ratio 2.0` | ETH-ERR, CLI-FCS-SD | ETH-ERR 임계 조건과 비교 필요(Q1-3) |
 | TR-003 수신 급감 | `max_rx_packet_ratio 0.5`, `min_rx_packet 1` | **직접 대응 알람 없음** (ETH-NO-RX-TRAFFIC 은 '없음'일 것으로 추정) | 0 이 아닌 급감은 EMS 가 알람하지 않을 수 있음 → 정답 기록처가 없을 가능성. 현장 검토 라벨로만 평가 |
 | TR-004 에러 점진 증가 | `min_error_packet_trend_slope 0.1` | ETH-ERR 의 **선행** 단계, CLI-CV-SD·CLI-FCS-SD(SD = 열화 단계) | 예지 타겟의 핵심 룰. ETH-ERR 이 나기 전 구간을 잡는지가 C3 의 주제 |
