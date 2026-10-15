@@ -249,17 +249,15 @@ docker-compose up -d
 {
   "id": "TR-001",
   "track": "traffic",
-  "priority": 100,
+  "priority": 70,
   "contributions": {
-    "rx_packet": 35,
-    "tx_packet": 35
+    "rx_packet": 70
   },
   "raw_conditions": {
-    "min_rx_packet_ratio": 1.5,
-    "min_tx_packet_ratio": 1.5
+    "max_rx_packet": 0
   },
-  "diagnosis": "양방향 트래픽 동시 급증 (L2 브로드캐스트 스톰 또는 루핑 의심)",
-  "action": "하위 스위치 루프(Loop) 구성 및 MAC Address 플래핑 이력 확인"
+  "diagnosis": "수신 트래픽 100% 단절 (물리 링크 단절 또는 논리적 차단 의심)",
+  "action": "링크 상태·광 수신 레벨(Rx power)을 먼저 확인하고, 링크 정상이면 상위 라우터 포트 셧다운 여부 및 방화벽/ACL 차단 정책 확인"
 }
 ```
 
