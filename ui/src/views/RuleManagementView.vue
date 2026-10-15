@@ -93,7 +93,7 @@
           <div class="grid grid-cols-3 gap-5">
             <div class="space-y-1.5">
               <label class="text-xs font-bold text-slate-400 uppercase tracking-wide">Rule ID</label>
-              <input v-model="form.id" type="text" required placeholder="e.g. IN-001" class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all">
+              <input v-model="form.id" type="text" required placeholder="e.g. TR-005" class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all">
             </div>
             <div class="space-y-1.5">
               <label class="text-xs font-bold text-slate-400 uppercase tracking-wide">Track</label>
