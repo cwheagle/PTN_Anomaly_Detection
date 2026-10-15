@@ -57,14 +57,19 @@ class RuleTable:
     """
     JSON 파일 기반 RCA 룰 테이블.
     
-    룰 구조:
+    룰 구조 (현재 default_rules.json 의 TR-001):
       {
         "id": "TR-001",
-        "track": "traffic",          # "traffic" | "optical"
-        "priority": 10,              # 높을수록 먼저 평가
-        "condition": "error_contribution > 60",  # 평가 표현식
-        "diagnosis": "CRC/비트 오류 의심 ...",
-        "action": "광 커넥터 청소 ..."
+        "track": "traffic",  # "traffic" | "optical"
+        "priority": 70,  # 높을수록 먼저 평가
+        "contributions": {
+          "rx_packet": 70
+        },
+        "raw_conditions": {
+          "max_rx_packet": 0
+        },
+        "diagnosis": "수신 트래픽 100% 단절 (물리 링크 단절 또는 논리적 차단 의심)",
+        "action": "링크 상태·광 수신 레벨(Rx power)을 먼저 확인하고, 링크 정상이면 상위 라우터 포트 셧다운 여부 및 방화벽/ACL 차단 정책 확인"
       }
     """
 
