@@ -204,17 +204,17 @@
   "count": 1,
   "rules": [
     {
-      "id": "IN-001",
-      "track": "integrated",
-      "priority": 20,
+      "id": "OP-001",
+      "track": "optical",
+      "priority": 100,
       "contributions": {
-        "error_packet": 60
+        "rx_avg_power": 40
       },
       "raw_conditions": {
-        "max_rx_avg_power": -20
+        "max_rx_avg_power": -24
       },
-      "diagnosis": "물리 계층 심각한 장애",
-      "action": "즉각적인 광 선로 단선 점검"
+      "diagnosis": "수신 광전력 한계치 미달 (LOS 발생 확정 - 선로 완전 단선)",
+      "action": "현장 선로 복구반 즉시 출동 및 우회(Protection) 경로 절체 상태 확인"
     }
   ]
 }
@@ -226,7 +226,7 @@
 - **Body Example**:
 ```json
 {
-  "id": "TR-001",
+  "id": "TR-005",
   "track": "traffic",
   "priority": 10,
   "contributions": {
