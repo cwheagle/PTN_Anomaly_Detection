@@ -1,6 +1,6 @@
 [
   {
-    "id": "TR-003",
+    "id": "TR-001",
     "track": "traffic",
     "priority": 70,
     "contributions": {
@@ -13,7 +13,7 @@
     "action": "링크 상태·광 수신 레벨(Rx power)을 먼저 확인하고, 링크 정상이면 상위 라우터 포트 셧다운 여부 및 방화벽/ACL 차단 정책 확인"
   },
   {
-    "id": "TR-004",
+    "id": "TR-002",
     "track": "traffic",
     "priority": 60,
     "contributions": {
@@ -26,7 +26,7 @@
     "action": "양단 포트 Speed/Duplex 미스매치 확인 또는 SFP 모듈 불량으로 인한 긴급 교체 요망"
   },
   {
-    "id": "TR-005",
+    "id": "TR-003",
     "track": "traffic",
     "priority": 50,
     "contributions": {
@@ -40,7 +40,7 @@
     "action": "업스트림(상위) 노드의 라우팅 테이블 및 네이버(Neighbor) 세션 안정성 예방 점검"
   },
   {
-    "id": "TR-006",
+    "id": "TR-004",
     "track": "traffic",
     "priority": 40,
     "contributions": {
@@ -66,7 +66,7 @@
     "action": "현장 선로 복구반 즉시 출동 및 우회(Protection) 경로 절체 상태 확인"
   },
   {
-    "id": "OP-003",
+    "id": "OP-002",
     "track": "optical",
     "priority": 60,
     "contributions": {
@@ -79,7 +79,7 @@
     "action": "통신실 내 광 패치코드 결선 상태 및 굴곡(Macrobending) 즉시 확인"
   },
   {
-    "id": "OP-006",
+    "id": "OP-003",
     "track": "optical",
     "priority": 50,
     "contributions": {

@@ -48,9 +48,9 @@ def test_add_rule_rejects_invalid_and_accepts_valid(tmp_path):
 
 
 def test_op003_actually_matches_with_inference_style_raw_data():
-    """회귀: 광 수신 급락 룰(OP-003)이 추론이 만드는 키 이름으로 실제 매칭되어야 함"""
+    """회귀: 광 수신 급락 룰(OP-002)이 추론이 만드는 키 이름으로 실제 매칭되어야 함"""
     engine = RCAEngine()
-    rule = next(r for r in engine.get_rules() if r["id"] == "OP-003")
+    rule = next(r for r in engine.get_rules() if r["id"] == "OP-002")
     contrib = {"rx_avg_power": 70.0, "tx_avg_power": 30.0}
     raw = {"rx_avg_power": -12.0, "tx_avg_power": -4.0,
            "rx_avg_power_trend_slope": -2.0, "tx_avg_power_trend_slope": -0.1}
@@ -61,7 +61,7 @@ def test_op003_actually_matches_with_inference_style_raw_data():
 
 
 # --- 타겟 정의에 따른 룰 축소 (16 -> 7) ---
-ACTIVE_RULE_IDS = {"TR-003", "TR-004", "TR-005", "TR-006", "OP-001", "OP-003", "OP-006"}
+ACTIVE_RULE_IDS = {"TR-001", "TR-002", "TR-003", "TR-004", "OP-001", "OP-002", "OP-003"}
 
 
 def test_default_rules_are_the_seven_active_ones():
