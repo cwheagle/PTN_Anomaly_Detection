@@ -60,26 +60,10 @@ def test_op003_actually_matches_with_inference_style_raw_data():
     assert diagnosis == rule["diagnosis"] and action == rule["action"]
 
 
-# --- 타겟 정의에 따른 룰 축소 (16 -> 7, 나머지 9개는 archived_rules.json 에 보관) ---
+# --- 타겟 정의에 따른 룰 축소 (16 -> 7) ---
 ACTIVE_RULE_IDS = {"TR-003", "TR-004", "TR-005", "TR-006", "OP-001", "OP-003", "OP-006"}
-ARCHIVED_RULE_IDS = {"TR-001", "TR-002", "OP-002", "OP-004", "OP-005", "IN-001", "IN-002", "IN-003", "IN-004"}
-
-
-def _archived_rules():
-    path = os.path.join(os.path.dirname(DEFAULT_RULES_PATH), "archived_rules.json")
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
 
 
 def test_default_rules_are_the_seven_active_ones():
     assert {r["id"] for r in _default_rules()} == ACTIVE_RULE_IDS
     assert len(RCAEngine().get_rules()) == len(ACTIVE_RULE_IDS)
-
-
-def test_archived_rules_kept_separately_and_still_valid():
-    archived = _archived_rules()
-    ids = [r["id"] for r in archived]
-    assert set(ids) == ARCHIVED_RULE_IDS and len(ids) == len(set(ids))
-    assert not ({r["id"] for r in _default_rules()} & set(ids)), "활성/보관 룰 ID 중복"
-    problems = {r["id"]: validate_rule(r) for r in archived if validate_rule(r)}
-    assert not problems, f"보관 룰이 복원 시 매칭될 수 없는 조건을 가짐: {problems}"
