@@ -11,6 +11,12 @@ P1-2 실데이터 검증 도구 (설계서 docs/design/p1_2_real_data_check.md) 
   python validation/cli/real_data_check.py plan --start 2026-10-05 --end 2026-10-12
   python validation/cli/real_data_check.py extract --start 2026-07-10 --end 2026-10-13 [--ports ports.csv]
   (--schema sim: 시뮬레이터 DB cowptn_test 용 — 필터 컬럼·알람 테이블이 없으면 생략)
+
+스냅샷 기반 하위 명령 (DB 접속 없음, 결과는 <run>/out/ 에 저장):
+  python validation/cli/real_data_check.py alarms --run <run_id> --summary [--range dev]
+  python validation/cli/real_data_check.py alarms --run <run_id> --count-only --range dev
+  python validation/cli/real_data_check.py join-check --run <run_id> [--range dev] [--manual join_manual.csv]
+  판정 구간과 겹치는 분석은 잠금(periods lock) 전에는 거부된다 (설계 9.7 P4). --range: dev | judge | YYYY-MM-DD..YYYY-MM-DD
 """
 import argparse
 import os
@@ -24,6 +30,8 @@ from validation.realdata.db_readonly import (  # noqa: E402
     DEFAULT_MAX_EXEC_MS, PrivilegeError, ReadOnlyDB, load_db_config)
 from validation.realdata.extract import (  # noqa: E402
     DEFAULT_CHUNK, DEFAULT_MAX_ROWS, ExtractError, extract, load_ports_csv)
+from validation.realdata import commands as cmds  # noqa: E402
+from validation.realdata import periods as pr  # noqa: E402
 from validation.realdata.tables import DEFAULT_LOOKBACK_HOURS, KINDS, build_plan, format_plan  # noqa: E402
 
 RUNS_DIR = os.path.join(root_dir, "validation", "runs", "p1_2")
@@ -59,7 +67,57 @@ def build_parser():
     se.add_argument("--max-rows", type=int, default=DEFAULT_MAX_ROWS)
     se.add_argument("--chunk", type=int, default=DEFAULT_CHUNK)
     se.add_argument("--runs-dir", default=RUNS_DIR)
+
+    def snap(sp):
+        sp.add_argument("--run", required=True, help="extract 로 만든 run_id")
+        sp.add_argument("--runs-dir", default=RUNS_DIR)
+        sp.add_argument("--range", default="dev", help="dev | judge | START..END (기본 dev)")
+        sp.add_argument("--alarm-names", help="알람 이름 JSON (기본 validation/runs/ref/alarm_names.json)")
+        sp.add_argument("--alarm-override", help="수동 알람명 CSV (model, alarm_type, alarm_name)")
+        sp.add_argument("--maintenance", help="작업 CSV (start, end, ip_addr, cid, lid, note)")
+
+    sa = sub.add_parser("alarms", help="알람 에피소드·타겟 이벤트 요약/건수 (스냅샷 기반)")
+    snap(sa)
+    g = sa.add_mutually_exclusive_group(required=True)
+    g.add_argument("--summary", action="store_true")
+    g.add_argument("--count-only", action="store_true", help="재생 없이 판정 이벤트 수 (주별·유형별·데이터일당 r)")
+
+    sj = sub.add_parser("join-check", help="포트 조인 안전 검사 J1~J4 (스냅샷 기반)")
+    snap(sj)
+    sj.add_argument("--manual", help="join_manual.csv (M1 수동 확인)")
     return p
+
+
+def _context(args):
+    from validation.realdata.alarm_names import DEFAULT_NAMES_PATH
+    return cmds.Context(os.path.join(args.runs_dir, args.run), args.runs_dir, names_path=args.alarm_names or DEFAULT_NAMES_PATH,
+                        override_csv=args.alarm_override, maintenance_csv=args.maintenance)
+
+
+def _run_snapshot_command(args):
+    try:
+        ctx = _context(args)
+        if args.cmd == "alarms":
+            res = cmds.cmd_alarms(ctx, args.range, "summary" if args.summary else "count")
+            if args.summary:
+                print(res["first_line"])
+                print(f"알람 {res['alarm_rows']:,}행, 에피소드 {res['episodes']}, 행 분류 {res['row_classes']}")
+                print(f"타겟 이벤트: {res['target_events']}  작업 대용 알람: {res['work_alarms']}")
+                print(f"미분류 상위: {[(r['alarm_name'], r['count']) for r in res['unclassified_top'][:10]]}")
+            else:
+                print(f"판정 이벤트 {res['events']} (유형별 {res['by_type']}), 데이터일 {res['data_days']}, r={res['r_per_data_day']:.3f}/데이터일")
+                print(res["note"])
+        else:
+            res = cmds.cmd_join_check(ctx, args.range, args.manual)
+            print(f"join_status = {res['join_status']}  {res['verdict']['reasons']}")
+            print(f"J1 1:1 {res['j1']['one_to_one_ratio']:.3f}  J3 에피소드 {res['j3']['with_bins']} 일치 a={res['j3']['match_a']:.3f} "
+                  f"c={res['j3']['match_c']:.3f} d={res['j3']['match_d']:.3f}  J4 매칭률 {res['j4']['matched_ratio']:.3f}")
+            if res["verdict"].get("stop"):
+                print("[멈춤] 조인 검증 실패 — 보고 후 사용자 결정 필요 (address 조인으로 자동 전환하지 않음)")
+        return 0
+    except pr.PeriodError as e:
+        print(f"[거부] {e}", file=sys.stderr)
+        return 5
 
 
 def _connect(args):
@@ -69,6 +127,8 @@ def _connect(args):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.cmd in ("alarms", "join-check"):
+        return _run_snapshot_command(args)
     kinds = tuple(k.strip() for k in args.kinds.split(",") if k.strip())
     bad = [k for k in kinds if k not in KINDS]
     if bad:

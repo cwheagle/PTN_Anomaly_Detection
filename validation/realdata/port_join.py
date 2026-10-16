@@ -152,6 +152,13 @@ def _grid_bins(start, end):
     return pd.date_range(first, last, freq="15min") if first <= last else pd.DatetimeIndex([])
 
 
+def _alive_set(eth):
+    """(ip_addr, bin_end) — 그 장비의 어떤 포트든 그 구간에 행이 있으면 '장비 생존'(진단용)."""
+    e = prep_keys(eth)
+    b = pd.to_datetime(e["bin_end"] if "bin_end" in e.columns else e["occur_date"])
+    return set(zip(e["ip_addr"], b))
+
+
 def _rx_lookup(eth):
     e = prep_keys(eth)
     e["bin_end"] = pd.to_datetime(e["bin_end"] if "bin_end" in e.columns else e["occur_date"])
@@ -175,6 +182,7 @@ def j3_physical_match(episodes, eth, seed=J3_SEED, min_minutes=J3_MIN_MINUTES, m
     """단절 1차 포트 알람 에피소드(열: ip_addr, cid, lid, start, end)마다 구간(시작부터 최대 24시간)에 완전히 포함된 15분 구간의
     rx_packet == 0 또는 행 없음 비율. (a) 키 조인, (c) 같은 장비의 다른 임의 포트(고정 시드), (d) addr_port 조인(참고)."""
     lookup = _rx_lookup(eth)
+    alive = _alive_set(eth)
     kt = key_table(eth)
     by_ip = {ip: list(zip(g["cid"], g["lid"])) for ip, g in kt.groupby("ip_addr")}
     addr_of = {(r.ip_addr, r.cid, r.lid): r.addr_port for r in kt.itertuples()}
@@ -196,16 +204,21 @@ def j3_physical_match(episodes, eth, seed=J3_SEED, min_minutes=J3_MIN_MINUTES, m
         rec = {"ip_addr": r.ip_addr, "cid": r.cid, "lid": r.lid, "start": start, "bins": len(bins), "in_snapshot": key in addr_of,
                "system_type": sys_of.get(key)}
         if len(bins) == 0 or key not in addr_of:        # 성능 스냅샷에 없는 키는 J4 몫 — 전부 '행 없음'으로 일치 처리하지 않는다
-            rows.append({**rec, "a": np.nan, "c": np.nan, "d": np.nan})
+            rows.append({**rec, "a": np.nan, "c": np.nan, "d": np.nan, "a_alive": np.nan, "c_alive": np.nan})
             continue
         m, z, ms, tot = _match_stats(lookup, key, bins)
         rec.update(a=m / tot, a_zero=z / tot, a_missing=ms / tot)
+        live_bins = [t for t in bins if (r.ip_addr, t) in alive]                  # 진단: 장비가 살아 있는 구간만
+        rec["n_alive_bins"] = len(live_bins)
+        rec["a_alive"] = _match_stats(lookup, key, live_bins)[0] / len(live_bins) if live_bins else np.nan
         others = [k for k in by_ip.get(r.ip_addr, []) if k != (r.cid, r.lid)]
         if others:
             ck = others[rng.randint(len(others))]
             rec["c"] = _match_stats(lookup, (r.ip_addr, ck[0], ck[1]), bins)[0] / tot
+            rec["c_alive"] = _match_stats(lookup, (r.ip_addr, ck[0], ck[1]), live_bins)[0] / len(live_bins) if live_bins else np.nan
         else:
             rec["c"] = np.nan
+            rec["c_alive"] = np.nan
         alarm_addr = getattr(r, "addr_port", "") if hasattr(r, "addr_port") else ""
         cand = by_addr.get((r.ip_addr, alarm_addr), []) if alarm_addr else []
         rec["d"] = _match_stats(lookup, (r.ip_addr, cand[0][0], cand[0][1]), bins)[0] / tot if cand else np.nan
@@ -217,6 +230,10 @@ def j3_physical_match(episodes, eth, seed=J3_SEED, min_minutes=J3_MIN_MINUTES, m
     for k in ("a", "c", "d"):
         out[f"match_{k}"] = float(valid[k].mean()) if len(valid) and valid[k].notna().any() else float("nan")
     out["a_zero"] = float(valid["a_zero"].mean()) if len(valid) else float("nan")
+    va = valid[valid["a_alive"].notna()] if len(valid) else valid
+    out["diag_alive"] = {"episodes": int(len(va)), "match_a_alive": float(va["a_alive"].mean()) if len(va) else float("nan"),
+                         "match_c_alive": float(va["c_alive"].mean()) if len(va) and va["c_alive"].notna().any() else float("nan"),
+                         "note": "장비의 다른 포트에 행이 있는 구간만 본 진단값 — 판정에 쓰지 않음"}
     out["a_missing"] = float(valid["a_missing"].mean()) if len(valid) else float("nan")
     out["n_control"] = int(valid["c"].notna().sum()) if len(valid) else 0
     out["by_model"] = ({str(k): {"episodes": int(len(g)), "match_a": float(g["a"].mean())}
