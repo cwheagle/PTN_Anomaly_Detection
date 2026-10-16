@@ -37,10 +37,11 @@ def severity_label(v):
         return "기타-NA"
 
 
-def prepare_alarms(alarms, names, target_map, d_end=None):
-    """스냅샷 알람 → 키 정리, 시각 파싱, 행 분류, 알람명·타겟 유형 부착. d_end 이후에 발생한 행은 버린다."""
-    from validation.realdata.port_join import classify_alarm_rows
-    a = classify_alarm_rows(alarms)
+def prepare_alarms(alarms, names, target_map, d_end=None, offsets=None):
+    """스냅샷 알람 → 키 정리, 시각 파싱, 행 분류(원 cid 기준), 알람 cid 오프셋 보정(포트·slot 행만, 설계 6.3), 알람명·타겟 유형 부착.
+    d_end 이후에 발생한 행은 버린다. 이후 모든 계산은 보정된 `cid`(=cid_j)를 쓰고 원 값은 `cid_raw` 에 남는다."""
+    from validation.realdata.port_join import apply_offsets, classify_alarm_rows
+    a = apply_offsets(classify_alarm_rows(alarms), offsets)
     a["occur_date"] = pd.to_datetime(a["occur_date"], errors="coerce")
     a["release_date"] = pd.to_datetime(a["release_date"], errors="coerce")
     a = a.dropna(subset=["occur_date"])
@@ -62,7 +63,7 @@ def build_episodes(port_alarms, target_map, d_end, merge_min=FLICKER_MERGE_MIN, 
     """F1·F2·F3·F7. 같은 (ip, cid, lid, alarm_name) 의 발생을 시간순으로 놓고 다음 occur ≤ 병합 끝 + merge_min 이면 한 에피소드.
     F3: release 가 NULL 이거나 d_end 보다 늦으면 끝을 d_end 로 자르고 ongoing=True (추출 날짜에 결과가 좌우되지 않게 — 4.7)."""
     cols = ["ip_addr", "cid", "lid", "alarm_name", "system_type", "model", "name_status", "start", "end", "duration_min",
-            "ongoing", "n_alarms", "is_short", "target_grades", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
+            "ongoing", "n_alarms", "is_short", "target_grades", "cid_raw", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
     if port_alarms.empty:
         return pd.DataFrame(columns=cols)
     d_end = pd.Timestamp(d_end)
@@ -87,7 +88,7 @@ def build_episodes(port_alarms, target_map, d_end, merge_min=FLICKER_MERGE_MIN, 
                 out.append(cur)
             cur = {"ip_addr": ip, "cid": cid, "lid": lid, "alarm_name": name, "system_type": r.system_type, "model": r.model,
                    "name_status": r.name_status, "start": r.occur_date, "end": r.end_eff, "ongoing": bool(r.ongoing),
-                   "n_alarms": 1, "sev": [r.severity]}
+                   "n_alarms": 1, "sev": [r.severity], "cid_raw": getattr(r, "cid_raw", r.cid)}
         out.append(cur)
     ep = pd.DataFrame(out)
     ep["duration_min"] = (ep["end"] - ep["start"]).dt.total_seconds() / 60
@@ -103,7 +104,7 @@ def build_episodes(port_alarms, target_map, d_end, merge_min=FLICKER_MERGE_MIN, 
 def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
     """F4: 짧지 않은 에피소드를 (ip, cid, lid, 타겟 유형, 등급)별로 겹치거나 60분 이내면 한 타겟 이벤트로. t0 = 가장 이른 시작."""
     cols = ["ip_addr", "cid", "lid", "target_type", "grade", "t0", "end", "ongoing", "n_episodes", "alarm_names", "system_type",
-            "model", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
+            "model", "cid_raw", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
     rows = []
     for r in episodes[~episodes["is_short"]].itertuples():
         for tg in filter(None, r.target_grades.split(";")):
@@ -111,7 +112,7 @@ def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
             if t in types:
                 rows.append({"ip_addr": r.ip_addr, "cid": r.cid, "lid": r.lid, "target_type": t, "grade": g, "start": r.start,
                              "end": r.end, "ongoing": r.ongoing, "alarm_name": r.alarm_name, "system_type": r.system_type,
-                             "model": r.model, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR, "n_MINOR": r.n_MINOR,
+                             "model": r.model, "cid_raw": r.cid_raw, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR, "n_MINOR": r.n_MINOR,
                              "n_other": r.n_other})
     if not rows:
         return pd.DataFrame(columns=cols)
@@ -133,7 +134,7 @@ def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
                 out.append(cur)
             cur = {"ip_addr": r.ip_addr, "cid": r.cid, "lid": r.lid, "target_type": r.target_type, "grade": r.grade,
                    "t0": r.start, "end": r.end, "ongoing": bool(r.ongoing), "n_episodes": 1, "names": {r.alarm_name},
-                   "system_type": r.system_type, "model": r.model, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR,
+                   "system_type": r.system_type, "model": r.model, "cid_raw": r.cid_raw, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR,
                    "n_MINOR": r.n_MINOR, "n_other": r.n_other}
         out.append(cur)
     ev = pd.DataFrame(out)
@@ -142,7 +143,7 @@ def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
 
 
 def load_maintenance(path):
-    """작업 CSV(열 start, end, ip_addr, cid(선택), lid(선택), note). 키 공간은 알람 테이블의 (cid, lid) 이다."""
+    """작업 CSV(열 start, end, ip_addr, cid(선택), lid(선택), note). cid 는 알람 테이블의 원 cid(보정 전) 공간이다."""
     m = pd.read_csv(path, dtype={"ip_addr": str})
     m["start"], m["end"] = pd.to_datetime(m["start"]), pd.to_datetime(m["end"])
     for c in ("cid", "lid"):
@@ -181,7 +182,8 @@ def mark_work_and_hw(events, all_alarms, maintenance=None, work_names=WORK_NAMES
                     srcs.append("alarm:" + ",".join(sorted(set(near["alarm_name"]))))
         if maintenance is not None and len(maintenance):
             m = maintenance[(maintenance["ip_addr"] == r["ip_addr"]) & (maintenance["start"] <= r["t0"] + w_win) & (maintenance["end"] >= r["t0"] - w_win)]
-            m = m[(m["cid"].isna() | (m["cid"] == r["cid"])) & (m["lid"].isna() | (m["lid"] == r["lid"]))]
+            raw_cid = r["cid_raw"] if "cid_raw" in r.index and pd.notna(r["cid_raw"]) else r["cid"]     # 작업 CSV 의 cid 는 EMS 알람 화면의 원 cid 공간
+            m = m[(m["cid"].isna() | (m["cid"] == raw_cid)) & (m["lid"].isna() | (m["lid"] == r["lid"]))]
             if len(m):
                 srcs.append("csv")
         if srcs:

@@ -5,6 +5,7 @@ P1-2 포트 조인과 안전 검사 J1~J4 (설계서 6장)
 J 판정이 failed 여도 address 조인으로 자동 전환하지 않는다(사용자 결정 사항). 기준값은 설계서 6.3 에 사전 고정되어 있고
 결과를 본 뒤 바꾸지 않는다.
 """
+import os
 import re
 
 import numpy as np
@@ -87,6 +88,48 @@ def classify_alarm_rows(alarms):
     return out
 
 
+# ---- 알람 cid 오프셋 보정 (설계 6.1·6.3, 개정 5 — 사용자 결정 Q16) ------------------------------------------------
+DEFAULT_K = 1
+OFFSET_MIN_ALARMS, OFFSET_MIN_J4, OFFSET_MIN_GAIN = 30, 0.8, 0.2          # 모델별 예외 기준 (사전 고정)
+J4_MIN, J2_MIN = 0.8, 0.9
+SCAN_KS = (0, 1, 2, 3)
+OFFSET_FILE = "alarm_cid_offset.csv"
+OFFSET_COLUMNS = ["system_type", "k", "n_alarms", "j4_at_k", "j4_at_1", "basis"]
+KEY_CORRECTION_NOTE = "키 보정은 데이터 일관성으로만 확인, 현장 대조 미실시"
+
+
+def load_offsets(path):
+    """오프셋 표 CSV → {system_type: k}. 파일이 없으면 빈 표(모든 모델 기본 k=1)."""
+    if not path or not os.path.exists(path):
+        return {}
+    df = pd.read_csv(path)
+    return {int(r.system_type): int(r.k) for r in df.itertuples()}
+
+
+def k_for(system_type, offsets):
+    try:
+        return int((offsets or {}).get(int(system_type), DEFAULT_K))
+    except (TypeError, ValueError):
+        return DEFAULT_K
+
+
+def apply_offsets(cls_df, offsets=None):
+    """행 분류(원 cid 기준) 뒤에 포트·slot 행에만 cid_j = cid − k(system_type) 를 만들어 `cid` 열을 보정 값으로 바꾼다.
+    원 값은 `cid_raw`, 모든 행의 cid − k 는 `cid_j`. cid_j ≤ 0 인 포트·slot 행은 bad_key(판정 제외, `cid_nonpositive`=True)."""
+    out = cls_df.copy()
+    out["cid_raw"] = out["cid"]
+    ks = out["system_type"].map(lambda v: k_for(v, offsets)) if "system_type" in out.columns else pd.Series(DEFAULT_K, index=out.index)
+    out["k_applied"] = ks
+    out["cid_j"] = out["cid"] - ks.astype("Int64")
+    mask = out["row_class"].isin(["port", "slot"])
+    bad = mask & (out["cid_j"] <= 0).fillna(False)
+    ok = mask & ~bad
+    out.loc[ok, "cid"] = out.loc[ok, "cid_j"]
+    out.loc[bad, "row_class"] = "bad_key"
+    out["cid_nonpositive"] = bad
+    return out
+
+
 def classify_rev1(alarms):
     """개정 1 규칙(cid=0 → device, cid>0·lid=0 → slot, 키 이상 → bad_key, 나머지 port) — 재분류 건수 비교용."""
     o = prep_keys(alarms)
@@ -153,7 +196,7 @@ def j2_diagnosis(alarms_cls, eth):
     kt = key_table(eth)[["ip_addr", "cid", "lid", "addr_port"]].rename(columns={"addr_port": "perf_addr_port"})
     a = add_diag_columns(alarms_cls, alarm=True)
     ports = a[a["row_class"] == "port"].merge(kt, on=["ip_addr", "cid", "lid"], how="inner")
-    ports = ports[(ports["addr_port"] != "") & (ports["perf_addr_port"] != "")]
+    ports = ports[ports["addr_port"].str.contains("-P") & ports["perf_addr_port"].str.contains("-P")]       # 설계 6.3: 양쪽이 S.n-Pm 인 쌍만
     ports["same"] = ports["addr_port"] == ports["perf_addr_port"]
     by_model = ports.groupby("system_type").agg(pairs=("same", "size"), same=("same", "sum")).reset_index()
     by_model["diff_rate"] = 1 - by_model["same"] / by_model["pairs"]
@@ -261,7 +304,7 @@ def j3_physical_match(episodes, eth, seed=J3_SEED, min_minutes=J3_MIN_MINUTES, m
     for k in ("a", "c", "d"):
         out[f"match_{k}"] = float(valid[k].mean()) if len(valid) and valid[k].notna().any() else float("nan")
     out["a_zero"] = float(valid["a_zero"].mean()) if len(valid) else float("nan")
-    va = valid[valid["a_alive"].notna()] if len(valid) else valid
+    va = valid[valid["a_alive"].notna() & valid["c_alive"].notna()] if len(valid) else valid        # 대조군이 없으면 방향을 볼 수 없다
     out["diag_alive"] = {"episodes": int(len(va)), "match_a_alive": float(va["a_alive"].mean()) if len(va) else float("nan"),
                          "match_c_alive": float(va["c_alive"].mean()) if len(va) and va["c_alive"].notna().any() else float("nan"),
                          "note": "장비의 다른 포트에 행이 있는 구간만 본 진단값 — 판정에 쓰지 않음"}
@@ -275,43 +318,116 @@ def j3_physical_match(episodes, eth, seed=J3_SEED, min_minutes=J3_MIN_MINUTES, m
 
 # ---- J4 ------------------------------------------------------------------------------
 def j4_coverage(alarms_cls, eth):
-    """포트 알람 중 같은 키의 성능 포트가 있는 비율 (모델별), 못 찾은 알람 표본 20건."""
+    """포트 알람 중 보정 키(알람 cid 는 이미 cid_j)의 성능 포트가 있는 비율. 분모는 **성능 스냅샷에 있는 장비(ip_addr)의 포트 알람만**
+    (성능이 아예 없는 알람 장비는 따로 셈: no_perf_device)."""
     kt = key_table(eth)
     keys = set(zip(kt["ip_addr"], kt["cid"], kt["lid"]))
-    p = alarms_cls[alarms_cls["row_class"] == "port"].copy()
-    p["matched"] = [(k in keys) for k in zip(p["ip_addr"], p["cid"], p["lid"])]
     ips = set(kt["ip_addr"])
+    p = alarms_cls[alarms_cls["row_class"] == "port"].copy()
     p["device_in_perf"] = p["ip_addr"].isin(ips)
-    by_model = p.groupby("system_type").agg(alarms=("matched", "size"), matched=("matched", "mean")).reset_index()
-    return {"port_alarms": len(p), "matched_ratio": float(p["matched"].mean()) if len(p) else float("nan"),
-            "device_coverage": float(p["device_in_perf"].mean()) if len(p) else float("nan"),
+    p["matched"] = [(k in keys) for k in zip(p["ip_addr"], p["cid"], p["lid"])]
+    q = p[p["device_in_perf"]]
+    by_model = q.groupby("system_type").agg(alarms=("matched", "size"), matched=("matched", "mean")).reset_index()
+    return {"port_alarms": len(p), "port_alarms_in_perf_devices": int(len(q)), "no_perf_device": int((~p["device_in_perf"]).sum()),
+            "no_perf_device_by_model": {str(k): int(v) for k, v in p[~p["device_in_perf"]].groupby("system_type").size().items()},
+            "matched_ratio": float(q["matched"].mean()) if len(q) else float("nan"),
             "by_model": by_model.to_dict("records"),
-            "unmatched_samples": p.loc[~p["matched"], ["ip_addr", "system_type", "cid", "lid", "alarm_type", "occur_date"]].head(20).to_dict("records")}
+            "unmatched_samples": q.loc[~q["matched"], ["ip_addr", "system_type", "cid", "lid", "alarm_type", "occur_date"]].head(20).to_dict("records")}
+
+
+def offset_scan(alarms_cls, eth, ks=SCAN_KS):
+    """J0s (개발 구간만): 모델별로 k ∈ ks 각각의 J4 매칭률과 J2 address 일치율. 포트 알람의 원 cid(`cid_raw` 있으면 그것)에 −k 한 키로 본다.
+    분모는 성능 스냅샷에 있는 장비의 포트 알람. 반환 {모델: {n_alarms, ks:{k:{j4,j2,j2_pairs}}}}."""
+    kt = key_table(eth)
+    perf_addr = {(r.ip_addr, r.cid, r.lid): r.addr_port for r in kt.itertuples()}
+    ips = set(kt["ip_addr"])
+    a = alarms_cls.copy()
+    cid_raw = a["cid_raw"] if "cid_raw" in a.columns else a["cid"]
+    a = a.assign(_c=cid_raw)
+    a = add_diag_columns(a, alarm=False)
+    p = a[(a["row_class"].isin(["port", "bad_key"])) & a["_c"].notna() & a["ip_addr"].isin(ips)]
+    if "cid_nonpositive" in p.columns:
+        p = p[(p["row_class"] == "port") | p["cid_nonpositive"]]
+    else:
+        p = p[p["row_class"] == "port"]
+    out = {}
+    for st, g in p.groupby("system_type"):
+        res = {}
+        for k in ks:
+            keys = [(i, c - k, l) for i, c, l in zip(g["ip_addr"], g["_c"], g["lid"])]
+            m = [kk in perf_addr for kk in keys]
+            pairs = [(ap, perf_addr[kk]) for kk, ap, ok in zip(keys, g["addr_port"], m) if ok and "-P" in ap and "-P" in perf_addr[kk]]
+            res[k] = {"j4": float(sum(m) / len(m)) if len(m) else float("nan"),
+                      "j2": float(sum(1 for x, y in pairs if x == y) / len(pairs)) if pairs else float("nan"), "j2_pairs": len(pairs)}
+        out[int(st)] = {"n_alarms": int(len(g)), "ks": res}
+    return out
+
+
+def derive_offset_table(scan):
+    """사전 고정 절차: 포트 알람 ≥ 30 인 모델만 표에 올린다. k 기본 1, 최선 k* 의 J4 ≥ 0.8 이고 k=1 보다 ≥ 0.2 높을 때만 예외.
+    반환 DataFrame(OFFSET_COLUMNS). 표에 없는 모델은 판정 실행에서 offset_unverified 검사를 받는다."""
+    rows = []
+    for st, r in sorted(scan.items()):
+        if r["n_alarms"] < OFFSET_MIN_ALARMS:
+            continue
+        j4 = {k: v["j4"] for k, v in r["ks"].items()}
+        best = max(j4, key=lambda k: (j4[k] if j4[k] == j4[k] else -1, -abs(k - DEFAULT_K)))
+        j1 = j4.get(DEFAULT_K, float("nan"))
+        exc = best != DEFAULT_K and j4[best] >= OFFSET_MIN_J4 and (j4[best] - (j1 if j1 == j1 else 0.0)) >= OFFSET_MIN_GAIN
+        k = best if exc else DEFAULT_K
+        rows.append({"system_type": st, "k": k, "n_alarms": r["n_alarms"], "j4_at_k": round(j4[k], 4), "j4_at_1": round(j1, 4) if j1 == j1 else "",
+                     "basis": "exception" if exc else "default"})
+    return pd.DataFrame(rows, columns=OFFSET_COLUMNS)
+
+
+def write_offsets_csv(df, path):
+    df.to_csv(path, index=False)
+
+
+def model_join_rates(alarms_cls, eth, models=None):
+    """보정 키(`cid` 가 이미 cid_j) 기준 모델별 J4·J2 — 판정 구간에서 degraded/offset_unverified 판단용. {모델: {n, j4, j2, j2_pairs}}"""
+    j4 = j4_coverage(alarms_cls, eth)
+    j2 = j2_diagnosis(alarms_cls, eth)
+    r2 = {int(x["system_type"]): x for x in j2["by_model"]}
+    out = {}
+    for x in j4["by_model"]:
+        st = int(x["system_type"])
+        if models is not None and st not in models:
+            continue
+        pairs = r2.get(st, {}).get("pairs", 0)
+        out[st] = {"n": int(x["alarms"]), "j4": float(x["matched"]), "j2": (1 - float(r2[st]["diff_rate"])) if pairs else float("nan"), "j2_pairs": int(pairs)}
+    return out
 
 
 # ---- 판정 ----------------------------------------------------------------------------
-def judge_join(j1, j3, min_episodes=J3_MIN_EPISODES):
-    """6.3 판정(사전 고정). 반환 dict(status = verified | failed | unverified, reasons).
-    address 조인(d)이 기준을 만족해도 자동으로 바꾸지 않는다(address_join_would_pass 는 참고 표시)."""
-    reasons = []
-    n = j3.get("with_bins", 0)
-    a, c, d = j3.get("match_a"), j3.get("match_c"), j3.get("match_d")
+def judge_join(j1, j3, table_rates, min_episodes=J3_MIN_EPISODES):
+    """6.3 판정(사전 고정, 개정 5). table_rates = {오프셋 표 모델: {j4, j2, ...}} (보정 키 기준).
+    verified = (i) J1 1:1 ≥ 95% (ii) 표의 모든 모델 J4 ≥ 0.8 (iii) 같은 모델 J2 ≥ 0.9 (iv) J3 대상(장비 생존 구간) ≥ 5 이면 a > c (방향만).
+    J3 대상 < 5 이면 j3_insufficient 로 표시하고 막지 않는다. 구 J3 기준(0.8/0.5)은 폐기. 어떤 경우에도 address·다른 k 로 자동 전환하지 않는다."""
+    reasons, flags = [], []
     r1 = j1.get("one_to_one_ratio")
-    d_pass = bool(d is not None and not np.isnan(d) and d >= J3_MIN_MATCH and c is not None and not np.isnan(c) and d - c >= J3_MIN_GAP)
-    if n < min_episodes:
-        return {"status": "unverified", "reasons": [f"J3 대상 에피소드 {n}건 < {min_episodes} — 판정 불가 (C3·탐지 지연 출력에 join_status=unverified 표시, 판정에 쓰지 않음)"],
-                "address_join_would_pass": d_pass}
-    if r1 is None or np.isnan(r1) or c is None or np.isnan(c) or a is None or np.isnan(a):
-        return {"status": "unverified", "reasons": ["J1 비율 또는 J3 대조군을 계산할 수 없음"], "address_join_would_pass": d_pass}
-    if r1 < J1_MIN_RATIO:
-        reasons.append(f"J1 1:1 비율 {r1:.3f} < {J1_MIN_RATIO}")
-    if a < J3_MIN_MATCH:
-        reasons.append(f"J3 일치율 {a:.3f} < {J3_MIN_MATCH}")
-    if a - c < J3_MIN_GAP:
-        reasons.append(f"(a)−(c) {a - c:.3f} < {J3_MIN_GAP}")
+    if not table_rates:
+        return {"status": "unverified", "reasons": ["오프셋 표에 모델이 없음(성능 장비의 포트 알람 ≥ 30 인 모델 0개) — 검증할 수 없음"], "flags": flags,
+                "stop": False, "note": KEY_CORRECTION_NOTE}
+    if r1 is None or r1 != r1 or r1 < J1_MIN_RATIO:
+        reasons.append(f"J1 1:1 비율 {r1} < {J1_MIN_RATIO}")
+    for st, r in sorted(table_rates.items()):
+        if not r["j4"] >= J4_MIN:
+            reasons.append(f"모델 {st} J4 {r['j4']:.3f} < {J4_MIN}")
+        if not r["j2"] >= J2_MIN:                                  # J2 가 없으면(쌍 0) 검증 불가 → 미충족 (기준을 낮추지 않는다)
+            reasons.append(f"모델 {st} J2 {r['j2']} < {J2_MIN} (쌍 {r.get('j2_pairs')})")
+    alive = j3.get("diag_alive", {})
+    n_alive = alive.get("episodes", 0)
+    a, c = alive.get("match_a_alive"), alive.get("match_c_alive")
+    if n_alive >= min_episodes:
+        if not (a is not None and c is not None and a == a and c == c and a > c):
+            reasons.append(f"J3(장비 생존 구간) a={a} ≤ c={c} — 방향 불일치")
+    else:
+        flags.append("j3_insufficient")
     status = "verified" if not reasons else "failed"
-    return {"status": status, "reasons": reasons, "address_join_would_pass": d_pass,
-            "stop": status == "failed"}
+    d = j3.get("match_d")
+    return {"status": status, "reasons": reasons, "flags": flags, "stop": status == "failed", "j3_alive_episodes": n_alive,
+            "address_join_diag": d, "note": KEY_CORRECTION_NOTE}
 
 
 # ---- M1 ------------------------------------------------------------------------------
@@ -319,13 +435,15 @@ def load_manual(path):
     return pd.read_csv(path, dtype={"ip_addr": str})
 
 
-def check_manual(df):
-    """join_manual.csv(ip_addr, system_type, perf_cid, perf_lid, alarm_cid, alarm_lid, note): 한 건이라도 키가 다르면 stop."""
+def check_manual(df, offsets=None):
+    """join_manual.csv(ip_addr, system_type, perf_cid, perf_lid, alarm_cid, alarm_lid, note): 알람 cid − k(system_type) 가 성능 cid 와 같아야 한다.
+    한 건이라도 다르면 J 판정과 무관하게 stop. (개정 5: 현장 대조는 미실시 — 나중에 입력이 들어왔을 때 쓰는 경로)"""
     need = {"ip_addr", "system_type", "perf_cid", "perf_lid", "alarm_cid", "alarm_lid"}
     if not need <= set(df.columns):
         raise ValueError(f"join_manual.csv 열 부족: {sorted(need - set(df.columns))}")
     d = df.copy()
-    d["same_key"] = (d["perf_cid"] == d["alarm_cid"]) & (d["perf_lid"] == d["alarm_lid"])
+    d["k"] = d["system_type"].map(lambda v: k_for(v, offsets))
+    d["same_key"] = (d["perf_cid"] == d["alarm_cid"] - d["k"]) & (d["perf_lid"] == d["alarm_lid"])
     warns = []
     if len(d) < 3:
         warns.append(f"M1 은 3개 포트 이상 권장 (현재 {len(d)})")
@@ -342,9 +460,10 @@ def cid_offset_scan(alarms_cls, eth, offsets=(-2, -1, 0, 1, 2)):
     kt = key_table(eth)
     keys = set(zip(kt["ip_addr"], kt["cid"], kt["lid"]))
     p = alarms_cls[alarms_cls["row_class"] == "port"]
+    base = p["cid_raw"] if "cid_raw" in p.columns else p["cid"]
     res = {}
     for off in offsets:
-        m = pd.Series([(i, c + off, l) in keys for i, c, l in zip(p["ip_addr"], p["cid"], p["lid"])], index=p.index)
+        m = pd.Series([(i, c + off, l) in keys for i, c, l in zip(p["ip_addr"], base, p["lid"])], index=p.index)
         res[off] = {"all": float(m.mean()) if len(m) else float("nan"),
                     "by_model": {str(k): float(v) for k, v in m.groupby(p["system_type"]).mean().items()}}
     return res

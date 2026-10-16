@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from validation.evaluation.metrics import KEY
+from validation.realdata.port_join import KEY_CORRECTION_NOTE
 from validation.realdata.replay import METHODS, incidents_of, port_days
 
 STEP = pd.Timedelta(minutes=15)
@@ -290,7 +291,7 @@ def build_report(ctx_events, ctx_episodes, ctx_alarms_info, replay_result, eth, 
     hold = None if join_status == "verified" else f"join_status = {join_status} (6.3)"
     rep = {"header": {**header, "purpose": purpose, "join_status": join_status, "range": [start, end], "key_shift_diagnostic": shift,
                       "slots": replay_result["slots"], "baselines_use_optical": False,
-                      "fixed_notes": [CIRCULAR_NOTE] + ([EXPOSURE_NOTE] if purpose == "judge" else [])},
+                      "fixed_notes": [KEY_CORRECTION_NOTE, CIRCULAR_NOTE] + ([EXPOSURE_NOTE] if purpose == "judge" else [])},
            "c1_raw": c1_raw(frames), "overlap": overlap(frames)}
     rep["c3"] = {}
     for tt in ("합계", "CRC증가", "트래픽단절"):

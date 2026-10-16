@@ -18,6 +18,8 @@ from validation.realdata import report as rpt
 from validation.realdata.alarm_names import DEFAULT_NAMES_PATH, DEFAULT_TARGET_MAP, AlarmNames, TargetMap
 from validation.realdata.extract import load_snapshot
 
+DEFAULT_OFFSET_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), pj.OFFSET_FILE)
+
 
 def _jsonable(o):
     if isinstance(o, (np.integer,)):
@@ -59,8 +61,11 @@ class Context:
     """스냅샷 한 번 로드 + 기간 계산 + 알람 준비. 판정 구간을 포함한 전체를 읽지만 출력은 resolve_range 가 허용한 범위만."""
 
     def __init__(self, run_dir, runs_dir, names_path=DEFAULT_NAMES_PATH, map_path=DEFAULT_TARGET_MAP, override_csv=None,
-                 maintenance_csv=None):
+                 maintenance_csv=None, offset_csv=None):
         self.run_dir, self.runs_dir = run_dir, runs_dir
+        self.offset_csv = offset_csv or DEFAULT_OFFSET_CSV
+        self.offsets = pj.load_offsets(self.offset_csv)
+        self.offsets_table_models = set(self.offsets)
         self.target_map_path, self.override_csv, self.maintenance_csv = map_path, override_csv, maintenance_csv
         self.names_sha = hashlib.sha256(open(names_path, "rb").read()).hexdigest() if os.path.exists(names_path) else None
         with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as f:
@@ -75,7 +80,7 @@ class Context:
         self.target_map = TargetMap.load(map_path, known_names=self.names.all_names())
         self.maintenance = ae.load_maintenance(maintenance_csv) if maintenance_csv else None
         d_end = self.periods.get("D")
-        self.alarms = ae.prepare_alarms(self.raw_alarms, self.names, self.target_map, d_end)
+        self.alarms = ae.prepare_alarms(self.raw_alarms, self.names, self.target_map, d_end, self.offsets)
         port = self.alarms[self.alarms["row_class"] == "port"]
         self.episodes = ae.build_episodes(port, self.target_map, d_end) if d_end is not None else ae.build_episodes(port, self.target_map, pd.Timestamp.max)
         self.events = ae.mark_work_and_hw(ae.build_target_events(self.episodes), self.alarms, self.maintenance)
@@ -124,44 +129,79 @@ def cmd_alarms(ctx, range_spec, mode):
     return res
 
 
-def cmd_join_check(ctx, range_spec="dev", manual_csv=None):
+def cmd_join_check(ctx, range_spec="dev", manual_csv=None, write_offsets=False):
+    """보정 키 기준 J0s~J4 와 판정 (설계 6.3, 개정 5). write_offsets=True 면 J0s 결과로 오프셋 표 CSV 를 쓴다(잠금 전 개발 구간만)."""
     start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, "join-check")
     ctx.record("join-check", start, end)
     a, ep, _ = ctx.in_range(start, end)
     eth = ctx.eth
     col = "bin_end" if "bin_end" in eth.columns else "occur_date"
     e = eth[(pd.to_datetime(eth[col]) >= start) & (pd.to_datetime(eth[col]) < end)]
-    # 에피소드에 알람 address 의 addr_port(최빈값)를 붙인다 — (d) address 조인 참고용
+    scan = pj.offset_scan(a, e)
+    table = pj.derive_offset_table(scan)
+    if write_offsets:
+        if pr.load_lock(ctx.runs_dir, ctx.periods) is not None:
+            raise pr.PeriodError("잠금 뒤에는 오프셋 표를 바꿀 수 없습니다 (설정 해시, 9.7.6)")
+        pj.write_offsets_csv(table, ctx.offset_csv)
+        ctx.offsets = pj.load_offsets(ctx.offset_csv)
+        ctx.offsets_table_models = set(ctx.offsets)
+        # 표가 바뀌었을 수 있으므로 보정 키로 알람을 다시 준비한다
+        ctx.alarms = ae.prepare_alarms(ctx.raw_alarms, ctx.names, ctx.target_map, ctx.periods.get("D"), ctx.offsets)
+        port = ctx.alarms[ctx.alarms["row_class"] == "port"]
+        ctx.episodes = ae.build_episodes(port, ctx.target_map, ctx.periods["D"])
+        ctx.events = ae.mark_work_and_hw(ae.build_target_events(ctx.episodes), ctx.alarms, ctx.maintenance)
+        a, ep, _ = ctx.in_range(start, end)
+    table_models = {int(r.system_type): int(r.k) for r in table.itertuples()} if len(table) else {}
+    # 오프셋 표 모델의 보정 키 J4·J2 (표 확정 전에는 기본 k=1 보정 키 기준; 표가 쓰였으면 그 표의 k)
+    rates = pj.model_join_rates(a, e, models=set(table_models))
+    # 에피소드는 이미 보정 키(cid_j). address 의 addr_port(최빈값)를 붙여 (d) 참고 조인
     ap = a.assign(addr_port=a["address"].map(pj.norm_port)) if "address" in a.columns else a.assign(addr_port="")
     ap = ap[ap["addr_port"] != ""].groupby(["ip_addr", "cid", "lid"])["addr_port"].agg(lambda s: s.mode().iloc[0]).reset_index()
     cut = ep[ep["target_grades"].str.contains("트래픽단절/1차")].merge(ap, on=["ip_addr", "cid", "lid"], how="left")
     cut = cut.assign(addr_port=cut["addr_port"].fillna(""))
-    j1 = pj.j1_key_consistency(e)
-    j2 = pj.j2_diagnosis(a[a["row_class"].notna()], e)
     cols = ["ip_addr", "cid", "lid", "start", "end", "addr_port"]
+    j1 = pj.j1_key_consistency(e)
+    j2 = pj.j2_diagnosis(a, e)
     j3 = pj.j3_physical_match(cut[cols], e)
-    # 진단(판정 아님): 알람 cid 를 -1 한 키로 본 J3 — 키 조인이 틀렸을 때 어긋남의 모양을 확인
-    sh = cut[cols].copy()
-    sh["cid"] = sh["cid"] - 1
-    j3_shift = pj.j3_physical_match(sh[sh["cid"] > 0], e)
-    j3_shift.pop("detail")
     j4 = pj.j4_coverage(a, e)
-    verdict = pj.judge_join(j1, j3)
-    scan = pj.cid_offset_scan(a, e)
+    verdict = pj.judge_join(j1, j3, {m: rates[m] for m in table_models if m in rates} if rates else {})
+    # 진단(판정 아님): 그대로 맞춘 조인(k=0) J3 (b) — 키 어긋남의 모양 확인
+    raw = cut[cols].copy()
+    raw["cid"] = cut["cid_raw"]
+    j3_raw = pj.j3_physical_match(raw, e)
+    j3_raw.pop("detail")
     manual = None
     if manual_csv:
-        manual = pj.check_manual(pj.load_manual(manual_csv))
+        manual = pj.check_manual(pj.load_manual(manual_csv), ctx.offsets)
         if manual["stop"]:
             verdict = {**verdict, "status": "stopped", "stop": True,
-                       "reasons": verdict["reasons"] + [f"M1 수동 확인에서 키가 다른 포트 {len(manual['mismatches'])}건 — J 판정과 무관하게 멈춤"]}
+                       "reasons": verdict["reasons"] + [f"M1 수동 확인에서 보정 키가 다른 포트 {len(manual['mismatches'])}건 — J 판정과 무관하게 멈춤"]}
     detail = j3.pop("detail")
-    res = {"range": [start, end], "join_status": verdict["status"], "verdict": verdict, "j1": j1, "j2": j2, "j3": j3, "j4": j4,
-           "diagnostic_j3_alarm_cid_minus_1": j3_shift, "diagnostic_cid_offset_scan": scan, "diagnostic_cid_slot_offsets": {"perf": pj.cid_slot_offsets(e), "alarm": pj.cid_slot_offsets(a[a["row_class"] == "port"])},
-           "manual": manual, "note": "cid_offset_scan·cid_slot_offsets 는 진단이며 조인 키를 바꾸지 않는다 (자동 전환 없음, 설계 6.3)"}
+    res = {"range": [start, end], "join_status": verdict["status"], "verdict": verdict, "key_correction_note": pj.KEY_CORRECTION_NOTE,
+           "offset_table": table.to_dict("records"), "offset_table_written": bool(write_offsets), "j0s_scan": scan, "j1": j1, "j2": j2, "j3": j3, "j4": j4,
+           "model_rates": rates, "diagnostic_j3_unshifted_k0": j3_raw, "diagnostic_cid_offset_scan": pj.cid_offset_scan(a, e),
+           "diagnostic_cid_slot_offsets": {"perf": pj.cid_slot_offsets(e), "alarm": pj.cid_slot_offsets(a[a["row_class"] == "port"])},
+           "manual": manual, "note": "address 조인·다른 k 는 진단용이며 어떤 경우에도 판정 조인을 자동으로 바꾸지 않는다 (설계 6.3)"}
     tag = range_spec.replace("..", "_")
     write_json(os.path.join(ctx.out_dir, f"join_check_{tag}.json"), res)
     detail.to_csv(os.path.join(ctx.out_dir, f"join_j3_detail_{tag}.csv"), index=False, encoding="utf-8-sig")
     return res
+
+
+def join_for_report(ctx, a, e, judge):
+    """리포트용 조인 상태 (설계 6.3 '판정 구간에서의 해석'): 구간 전체 J4 < 0.8 또는 J2 < 0.9 → degraded(C3·지연 보류).
+    오프셋 표에 없는 모델은 J4·J2 를 구간에서 계산해 미달이면 offset_unverified 로 이벤트를 제외(판정 실행에서만 적용)."""
+    kt_ips = set(pj.key_table(e)["ip_addr"]) if len(e) else set()
+    rates = pj.model_join_rates(a, e)
+    j4 = pj.j4_coverage(a, e)
+    j2 = pj.j2_diagnosis(a, e)
+    pairs = sum(x["pairs"] for x in j2["by_model"])
+    same = sum(x["same"] for x in j2["by_model"])
+    overall_j2 = (same / pairs) if pairs else float("nan")
+    degraded = bool(not (j4["matched_ratio"] >= pj.J4_MIN) or not (overall_j2 >= pj.J2_MIN))
+    unverified = sorted(m for m, r in rates.items() if m not in ctx.offsets_table_models and not (r["j4"] >= pj.J4_MIN and r["j2"] >= pj.J2_MIN))
+    return {"j4": j4["matched_ratio"], "j2": overall_j2, "degraded": degraded, "model_rates": rates, "offset_unverified_models": unverified,
+            "table_models": sorted(ctx.offsets_table_models), "devices_in_perf": len(kt_ips)}
 
 
 # ---- 모델 정보·잠금·재생·보고 ------------------------------------------------------------------------------
@@ -193,6 +233,8 @@ def config_parts(ctx, join_status):
     return {
         "target_map_sha": _file_sha(ctx.target_map_path), "alarm_names_sha": ctx.names_sha, "override_sha": _file_sha(ctx.override_csv),
         "maintenance_sha": _file_sha(ctx.maintenance_csv), "work_names": list(ae.WORK_NAMES), "hw_patterns": list(ae.HW_PATTERNS), "row_class": {"version": pj.ROW_CLASS_VERSION, "rules": [list(r) for r in pj.ROW_RULES]},
+        "alarm_cid_offsets": {"file_sha": _file_sha(ctx.offset_csv), "table": {str(k): v for k, v in sorted(ctx.offsets.items())}, "default_k": pj.DEFAULT_K,
+                              "criteria": [pj.OFFSET_MIN_ALARMS, pj.OFFSET_MIN_J4, pj.OFFSET_MIN_GAIN, pj.J4_MIN, pj.J2_MIN]},
         "rules": {"F1": ae.FLICKER_MERGE_MIN, "F2": ae.MIN_EPISODE_MIN, "F4": ae.EVENT_MERGE_MIN, "F6": ae.WORK_WINDOW_MIN,
                   "F8": ae.HW_WINDOW_MIN, "judge": [list(ae.JUDGE_TYPES), ae.JUDGE_GRADE]},
         "perf_gap": {"c3_lookback_h": 6, "c3_min_ratio": rpt.C3_PERF_MIN_RATIO, "delay_window_h": 1, "c3_min_events": rpt.C3_MIN_EVENTS},
@@ -365,6 +407,19 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
         for r in ctx.maintenance.itertuples():
             net_days += list(pd.date_range(pd.Timestamp(r.start).normalize(), pd.Timestamp(r.end).normalize(), freq="D"))
     a, ep, _ = ctx.in_range(start, end)
+    ecol = "bin_end" if "bin_end" in ctx.eth.columns else "occur_date"
+    e_rng = ctx.eth[(pd.to_datetime(ctx.eth[ecol]) >= start) & (pd.to_datetime(ctx.eth[ecol]) < end)]
+    jr = join_for_report(ctx, a, e_rng, purpose == "judge")
+    events = ctx.events
+    unver = {}
+    if purpose == "judge":
+        if jr["degraded"]:
+            join_status = "degraded"                                    # 판정 구간 J4 < 0.8 또는 J2 < 0.9 → C3·탐지 지연 보류 (6.3)
+        if jr["offset_unverified_models"]:
+            bad = events["system_type"].isin(jr["offset_unverified_models"])
+            unver = {"models": jr["offset_unverified_models"], "events": int(bad.sum()),
+                     "devices": sorted(events.loc[bad, "ip_addr"].unique().tolist())}
+            events = events[~bad]
     info = {"short_episodes": int(ep["is_short"].sum()) if len(ep) else 0,
             "no_table_devices": ae.no_table_share(a)["devices_without_table"] if len(a) else 0}
     header = {"model_versions": res["versions"], "privilege_check": ctx.manifest.get("privilege_check"),
@@ -372,8 +427,9 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
     # 설계 9.5(개정 4): 절단 경계 E = 분석 기간의 끝(개발=J0, 판정=D, START..END 이면 END). 개발 실행에 D 를 넘기면 J0 직전 이벤트가 미탐으로 잘못 센다.
     # 태깅·J0 이후 정보 노출 축소(9.7.2): 분석 끝 이전에 시작한 에피소드만, 끝은 분석 끝에서 자른 값을 쓴다.
     ep_view = _clip_episodes(ctx.episodes[ctx.episodes["start"] < end], end)
-    rep = rpt.build_report(ctx.events, ep_view, info, res, ctx.eth, end, ctx.data_days, join_status, purpose,
+    rep = rpt.build_report(events, ep_view, info, res, ctx.eth, end, ctx.data_days, join_status, purpose,
                            header, key_shift, net_days)
+    rep["join_in_range"] = {**jr, "offset_unverified": unver, "join_status_used": join_status}
     tag = f"{purpose}_{_tag(range_spec)}"
     ev_rows, de_rows = rep.pop("c3_events"), rep.pop("delay_events")
     write_json(os.path.join(ctx.out_dir, f"report_{tag}.json"), rep)

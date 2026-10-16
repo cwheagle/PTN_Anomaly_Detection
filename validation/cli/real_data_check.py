@@ -92,6 +92,7 @@ def build_parser():
     sj = sub.add_parser("join-check", help="포트 조인 안전 검사 J1~J4 (스냅샷 기반)")
     snap(sj)
     sj.add_argument("--manual", help="join_manual.csv (M1 수동 확인)")
+    sj.add_argument("--write-offsets", action="store_true", help="J0s 결과로 validation/realdata/alarm_cid_offset.csv 를 쓴다 (잠금 전, 개발 구간만)")
 
     sp_ = sub.add_parser("periods", help="개발/판정 기간 계산과 판정 구간 잠금 (설계 9.7)")
     snap(sp_)
@@ -231,14 +232,19 @@ def _run_snapshot_command(args):
                 rep = cmds.cmd_report(ctx, args.range, args.purpose, versions, policy, key_shift=args.diag_key_shift)
                 print_report(rep)
         else:
-            res = cmds.cmd_join_check(ctx, args.range, args.manual)
-            print(f"join_status = {res['join_status']}  {res['verdict']['reasons']}")
-            print(f"J1 1:1 {res['j1']['one_to_one_ratio']:.3f}  J3 에피소드 {res['j3']['with_bins']} 일치 a={res['j3']['match_a']:.3f} "
-                  f"c={res['j3']['match_c']:.3f} d={res['j3']['match_d']:.3f}  J4 매칭률 {res['j4']['matched_ratio']:.3f}")
+            res = cmds.cmd_join_check(ctx, args.range, args.manual, args.write_offsets)
+            print(f"join_status = {res['join_status']}  {res['verdict']['reasons']} {res['verdict'].get('flags')}")
+            print(f"J1 1:1 {res['j1']['one_to_one_ratio']:.3f}  J3 에피소드 {res['j3']['with_bins']} (생존 구간 a/c: "
+                  f"{res['j3']['diag_alive']['match_a_alive']:.3f}/{res['j3']['diag_alive']['match_c_alive']:.3f})  J4(성능 장비 한정) {res['j4']['matched_ratio']:.3f} "
+                  f"(성능 장비 없음 {res['j4']['no_perf_device']}건)")
+            print("J0s 오프셋 스캔(모델: k=0/1/2/3 J4):", {m: [round(v['j4'], 3) for v in r['ks'].values()] for m, r in res["j0s_scan"].items()})
+            print("오프셋 표:", res["offset_table"], "(파일 기록)" if res["offset_table_written"] else "(미기록; --write-offsets)")
+            print("모델별 J4/J2:", {m: (round(v["j4"], 3), round(v["j2"], 3) if v["j2"] == v["j2"] else None) for m, v in res["model_rates"].items()})
             from validation.realdata.port_join import format_row_rule_report
             print(format_row_rule_report(res["j2"]["row_class_rules"]))
+            print(f"* {res['key_correction_note']}")
             if res["verdict"].get("stop"):
-                print("[멈춤] 조인 검증 실패 — 보고 후 사용자 결정 필요 (address 조인으로 자동 전환하지 않음)")
+                print("[멈춤] 조인 검증 실패 — 보고 후 사용자 결정 필요 (address·다른 k 로 자동 전환하지 않음)")
         return 0
     except (pr.PeriodError, FileNotFoundError) as e:
         print(f"[거부] {e}", file=sys.stderr)

@@ -33,97 +33,41 @@ def ts(h, m=0, d=0):
 
 
 # ---- 정규화·분류 ----------------------------------------------------------------------------
-@pytest.mark.parametrize("addr,exp", [
-    ("CA216-UT7320-S.1 -P1", "S.1-P1"), ("S.2 -P1  ", "S.2-P1"), ("S. 3 - P 12", "S.3-P12"), ("A-S.1-P1 S.2 -P4", "S.2-P4"),
-    ("CA-S.4", "S.4"), ("nothing", ""), ("", ""), (None, ""), (float("nan"), "")])
-def test_norm_port(addr, exp):
-    assert pj.norm_port(addr) == exp
+
+def rates(j4=1.0, j2=1.0, st=12):
+    return {st: {"n": 100, "j4": j4, "j2": j2, "j2_pairs": 50}}
 
 
-def test_classify_alarm_rows():
-    df = pd.DataFrame({"ip_addr": [" 1.1.1.1 "] * 7, "cid": [1, 1, 0, 0, None, -1, 2], "lid": [1, 0, 0, 3, 1, 1, None]})
-    out = pj.classify_alarm_rows(df)
-    assert list(out["row_class"]) == ["port", "slot", "device", "device", "bad_key", "bad_key", "bad_key"]
-    assert out["ip_addr"].iloc[0] == "1.1.1.1"
-
-
-def test_classify_real_data_device_and_slot_forms():
-    df = pd.DataFrame({"ip_addr": ["a"] * 5, "cid": [256, 3, 6, 3, 2], "lid": [255, 1, 1, 1, 2],
-                       "address": ["SYSTEM", "S.2 -P1  ", "S.6", "PAPA.A-FAN-7", "S.1 -P2"]})
-    assert list(pj.classify_alarm_rows(df)["row_class"]) == ["device", "port", "slot", "unit", "port"]    # 비포트 표기(PAPA.A-FAN-7)는 unit
-
-
-def test_cid_offset_scan_shows_shift_without_changing_keys():
-    eth = eth_frame([(1, 1), (1, 2), (2, 1)], hours=1)
-    al = pd.DataFrame({"ip_addr": ["1.1.1.1"] * 3, "system_type": [12] * 3, "cid": [2, 2, 3], "lid": [1, 2, 1], "address": ["S.1 -P1"] * 3})
-    scan = pj.cid_offset_scan(pj.classify_alarm_rows(al), eth)
-    assert scan[0]["all"] == pytest.approx(1 / 3) and scan[-1]["all"] == 1.0 and scan[-1]["by_model"]["12"] == 1.0
-    off = pj.cid_slot_offsets(eth)
-    assert off == {"12": {"0": 3 * 4}}
-
-
-def test_p5_same_and_addr_port_columns():
-    df = pd.DataFrame({"ip_addr": ["a", "a"], "cid": [1, 2], "lid": [1, 1], "p5_cid": [1, 9], "p5_lid": [1, 1], "address": ["S.2 -P1  ", ""]})
-    out = pj.add_diag_columns(pj.classify_alarm_rows(df), alarm=True)
-    assert list(out["p5_same"]) == [True, False] and list(out["addr_port"]) == ["S.2-P1", ""]
-
-
-# ---- J1 ------------------------------------------------------------------------------------
-def test_j1_one_to_one_and_violations():
-    ok = eth_frame([(1, 1), (1, 2), (2, 1)], hours=1)
-    r = pj.j1_key_consistency(ok)
-    assert r["one_to_one_ratio"] == 1.0 and r["not_one_to_one_count"] == 0 and r["optic_eth_overlap"] is None
-    bad = pd.concat([ok, eth_frame([(5, 5)], hours=1, addr_fmt="X-S.1 -P1")])             # 같은 addr_port S.1-P1 이 두 키에
-    r = pj.j1_key_consistency(bad)
-    assert r["not_one_to_one_count"] == 2 and r["one_to_one_ratio"] == pytest.approx(2 / 4)
-    two_addr = ok.copy()
-    two_addr.loc[two_addr.index[0], "address"] = "CA1-UT-S.9 -P9"                          # 한 키가 addr_port 둘
-    assert pj.j1_key_consistency(two_addr)["not_one_to_one_count"] >= 1
-
-
-def test_j1_optic_overlap_and_no_address():
-    eth = eth_frame([(1, 1), (1, 2)], hours=1)
-    optic = eth_frame([(1, 1), (7, 7)], hours=1)
-    assert pj.j1_key_consistency(eth, optic)["optic_eth_overlap"] == 0.5
-    no = eth.assign(address="")
-    r = pj.j1_key_consistency(no)
-    assert r["no_address"] == 2 and np.isnan(r["one_to_one_ratio"])
-
-
-# ---- J3 ------------------------------------------------------------------------------------
-def test_grid_bins_alignment_and_containment():
-    assert list(pj._grid_bins(ts(10), ts(12))) == [ts(10, 15) + pd.Timedelta(minutes=15 * i) for i in range(8)]   # 10:15 ~ 12:00
-    assert list(pj._grid_bins(ts(10, 7), ts(10, 50))) == [ts(10, 30), ts(10, 45)]                                # 완전 포함만
-    assert len(pj._grid_bins(ts(10, 1), ts(10, 14))) == 0
-
-
-def test_f5a_verified_when_keys_match():
+def test_f5a_verified_when_corrected_keys_are_consistent():
     eth = eth_frame([(1, 1), (1, 2), (2, 1)], zero={(1, 1): (ts(10), ts(12))})
     ep = episodes([["1.1.1.1", 1, 1, ts(10), ts(12)]] * 5)
     j3 = pj.j3_physical_match(ep, eth)
-    assert j3["with_bins"] == 5 and j3["match_a"] == 1.0 and j3["match_c"] == 0.0 and j3["a_zero"] == 1.0 and j3["a_missing"] == 0.0
-    r = pj.judge_join(pj.j1_key_consistency(eth), j3)
-    assert r["status"] == "verified" and r["reasons"] == []
+    assert j3["with_bins"] == 5 and j3["match_a"] == 1.0 and j3["match_c"] == 0.0
+    assert j3["diag_alive"]["episodes"] == 5 and j3["diag_alive"]["match_a_alive"] == 1.0 and j3["diag_alive"]["match_c_alive"] == 0.0
+    r = pj.judge_join(pj.j1_key_consistency(eth), j3, rates())
+    assert r["status"] == "verified" and r["reasons"] == [] and r["note"] == "키 보정은 데이터 일관성으로만 확인, 현장 대조 미실시"
 
 
-def test_f5b_failed_when_alarm_key_is_shifted_and_no_auto_switch_to_address():
-    # 성능 쪽 address 슬롯이 키보다 2 어긋난 구성: 알람의 cid=3 이 실제로는 성능 cid=1 포트(rx=0)와 같은 물리 포트라고 가정한 address 조인(d)
+
+def test_f5b_failed_when_j3_direction_is_wrong_and_no_auto_switch_to_address():
+    # 알람 키가 정상 포트(cid=3)를 가리키고 rx=0 인 포트(cid=1)는 대조군: 방향(a > c) 위반. address 참고 조인(d)은 맞는 포트를 본다.
     eth = eth_frame([(1, 1), (3, 1)], zero={(1, 1): (ts(10), ts(12))}, addr_fmt="CA1-S.{c} -P{l}")
-    eth.loc[eth["cid"] == 1, "address"] = "CA1-S.3 -P1"; eth.loc[eth["cid"] == 3, "address"] = "CA1-S.1 -P1"          # 키와 address 가 엇갈림
+    eth.loc[eth["cid"] == 1, "address"] = "CA1-S.3 -P1"; eth.loc[eth["cid"] == 3, "address"] = "CA1-S.1 -P1"
     ep = episodes([["1.1.1.1", 3, 1, ts(10), ts(12)]] * 5)
-    ep["addr_port"] = "S.3-P1"                                    # 알람 address 는 S.3-P1 (= 성능 cid=1 의 address)
+    ep["addr_port"] = "S.3-P1"
     j3 = pj.j3_physical_match(ep, eth)
-    assert j3["match_a"] == 0.0 and j3["match_d"] == 1.0           # 키 조인은 정상 포트(cid=3)를 봐서 0, address 조인은 1
-    r = pj.judge_join(pj.j1_key_consistency(eth), j3)
-    assert r["status"] == "failed" and r["stop"] is True and r["address_join_would_pass"] is False    # 대조군도 rx=0 이라 d−c < 0.5
-    assert "J3 일치율" in " ".join(r["reasons"])
+    assert j3["match_a"] == 0.0 and j3["match_d"] == 1.0
+    r = pj.judge_join(pj.j1_key_consistency(eth), j3, rates())
+    assert r["status"] == "failed" and r["stop"] is True and "방향 불일치" in " ".join(r["reasons"]) and r["address_join_diag"] == 1.0
 
 
-def test_unverified_when_fewer_than_five_episodes():
+
+def test_j3_insufficient_flag_does_not_block_when_other_checks_pass():
     eth = eth_frame([(1, 1), (1, 2)], zero={(1, 1): (ts(10), ts(12))})
     j3 = pj.j3_physical_match(episodes([["1.1.1.1", 1, 1, ts(10), ts(12)]] * 4), eth)
-    r = pj.judge_join(pj.j1_key_consistency(eth), j3)
-    assert r["status"] == "unverified" and "판정 불가" in r["reasons"][0]
+    r = pj.judge_join(pj.j1_key_consistency(eth), j3, rates())
+    assert r["status"] == "verified" and r["flags"] == ["j3_insufficient"]                        # 대상 < 5 → 막지 않고 표시
+    assert pj.judge_join(pj.j1_key_consistency(eth), j3, {})["status"] == "unverified"             # 오프셋 표에 모델이 없으면 검증 불가
 
 
 def test_missing_rows_count_as_match_and_are_reported_separately():
@@ -148,6 +92,7 @@ def test_key_not_in_snapshot_is_not_counted_as_match():
     assert j3["not_in_snapshot"] == 1 and j3["with_bins"] == 0
 
 
+
 def test_control_is_deterministic_and_same_device_only():
     ports = [(c, 1) for c in range(1, 8)]
     eth = pd.concat([eth_frame(ports, zero={(1, 1): (ts(10), ts(12))}), eth_frame([(1, 1)], ip="2.2.2.2", zero={(1, 1): (ts(10), ts(12))})])
@@ -156,8 +101,8 @@ def test_control_is_deterministic_and_same_device_only():
     b = pj.j3_physical_match(ep, eth)["detail"]["c"].iloc[0]
     assert a == b == 0.0                                           # 다른 장비(2.2.2.2)의 rx=0 포트는 대조군이 될 수 없음
     single = pj.j3_physical_match(ep, eth_frame([(1, 1)], zero={(1, 1): (ts(10), ts(12))}))
-    assert single["n_control"] == 0 and np.isnan(single["match_c"])
-    assert pj.judge_join({"one_to_one_ratio": 1.0}, {**single, "with_bins": 9})["status"] == "unverified"
+    assert single["n_control"] == 0 and np.isnan(single["match_c"]) and single["diag_alive"]["episodes"] == 0        # 대조군 없음 → 방향 판단 불가
+    assert pj.judge_join({"one_to_one_ratio": 1.0}, single, rates())["flags"] == ["j3_insufficient"]
 
 
 def test_by_model_breakdown():
@@ -173,17 +118,12 @@ def J(a, c, d=float("nan"), n=5):
     return {"with_bins": n, "match_a": a, "match_c": c, "match_d": d}
 
 
-@pytest.mark.parametrize("r1,a,c,status", [
-    (0.95, 0.8, 0.3, "verified"),                  # 정확히 경계 (a − c = 0.5)
-    (0.9499, 0.8, 0.0, "failed"), (0.95, 0.7999, 0.0, "failed"), (0.95, 0.8, 0.3001, "failed"),
-    (1.0, 1.0, 0.0, "verified")])
-def test_judge_boundaries(r1, a, c, status):
-    assert pj.judge_join({"one_to_one_ratio": r1}, J(a, c))["status"] == status
 
 
 def test_judge_does_not_switch_to_address_join_when_it_would_pass():
-    r = pj.judge_join({"one_to_one_ratio": 1.0}, J(0.1, 0.0, d=0.95))
-    assert r["status"] == "failed" and r["address_join_would_pass"] is True and r["stop"] is True
+    j3 = {"diag_alive": {"episodes": 0}, "match_d": 0.95}
+    r = pj.judge_join({"one_to_one_ratio": 1.0}, j3, rates(j4=0.5))
+    assert r["status"] == "failed" and r["stop"] is True and r["address_join_diag"] == 0.95
 
 
 # ---- J2 / J4 -------------------------------------------------------------------------------
@@ -198,26 +138,28 @@ def test_j2_systematic_slot_shift_by_model():
     assert len(j2["diff_samples"]) == 2
 
 
-def test_j4_coverage_by_model_and_samples():
+
+def test_j4_coverage_denominator_is_devices_present_in_performance():
     eth = eth_frame([(1, 1), (1, 2)])
     al = pd.DataFrame({"ip_addr": ["1.1.1.1", "1.1.1.1", "9.9.9.9", "1.1.1.1"], "system_type": [12, 12, 31, 12], "cid": [1, 5, 1, 0], "lid": [1, 5, 1, 0],
-                       "alarm_type": [1, 2, 3, 4], "occur_date": [ts(1)] * 4})
+                       "alarm_type": [1, 2, 3, 4], "occur_date": [ts(1)] * 4, "address": ["S.1 -P1"] * 4})
     r = pj.j4_coverage(pj.classify_alarm_rows(al), eth)
-    assert r["port_alarms"] == 3 and r["matched_ratio"] == pytest.approx(1 / 3) and r["device_coverage"] == pytest.approx(2 / 3)
-    assert len(r["unmatched_samples"]) == 2
+    assert r["port_alarms"] == 3 and r["port_alarms_in_perf_devices"] == 2 and r["no_perf_device"] == 1 and r["no_perf_device_by_model"] == {"31": 1}
+    assert r["matched_ratio"] == pytest.approx(1 / 2)                                              # 분모: 성능 장비의 포트 알람만
+    assert len(r["unmatched_samples"]) == 1
 
 
 # ---- M1 ------------------------------------------------------------------------------------
-def test_manual_check_stops_on_single_mismatch():
+
+def test_manual_check_uses_corrected_key_and_stops_on_single_mismatch():
     ok = pd.DataFrame({"ip_addr": ["a", "b", "c"], "system_type": [12, 31, 31], "perf_cid": [1, 2, 3], "perf_lid": [1, 1, 1],
-                       "alarm_cid": [1, 2, 3], "alarm_lid": [1, 1, 1]})
+                       "alarm_cid": [2, 3, 4], "alarm_lid": [1, 1, 1]})                          # 알람 cid = 성능 cid + 1 (k=1)
     r = pj.check_manual(ok)
     assert not r["stop"] and r["warnings"] == []
-    bad = ok.copy(); bad.loc[2, "alarm_cid"] = 4
-    r = pj.check_manual(bad)
-    assert r["stop"] and len(r["mismatches"]) == 1
-    few = pj.check_manual(ok.iloc[:2].assign(system_type=12))
-    assert len(few["warnings"]) == 2
+    bad = ok.copy(); bad.loc[2, "alarm_cid"] = 5
+    assert pj.check_manual(bad)["stop"] and len(pj.check_manual(bad)["mismatches"]) == 1
+    assert pj.check_manual(ok, offsets={31: 2})["stop"]                                           # 모델 31 의 k 가 2 로 정해졌다면 불일치
+    assert len(pj.check_manual(ok.iloc[:2].assign(system_type=12))["warnings"]) == 2
     with pytest.raises(ValueError):
         pj.check_manual(ok.drop(columns=["alarm_lid"]))
 

@@ -78,21 +78,25 @@ def test_count_only_dev_counts_only_dev_events(run, capsys):
     assert res["r_per_data_day"] == pytest.approx(1 / 28) and res["r_needed_for_20"] == pytest.approx(20 / 23)
 
 
-def test_join_check_dev_reports_failed_and_stops_without_auto_switch(run, capsys):
+def test_join_check_dev_uses_corrected_key_and_reports_scan_without_auto_switch(run, capsys):
     assert cli.main(["join-check", *args(run)]) == 0
     out = capsys.readouterr().out
     res = json.load(open(next((run["rd"] / "out").glob("join_check_dev*.json")), encoding="utf-8"))
-    assert res["join_status"] in ("failed", "unverified")                 # 에피소드 1건 < 5 → 판정 불가(unverified), 보고에 diagnostics 포함
-    assert "diagnostic_cid_offset_scan" in res and "diagnostic_j3_alarm_cid_minus_1" in res
-    scan = res["diagnostic_cid_offset_scan"]
-    assert scan["-1"]["all"] == 1.0 and scan["0"]["all"] == 0.0           # 알람 cid-1 이 성능 키와 일치하는 진단 — 판정·조인 키는 바뀌지 않음
-    assert res["verdict"]["address_join_would_pass"] in (True, False)
-    assert "자동 전환" in res["note"]
+    assert res["join_status"] == "unverified"                              # 포트 알람 1건 < 30 → 오프셋 표에 모델 없음 → 검증 불가 (막지는 않음)
+    assert res["key_correction_note"] == "키 보정은 데이터 일관성으로만 확인, 현장 대조 미실시" and "현장 대조 미실시" in out
+    scan = res["j0s_scan"]["31"]["ks"]
+    assert scan["1"]["j4"] == 1.0 and scan["0"]["j4"] == 0.0 and scan["2"]["j4"] == 0.0           # 보정 k=1 에서만 성능 키와 맞음
+    assert res["j4"]["matched_ratio"] == 1.0 and res["offset_table"] == [] and res["offset_table_written"] is False
+    assert res["diagnostic_cid_offset_scan"]["-1"]["all"] == 1.0 and res["diagnostic_cid_offset_scan"]["0"]["all"] == 0.0     # 원 cid 기준 진단
+    assert "자동으로 바꾸지 않는다" in res["note"] and "address" in res["note"]
 
 
 def test_join_check_manual_mismatch_stops(run):
     man = run["rd"] / "man.csv"
-    man.write_text("ip_addr,system_type,perf_cid,perf_lid,alarm_cid,alarm_lid,note\n1.1.1.1,31,1,1,2,1,x\n", encoding="utf-8")
+    man.write_text("ip_addr,system_type,perf_cid,perf_lid,alarm_cid,alarm_lid,note\n1.1.1.1,31,1,1,5,1,x\n", encoding="utf-8")        # 보정 키(5−1=4)가 성능 1 과 다름
     assert cli.main(["join-check", *args(run, "--manual", str(man))]) == 0
     res = json.load(open(next((run["rd"] / "out").glob("join_check_dev*.json")), encoding="utf-8"))
     assert res["join_status"] == "stopped" and res["manual"]["stop"] is True
+    ok = run["rd"] / "man_ok.csv"
+    ok.write_text("ip_addr,system_type,perf_cid,perf_lid,alarm_cid,alarm_lid,note\n1.1.1.1,31,1,1,2,1,x\n", encoding="utf-8")        # 2−1=1 → 일치
+    assert cli.main(["join-check", *args(run, "--manual", str(ok))]) == 0
