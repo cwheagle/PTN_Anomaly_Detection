@@ -46,6 +46,15 @@ def write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=1, default=_jsonable)
 
 
+def _clip_episodes(ep, end):
+    """에피소드 end 를 분석 범위 끝에서 자르고 지속 시간을 다시 계산한다 (표시용 사본)."""
+    out = ep.copy()
+    if len(out):
+        out["end"] = out["end"].clip(upper=pd.Timestamp(end))
+        out["duration_min"] = (out["end"] - out["start"]).dt.total_seconds() / 60
+    return out
+
+
 class Context:
     """스냅샷 한 번 로드 + 기간 계산 + 알람 준비. 판정 구간을 포함한 전체를 읽지만 출력은 resolve_range 가 허용한 범위만."""
 
@@ -73,9 +82,12 @@ class Context:
         self.out_dir = os.path.join(run_dir, "out")
 
     def in_range(self, start, end):
+        """범위 안 알람·에피소드·이벤트. 에피소드·이벤트의 end 는 분석 범위 끝에서 잘라 표시한다(설계 9.7.2, 개발 출력의 J0 이후 정보 축소; 원 값은 스냅샷에만)."""
         a = self.alarms[(self.alarms["occur_date"] >= start) & (self.alarms["occur_date"] < end)]
-        ep = self.episodes[(self.episodes["start"] >= start) & (self.episodes["start"] < end)]
-        ev = self.events[(self.events["t0"] >= start) & (self.events["t0"] < end)]
+        ep = _clip_episodes(self.episodes[(self.episodes["start"] >= start) & (self.episodes["start"] < end)], end)
+        ev = self.events[(self.events["t0"] >= start) & (self.events["t0"] < end)].copy()
+        if len(ev):
+            ev["end"] = ev["end"].clip(upper=pd.Timestamp(end))
         return a, ep, ev
 
 
@@ -294,7 +306,10 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
             "no_table_devices": ae.no_table_share(a)["devices_without_table"] if len(a) else 0}
     header = {"model_versions": res["versions"], "privilege_check": ctx.manifest.get("privilege_check"),
               "snapshot_complete": ctx.manifest.get("complete"), "periods": {k: str(ctx.periods.get(k)) for k in ("S", "J0", "D")}}
-    rep = rpt.build_report(ctx.events, ctx.episodes, info, res, ctx.eth, ctx.periods["D"], ctx.data_days, join_status, purpose,
+    # 설계 9.5(개정 4): 절단 경계 E = 분석 기간의 끝(개발=J0, 판정=D, START..END 이면 END). 개발 실행에 D 를 넘기면 J0 직전 이벤트가 미탐으로 잘못 센다.
+    # 태깅·J0 이후 정보 노출 축소(9.7.2): 분석 끝 이전에 시작한 에피소드만, 끝은 분석 끝에서 자른 값을 쓴다.
+    ep_view = _clip_episodes(ctx.episodes[ctx.episodes["start"] < end], end)
+    rep = rpt.build_report(ctx.events, ep_view, info, res, ctx.eth, end, ctx.data_days, join_status, purpose,
                            header, key_shift, net_days)
     tag = f"{purpose}_{_tag(range_spec)}"
     ev_rows, de_rows = rep.pop("c3_events"), rep.pop("delay_events")

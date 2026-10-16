@@ -143,3 +143,36 @@ def test_judge_rejects_changed_model_files_after_lock(run, monkeypatch, field):
     # 해시가 같으면 통과 (표식은 실제 실행에서만 생성)
     cmds._verify_judge_preconditions(c, "judge", c.periods["J0"], c.periods["D"], None)
     assert os.path.exists(pr.run_marker_path(run["runs"], c.periods))
+
+
+# ---- 개정 4 ④⑤: 개발 출력 절단·truncated 경계 -------------------------------------------------------------
+def test_dev_report_passes_range_end_as_truncation_boundary(run, monkeypatch):
+    from validation.realdata import report as rpt
+    seen = {}
+    real = rpt.build_report
+
+    def spy(ev, ep, info, res, eth, d_end, *a, **k):
+        seen["d_end"], seen["ep"] = pd.Timestamp(d_end), ep
+        return real(ev, ep, info, res, eth, d_end, *a, **k)
+
+    monkeypatch.setattr(rpt, "build_report", spy)
+    c = ctx_of(run)
+    cmds.cmd_join_check(c, "dev")
+    cmds.cmd_report(c, "dev", "dev", detector=FakeDetector())
+    assert seen["d_end"] == c.periods["J0"] != c.periods["D"]                     # 개발 실행의 절단 경계 = J0 (D 아님)
+    assert (seen["ep"]["start"] < c.periods["J0"]).all() and (seen["ep"]["end"] <= c.periods["J0"]).all()
+
+
+def test_in_range_clips_episode_and_event_end_to_range_end(run):
+    c = ctx_of(run)
+    j0 = c.periods["J0"]
+    # J0 직전에 시작해 J0 이후까지 이어지는 에피소드/이벤트를 주입
+    c.episodes = pd.DataFrame([{"ip_addr": "a", "cid": 1, "lid": 1, "alarm_name": "X", "start": j0 - pd.Timedelta(hours=1), "end": j0 + pd.Timedelta(hours=5),
+                                "duration_min": 360.0, "ongoing": False, "is_short": False, "target_grades": "트래픽단절/1차"}])
+    c.events = pd.DataFrame([{"t0": j0 - pd.Timedelta(hours=1), "end": j0 + pd.Timedelta(hours=5), "target_type": "트래픽단절", "grade": "1차",
+                              "ip_addr": "a", "cid": 1, "lid": 1}])
+    _, ep, ev = c.in_range(c.periods["S"], j0)
+    assert ep["end"].iloc[0] == j0 and ep["duration_min"].iloc[0] == 60.0 and ev["end"].iloc[0] == j0
+    assert c.episodes["end"].iloc[0] == j0 + pd.Timedelta(hours=5)                  # 원 값은 그대로
+    _, ep2, _ = c.in_range(j0 - pd.Timedelta(hours=2), c.periods["D"])
+    assert ep2["end"].iloc[0] == j0 + pd.Timedelta(hours=5)                          # 범위가 넓으면 자르지 않음
