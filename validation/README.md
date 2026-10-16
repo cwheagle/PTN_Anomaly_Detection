@@ -31,3 +31,23 @@ python validation/cli/evaluate_model.py --models-dir validation/runs/models_nois
 python validation/cli/compare_reports.py                      # 리포트 비교표
 python validation/cli/seed_db.py --days 3                     # E2E 시연용 데이터를 DB에 주입 (SIM_DB_NAME 으로 대상 지정)
 ```
+
+## real_data_check (P1-2 실데이터 검증 도구, U1·U2: `plan`, `extract`)
+설계서 `docs/design/p1_2_real_data_check.md`. 실DB 를 **읽기 전용**으로 조회해 로컬 스냅샷(`validation/runs/p1_2/<run_id>/`, git 제외)을 만든다. `src/config.py`·`.env` 는 읽지 않고 환경변수/CLI 인자로 접속한다.
+
+```bash
+export DB_HOST=... DB_NAME=... RDC_DB_USER=ptn_ro RDC_DB_PASS=...      # 비밀번호는 환경변수로만
+python validation/cli/real_data_check.py plan    --start 2026-10-05 --end 2026-10-12   # 행 추출 없음: 테이블·예상 행·경계·필터 분포·시간대·결과 테이블 충돌
+python validation/cli/real_data_check.py extract --start 2026-07-10 --end 2026-10-13 [--ports ports.csv] [--max-rows 2000000]
+python validation/cli/real_data_check.py extract --append-to <run_id> --end 2026-10-20          # 증분
+```
+- **권한 검사는 fail closed**: `SHOW GRANTS` 에 SELECT/USAGE 외 권한(root 의 `ALL PRIVILEGES`, `WITH GRANT OPTION` 포함)이 있거나 판단 불가면 거부한다. 테스트망에서만 `--allow-write-account` 를 명령줄에 명시해 진행할 수 있다(환경변수로는 켜지지 않음, 매니페스트에 `privilege_check: override` 기록). 읽기 전용 세션(`SET SESSION TRANSACTION READ ONLY`)과 SELECT/SHOW 문장 가드는 플래그와 무관하게 유지된다.
+- **읽기 전용 계정 만들기(권장, 관리자 1회, MySQL 5.7)**:
+  ```sql
+  CREATE USER 'ptn_ro'@'<분석PC_IP>' IDENTIFIED BY '<충분히 긴 비밀번호>';   -- '%' 호스트 금지
+  GRANT SELECT ON `<EMS_DB>`.* TO 'ptn_ro'@'<분석PC_IP>';
+  SHOW GRANTS FOR 'ptn_ro'@'<분석PC_IP>';   -- GRANT USAGE ON *.* / GRANT SELECT ON `<EMS_DB>`.*
+  -- 삭제: DROP USER 'ptn_ro'@'<분석PC_IP>';
+  ```
+- `--schema sim`: 시뮬레이터 DB(`cowptn_test`) 용. 필터 컬럼(`time_type` 등)·알람 테이블이 없으면 생략하고 매니페스트에 남긴다(`real` 은 없으면 중단).
+- 시각이 테이블 시각 ±1.5시간 밖인 행(쓰레기 `occur_date`)은 분석에서 빼고 `quarantine/` 에 보관한다(설계서 4.3a). 종료 코드: 0 완료, 2 인자 오류, 3 권한 거부, 4 중단/불완전.
