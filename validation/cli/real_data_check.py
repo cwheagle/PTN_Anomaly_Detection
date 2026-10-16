@@ -26,6 +26,7 @@ P1-2 실데이터 검증 도구 (설계서 docs/design/p1_2_real_data_check.md) 
   판정 구간과 겹치는 분석은 잠금(periods lock) 전에는 거부된다 (설계 9.7 P4). --range: dev | judge | YYYY-MM-DD..YYYY-MM-DD
 """
 import argparse
+import pandas as pd
 import os
 import sys
 from datetime import datetime
@@ -100,13 +101,15 @@ def build_parser():
     sp_.add_argument("--reason", help="retry-judge: 실패 사유")
     sp_.add_argument("--reviewed-by", help="retry-judge: 수정 diff 가 판정 규칙·기준값·분류 규칙을 건드리지 않았음을 확인한 reviewer")
     sp_.add_argument("--version", help="판정에 쓸 트래픽 모델 버전 (기본: 활성 버전)")
+    sp_.add_argument("--models-dir", help="lock: 재학습한 판정 모델 폴더 (validation/runs/p1_2/models/<run_id>)")
 
     for name, hlp in (("replay", "AI·고정 임계치·롤링 규칙 오프라인 재생 (스냅샷 기반)"), ("report", "C1 원값·C3·C4b·탐지 지연·C6·겹침 보고")):
         sx = sub.add_parser(name, help=hlp)
         snap(sx)
         sx.add_argument("--purpose", choices=["dev", "judge", "explore"], default="dev")
         sx.add_argument("--versions", nargs="*", default=[], metavar="TRACK=VER")
-        sx.add_argument("--policy", help="알람 정책 JSON (AlertPolicy 필드)")
+        sx.add_argument("--policy", help="알람 정책 JSON (AlertPolicy 필드) — 개발 탐색에서만, 판정 실행에서는 거부")
+        sx.add_argument("--models-dir", help="운영 models/ 대신 쓸 모델 폴더 (재학습한 판정/탐색 모델). 판정 실행은 잠금에 기록된 폴더만 허용")
         if name == "report":
             sx.add_argument("--diag-key-shift", type=int, default=0, help="진단 전용: 알람 cid 에 더할 값 (판정 실행에는 거부)")
 
@@ -114,6 +117,11 @@ def build_parser():
     snap(sm)
     sm.add_argument("--purpose", choices=["dev", "judge", "explore"], default="dev")
     sm.add_argument("--seed", type=int, required=True, help="층화 추출 시드 (필수, 기록됨)")
+
+    tm = sub.add_parser("train-model", help="판정/탐색 모델 재학습 (스냅샷의 개발 구간만, 설계 9.7.5a)")
+    snap(tm)
+    tm.add_argument("--kind", choices=["judge", "explore"], required=True)
+    tm.add_argument("--run-id", help="모델 폴더 이름 (기본 <kind>_seed0)")
 
     sr = sub.add_parser("score-review", help="검토 CSV 채점: 유효율 Wilson 95%%, C1·C2·C4a")
     sr.add_argument("--review", required=True)
@@ -201,13 +209,26 @@ def _run_snapshot_command(args):
             else:
                 print(f"판정 이벤트 {res['events']} (유형별 {res['by_type']}), 데이터일 {res['data_days']}, r={res['r_per_data_day']:.3f}/데이터일")
                 print(res["note"])
+        elif args.cmd == "train-model":
+            from validation.realdata import retrain as rt
+            try:
+                run = rt.train_model(ctx, args.kind, args.run_id)
+            except rt.TrainFailure as e:
+                print(f"[학습 실패 — 판정 모델 없음, AI 판정 불가] {e}", file=sys.stderr)
+                return 6
+            print(f"학습 완료: {run['role']} {run['version']} 임계치 {run['threshold']:.6f} val_loss {run['final_val_loss']:.6f} "
+                  f"train {run['train_csv']['rows']:,}행/{run['train_csv']['ports']}포트 val {run['val_csv']['rows']:,}행/{run['val_csv']['ports']}포트, "
+                  f"운영 models/ 불변={run['operational_models_unchanged']} 재실행 {run['retries']}회")
+            if args.kind == "explore":
+                x = pd.Timestamp(run["training_window"]["end"])
+                print(f"탐색 평가 구간(시간 밖): {x:%Y-%m-%d}..{ctx.periods['J0']:%Y-%m-%d}  (report --models-dir <폴더> --range 위 구간 --purpose dev)")
         elif args.cmd == "sample":
             meta = cmds.cmd_sample(ctx, args.range, args.purpose, args.seed)
             print(f"샘플 {meta['rows']}행 (방법별 선택 인시던트 {meta['per_method_incidents']}), 시드 {meta['seed']}. "
                   f"검토 CSV 만 검토자에게 전달 — 키 파일(sample_key_*)은 비공개")
         elif args.cmd == "periods":
             if args.action == "lock":
-                res = cmds.cmd_lock(ctx, args.version)
+                res = cmds.cmd_lock(ctx, args.version, models_dir=args.models_dir)
                 print(f"잠금 완료: {res['lock_path']}\n  J0={res['J0']} D={res['D']} 판정 데이터일 {res['judge_data_days']} join_status={res['join_status']} "
                       f"r={res['dev_event_rate_r']:.3f} C3 보류 예상={res['c3_hold_expected']}")
             elif args.action == "retry-judge":
@@ -225,11 +246,11 @@ def _run_snapshot_command(args):
                 from src.pipeline.alerting import policy_from_meta
                 policy = policy_from_meta(_json.load(open(args.policy, encoding="utf-8")))
             if args.cmd == "replay":
-                res = cmds.cmd_replay(ctx, args.range, args.purpose, versions, policy)
+                res = cmds.cmd_replay(ctx, args.range, args.purpose, versions, policy, models_dir=args.models_dir)
                 print(f"재생 입력 {res['input_rows']:,}행, 평가 구간 정상 행 {res['normal_rows']:,}, 방법별 재생 가능 슬롯: "
                       + ", ".join(f"{m} {v['ratio']:.1%}" for m, v in res["slots"].items()))
             else:
-                rep = cmds.cmd_report(ctx, args.range, args.purpose, versions, policy, key_shift=args.diag_key_shift)
+                rep = cmds.cmd_report(ctx, args.range, args.purpose, versions, policy, key_shift=args.diag_key_shift, models_dir=args.models_dir)
                 print_report(rep)
         else:
             res = cmds.cmd_join_check(ctx, args.range, args.manual, args.write_offsets)
@@ -258,7 +279,7 @@ def _connect(args):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.cmd in ("alarms", "join-check", "periods", "replay", "report", "sample", "score-review"):
+    if args.cmd in ("alarms", "join-check", "periods", "replay", "report", "sample", "score-review", "train-model"):
         return _run_snapshot_command(args)
     if args.cmd == "live":
         return _run_live(args)

@@ -245,7 +245,7 @@ def config_parts(ctx, join_status):
     }
 
 
-def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None):
+def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_dir=None):
     """판정 기간 잠금 (9.7.3-4). 조건: 기간 계산 가능, 개발 기간 join-check 결과 존재, 판정 모델 학습 구간 검사 통과(9.7.5)."""
     if not ctx.periods.get("ok"):
         raise pr.PeriodError(ctx.periods.get("reason") or "기간 계산 불가")
@@ -263,6 +263,15 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None):
         raise pr.PeriodError(f"개발 기간 join-check 결과가 없습니다: {jpath} — 먼저 join-check 를 실행하세요 (9.7.3-3)")
     with open(jpath, encoding="utf-8") as f:
         join = json.load(f)
+    if models_dir:                                         # 재학습한 판정 모델 폴더 (9.7.5a R6)
+        from validation.realdata import retrain as rt
+        info = rt.model_info_from_dir(models_dir)
+        if info.get("role") != "judge" or info.get("train_status") != "completed":
+            raise pr.PeriodError(f"판정 모델 폴더가 아닙니다 (role={info.get('role')}, status={info.get('train_status')}): {models_dir}")
+        problems = rt.verify_reproducible(ctx, models_dir, info)
+        if problems:
+            raise pr.PeriodError("학습 입력 재현 검사 실패 (R6, 측정 전 거부): " + "; ".join(problems))
+        model_infos = {"traffic": info}
     model = model_infos or {"traffic": model_info("traffic", version)}
     for ft, info in model.items():
         ok, why = pr.check_training_window(info, ctx.periods["J0"])
@@ -276,6 +285,7 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None):
     payload = {"alternative": ctx.periods["alternative"], "S": ctx.periods["S"], "D": ctx.periods["D"], "J0": ctx.periods["J0"],
                "judge_data_days": ctx.periods["judge_data_days"], "data_days": ctx.periods["data_days"],
                "models": {ft: {k: v for k, v in info.items() if k != "meta_path"} for ft, info in model.items()},
+               "training_policy": {"model_config": "unchanged", "train_seed": 0, "val_port_fraction": 0.10, "alert_policy": None, "suspect": "rule B only"},
                "policy_hash": pr.stable_hash(pol), "config_hash": pr.stable_hash(parts), "config_parts": parts,
                "join_status": join["join_status"], "ledger_missing": ledger_missing, "dev_event_rate_r": dev["r_per_data_day"], "r_needed_for_20": need,
                "c3_hold_expected": bool(dev["r_per_data_day"] < need), "exposure_note": rpt.EXPOSURE_NOTE,
@@ -288,7 +298,7 @@ def _tag(spec):
     return spec.replace("..", "_").replace(" ", "")
 
 
-def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, save=True, command="replay", complete=True):
+def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, save=True, command="replay", complete=True, models_dir=None):
     """재생 (스냅샷 → AI·고정·롤링). purpose=dev: 개발 기간 안에서만. purpose=judge: 잠금·설정 해시·모델 검사·1회 표식을 통과해야 한다."""
     start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"{command}[{purpose}]")
     lock = None
@@ -303,12 +313,20 @@ def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
             raise pr.PeriodError("purpose=dev 는 판정 구간과 겹칠 수 없습니다 (판정 구간은 purpose=judge 1회만).")
         ctx.record(command, start, end, "dev")
     elif purpose == "judge":
-        return _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save, command, complete)
+        return _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save, command, complete, models_dir)
     else:
         raise pr.PeriodError(f"알 수 없는 purpose: {purpose}")
-    if versions is None and detector is None:
+    model_meta = None
+    if models_dir:                                                        # 판정 모델/탐색 모델 폴더 (운영 models/ 가 아님)
+        from validation.realdata import retrain as rt
+        model_meta = rt.model_info_from_dir(models_dir)
+        versions = {"traffic": model_meta["version"]}
+        if detector is None:
+            detector = rp.build_detector(versions, policy, models_dir)
+    elif versions is None and detector is None:
         versions = {"traffic": model_info("traffic")["version"]}          # 활성 버전을 명시해 기록한다
     res = rp.replay(ctx.eth, start, end, versions=versions, policy=policy, detector=detector)
+    res["model_meta"] = model_meta
     res["purpose"], res["versions"], res["lock"] = purpose, versions, None
     if save:
         res["files"] = _save_replay(ctx, res, purpose, range_spec, start, end, versions)
@@ -326,14 +344,15 @@ def _save_replay(ctx, res, purpose, range_spec, start, end, versions):
     return [f1, f2]
 
 
-def _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save, command, complete):
+def _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save, command, complete, models_dir=None):
     """판정 재생 (설계 9.7.6, 개정 4): 표식 전에 할 수 있는 일(해시 대조·모델/스케일러/정책 로드·스냅샷·출력 폴더 쓰기 확인)을 먼저 끝낸다.
     그 단계의 실패는 표식이 없으므로 그냥 다시 실행하면 된다. 이후 phase: claimed → computing → completed."""
     if policy is not None:
         raise pr.PeriodError("판정 실행에서는 --policy 를 쓸 수 없습니다 — 정책은 잠금에 동결된 모델 메타 정책만 사용 (P6)")
-    lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector)
+    lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector, models_dir)
     versions = {ft: m["version"] for ft, m in lock["models"].items()}
-    det = detector if detector is not None else rp.build_detector(versions, None)          # 모델 로드: 표식 전
+    locked_dir = (lock["models"].get("traffic") or {}).get("models_dir")
+    det = detector if detector is not None else rp.build_detector(versions, None, locked_dir)          # 모델 로드: 표식 전
     os.makedirs(ctx.out_dir, exist_ok=True)
     probe = os.path.join(ctx.out_dir, ".write_probe")
     open(probe, "w").close()
@@ -348,6 +367,7 @@ def _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save,
         raise
     pr.set_phase(ctx.runs_dir, ctx.periods, "computing")                                   # 이 줄부터 실패는 자동 되돌림 없음
     res = rp.replay(ctx.eth, start, end, versions=versions, detector=det, inp=inp)
+    res["model_meta"] = lock["models"].get("traffic")
     res["purpose"], res["versions"], res["lock"] = "judge", versions, lock
     res["files"] = _save_replay(ctx, res, "judge", range_spec, start, end, versions) if save else []
     if complete:
@@ -364,7 +384,7 @@ def cmd_retry_judge(ctx, reason, reviewed_by, detector=None):
     return pr.retry_judge(ctx.runs_dir, ctx.periods, reason, reviewed_by, tool_version(), partial)
 
 
-def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=None):
+def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=None, models_dir=None):
     """판정 실행 전 거부 규칙 (측정 전, 표식 생성 없음). 잠금 존재·판정 구간 정확히 일치·설정 해시 동일·모델/정책/가중치 검사."""
     if range_spec != "judge":
         raise pr.PeriodError("purpose=judge 는 --range judge 만 허용됩니다.")
@@ -381,7 +401,23 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
         if not ok:
             raise pr.PeriodError(f"판정 모델 {ft} 학습 구간 검사 실패: {why}")
     # 주의: detector 를 직접 주입하면(테스트 전용) 아래 모델·정책·가중치 해시 검사는 생략된다. CLI 는 항상 detector=None 이다.
-    if detector is None:                                  # 현재 레지스트리의 모델·정책·가중치가 잠금 때와 같은지 (실제 모델 로드 경로)
+    locked_dir = (lock["models"].get("traffic") or {}).get("models_dir")
+    if models_dir and os.path.abspath(models_dir) != os.path.abspath(locked_dir or ""):
+        raise pr.PeriodError("--models-dir 가 잠금에 기록된 판정 모델 폴더와 다릅니다 (동결, R6)")
+    if detector is None and locked_dir:                   # 재학습 모델: 폴더 해시·학습 CSV 재현·스냅샷 해시를 표식 전에 다시 대조 (R6)
+        from validation.realdata import retrain as rt
+        m = lock["models"]["traffic"]
+        cur = rt.model_info_from_dir(locked_dir)
+        diff = [k for k in ("version", "trained_at", "model_sha", "scaler_sha", "meta_sha", "train_run_sha", "train_csv_sha", "val_csv_sha", "snapshot_manifest_sha")
+                if cur.get(k) != m.get(k)]
+        if pr.stable_hash(cur.get("alert_policy")) != lock["policy_hash"]:
+            diff.append("alert_policy")
+        if diff:
+            raise pr.PeriodError(f"판정 모델 폴더가 잠금 때와 다릅니다 ({', '.join(diff)}) — 모델/정책 동결 위반, 판정 거부 (R6)")
+        problems = rt.verify_reproducible(ctx, locked_dir, cur)
+        if problems:
+            raise pr.PeriodError("학습 입력 재현 검사 실패 (R6): " + "; ".join(problems))
+    elif detector is None:                                # 현재 레지스트리의 모델·정책·가중치가 잠금 때와 같은지 (운영 models/ 경로)
         for ft, m in lock["models"].items():
             cur = model_info(ft, m["version"])
             diff = [k for k in ("trained_at", "model_sha", "scaler_sha", "meta_sha") if cur.get(k) != m.get(k)]
@@ -392,10 +428,10 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
     return lock
 
 
-def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, key_shift=0):
+def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, key_shift=0, models_dir=None):
     if purpose == "judge" and key_shift != 0:
         raise pr.PeriodError("키 어긋남 보정(--diag-key-shift)은 진단 전용이며 판정 실행에는 쓸 수 없습니다 (조인 키 변경은 사용자 결정).")
-    res = cmd_replay(ctx, range_spec, purpose, versions, policy, detector, command="report", complete=False)
+    res = cmd_replay(ctx, range_spec, purpose, versions, policy, detector, command="report", complete=False, models_dir=models_dir)
     if purpose == "judge":
         join_status = res["lock"]["join_status"]
     else:
@@ -422,7 +458,13 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
             events = events[~bad]
     info = {"short_episodes": int(ep["is_short"].sum()) if len(ep) else 0,
             "no_table_devices": ae.no_table_share(a)["devices_without_table"] if len(a) else 0}
-    header = {"model_versions": res["versions"], "privilege_check": ctx.manifest.get("privilege_check"),
+    mm = res.get("model_meta") or {}
+    tw = mm.get("training_window") or {}
+    in_sample = bool(tw.get("end") and pd.Timestamp(start) < pd.Timestamp(tw["end"]))
+    header = {"model_versions": res["versions"], "models_dir": mm.get("models_dir"), "model_role": mm.get("role"), "model_trained_at": mm.get("trained_at"),
+              "training_window": tw or None,
+              "exploration": bool(purpose != "judge" and (in_sample or mm.get("role") == "explore")),
+              "in_sample": in_sample, "privilege_check": ctx.manifest.get("privilege_check"),
               "snapshot_complete": ctx.manifest.get("complete"), "periods": {k: str(ctx.periods.get(k)) for k in ("S", "J0", "D")}}
     # 설계 9.5(개정 4): 절단 경계 E = 분석 기간의 끝(개발=J0, 판정=D, START..END 이면 END). 개발 실행에 D 를 넘기면 J0 직전 이벤트가 미탐으로 잘못 센다.
     # 태깅·J0 이후 정보 노출 축소(9.7.2): 분석 끝 이전에 시작한 에피소드만, 끝은 분석 끝에서 자른 값을 쓴다.

@@ -50,14 +50,14 @@ def test_model_load_failure_happens_before_marker_and_ledger(run, monkeypatch):
     cmds.cmd_lock(c)
     n_ledger = len(pr.read_ledger(run["runs"]))
 
-    def bad_build(versions=None, policy=None):
+    def bad_build(versions=None, policy=None, models_dir=None):
         raise RuntimeError("model file corrupted")
 
     monkeypatch.setattr(rp, "build_detector", bad_build)
     with pytest.raises(RuntimeError, match="corrupted"):
         cmds.cmd_report(c, "judge", "judge")
     assert marker(run, c) is None and len(pr.read_ledger(run["runs"])) == n_ledger                  # 표식·장부 없음 → 그냥 다시 실행
-    monkeypatch.setattr(rp, "build_detector", lambda versions=None, policy=None: FakeDetector())
+    monkeypatch.setattr(rp, "build_detector", lambda versions=None, policy=None, models_dir=None: FakeDetector())
     assert cmds.cmd_report(c, "judge", "judge")["header"]["purpose"] == "judge"
     assert marker(run, c)["phase"] == "completed"
 

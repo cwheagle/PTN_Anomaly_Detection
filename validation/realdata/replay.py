@@ -62,9 +62,14 @@ def run_baselines(df_traffic):
     return out
 
 
-def build_detector(versions=None, policy=None):
-    """운영과 같은 AnomalyDetector (트래픽 트랙만). 모델·스케일러·정책 로드가 여기서 일어난다."""
+def build_detector(versions=None, policy=None, models_dir=None):
+    """운영과 같은 AnomalyDetector (트래픽 트랙만). 모델·스케일러·정책 로드가 여기서 일어난다. models_dir 가 있으면 그 폴더의 모델(자체 레지스트리)을 로드한다
+    (PATHS 는 로드하는 동안만 바꾸고 복구)."""
     from src.pipeline.inference import AnomalyDetector
+    if models_dir:
+        from validation.realdata.retrain import use_models_dir
+        with use_models_dir(models_dir):
+            return AnomalyDetector(policy=policy, versions=versions, tracks=("traffic",))
     return AnomalyDetector(policy=policy, versions=versions, tracks=("traffic",))
 
 

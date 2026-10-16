@@ -161,6 +161,7 @@ def mark_work_and_hw(events, all_alarms, maintenance=None, work_names=WORK_NAMES
     ev = events.copy()
     ev["work_suspect"], ev["work_source"], ev["hw_coincident"], ev["hw_names"] = False, "", False, ""
     if ev.empty:
+        ev["is_judge"] = pd.Series(dtype=bool)               # 이벤트가 없어도 열 구조는 같다 (보고가 빈 구간에서 죽지 않게)
         return ev
     work = all_alarms[all_alarms["alarm_name"].isin(work_names) & all_alarms["name_status"].isin(["ok", "override"])]
     is_hw = np.array([any(fnmatch.fnmatchcase(n, p) for p in hw_patterns) for n in all_alarms["alarm_name"]], dtype=bool)

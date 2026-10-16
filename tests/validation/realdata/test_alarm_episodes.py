@@ -196,3 +196,9 @@ def test_count_judge_events_weekly_types_and_rate():
     half = ae.count_judge_events(ev, pd.Timestamp("2026-09-01"), pd.Timestamp("2026-09-03"), days)
     assert half["events"] == 2 and half["data_days"] == 2
     assert np.isnan(ae.count_judge_events(ev.iloc[0:0], pd.Timestamp("2026-09-01"), pd.Timestamp("2026-09-03"), [])["r_per_data_day"])
+
+
+def test_mark_work_and_hw_on_empty_events_keeps_columns():
+    empty_ep = pd.DataFrame(columns=["is_short", "target_grades"])
+    ev = ae.mark_work_and_hw(ae.build_target_events(empty_ep), pd.DataFrame())
+    assert ev.empty and {"is_judge", "work_suspect", "hw_coincident"} <= set(ev.columns)
