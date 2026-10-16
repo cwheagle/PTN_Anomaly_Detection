@@ -39,9 +39,10 @@ python validation/cli/seed_db.py --days 3                     # E2E 시연용 �
 export DB_HOST=... DB_NAME=... RDC_DB_USER=ptn_ro RDC_DB_PASS=...      # 비밀번호는 환경변수로만
 python validation/cli/real_data_check.py plan    --start 2026-10-05 --end 2026-10-12   # 행 추출 없음: 테이블·예상 행·경계·필터 분포·시간대·결과 테이블 충돌
 python validation/cli/real_data_check.py extract --start 2026-07-10 --end 2026-10-13 [--ports ports.csv] [--max-rows 2000000]
-python validation/cli/real_data_check.py extract --append-to <run_id> --end 2026-10-20          # 증분
 ```
 - **권한 검사는 fail closed**: `SHOW GRANTS` 에 SELECT/USAGE 외 권한(root 의 `ALL PRIVILEGES`, `WITH GRANT OPTION` 포함)이 있거나 판단 불가면 거부한다. 테스트망에서만 `--allow-write-account` 를 명령줄에 명시해 진행할 수 있다(환경변수로는 켜지지 않음, 매니페스트에 `privilege_check: override` 기록). 읽기 전용 세션(`SET SESSION TRANSACTION READ ONLY`)과 SELECT/SHOW 문장 가드는 플래그와 무관하게 유지된다.
+- 접속 환경변수: `DB_HOST`·`DB_PORT`·`DB_NAME`, 계정은 `RDC_DB_USER`/`RDC_DB_PASS` 가 없으면 **`DB_USER`/`DB_PASS` 로 폴백**한다(운영 설정 환경변수를 그대로 쓰는 셸이면 의도치 않게 그 계정이 쓰일 수 있으니 확인).
+- 문장 가드는 SELECT/SHOW 만 통과시키지만 `SELECT ... INTO OUTFILE/DUMPFILE` 은 막지 않는다. 이는 서버 권한(FILE)으로 막아야 하며, 그래서 읽기 전용 계정이 권장 경로다. 증분 추출은 구현하지 않는다(스냅샷은 추출 시점 상태로 고정).
 - **읽기 전용 계정 만들기(권장, 관리자 1회, MySQL 5.7)**:
   ```sql
   CREATE USER 'ptn_ro'@'<분석PC_IP>' IDENTIFIED BY '<충분히 긴 비밀번호>';   -- '%' 호스트 금지

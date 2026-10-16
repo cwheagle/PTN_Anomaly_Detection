@@ -5,7 +5,7 @@ DB 는 추출 때 한 번만 읽고 이후 분석은 스냅샷(`raw/<kind>/<YYYY
 - 테이블별 `id` 키셋 청크(OFFSET 미사용), 전체 행 상한 초과 시 중단하고 스냅샷을 "불완전"으로 표시.
 - SQL 에는 `occur_date` 조건을 넣지 않는다(쓰레기 값 행이 조용히 빠지면 격리 건수를 셀 수 없음, 4.3).
   4.3a 격리 후 정상 행에만 기간 필터를 Python 에서 적용한다. 격리 행은 분석 프레임에서 제외하고 `quarantine/` 에 보관.
-- 증분 추출(`append=True`): 기존 run 에 새 구간만 추가, 완전한 일 파일은 덮어쓰지 않는다.
+- 증분 추출은 구현하지 않는다(설계 4.7 개정 3a). 스냅샷은 추출 시점 상태로 고정된다. run 은 덮어쓰지 않는다.
 """
 import json
 import os
@@ -109,7 +109,7 @@ def _iter_chunks(db, table, cols, filters, ips, chunk, has_id, row_cap):
 
 
 class _Stats:
-    """종류별 누적 통계 (append 회차를 가로질러 manifest 에 보관)."""
+    """종류별 누적 통계 (manifest 에 보관)."""
 
     def __init__(self, saved=None):
         s = saved or {}
@@ -121,7 +121,7 @@ class _Stats:
         self.value_ranges = dict(s.get("value_ranges", {}))
         self.counters = {k: s.get(k, 0) for k in
                          ("fetched", "kept", "quarantined", "out_of_range", "rounding_shifted", "over_1e9",
-                          "duplicates", "lookback_boundary_alarms", "filtered_out", "skipped_existing_day_rows")}
+                          "duplicates", "lookback_boundary_alarms", "filtered_out")}
         self.filtered_out_unknown = s.get("filtered_out_unknown", False)
 
     def to_manifest(self):
@@ -223,12 +223,11 @@ def _process_chunk(rows, table, kind, ports, start, end, stats, ip_filter_in_sql
 
 
 class _DayWriter:
-    """일 단위 파일 쓰기. 완전한 기존 일 파일은 덮어쓰지 않고, 불완전한 파일은 (src_table,id) 중복 제거 후 병합."""
+    """일 단위 파일 쓰기. 같은 run 안에서 같은 날이 두 번 flush 되면 (src_table,id) 중복 제거 후 병합(방어)."""
 
-    def __init__(self, kind, raw_dir, days_meta, range_start, range_end, stats, aborted_ref):
+    def __init__(self, kind, raw_dir, days_meta, stats, aborted_ref):
         self.kind, self.dir = kind, os.path.join(raw_dir, kind)
         self.days = days_meta                      # {day: {"rows", "complete"}} (manifest 에 반영됨)
-        self.range_start, self.range_end = range_start, range_end
         self.stats, self.aborted_ref = stats, aborted_ref
         self.buf = {}
         self.new_days = 0
@@ -251,9 +250,6 @@ class _DayWriter:
         path = os.path.join(self.dir, f"{day}.csv.gz")
         meta = self.days.get(day)
         if os.path.exists(path):
-            if meta and meta.get("complete"):
-                self.stats.counters["skipped_existing_day_rows"] += len(df)    # 완전한 파일은 덮어쓰지 않음
-                return
             old = pd.read_csv(path, compression="gzip", low_memory=False)
             df = pd.concat([old, df], ignore_index=True)
             subset = ["src_table", "id"] if "id" in df.columns else None
@@ -267,11 +263,7 @@ class _DayWriter:
                                     keep="last").sum()) if {"alarm_type", "system_type"} <= set(df.columns) else 0
         old_dup = (meta or {}).get("duplicates", 0)
         self.stats.counters["duplicates"] += dup - old_dup
-        # 진행 중(release NULL) 알람이 있는 일 파일은 해제 시각이 나중에 바뀔 수 있어 불완전로 두고 증분 때 병합한다
-        ongoing = self.kind == ALARM and "release_date" in df.columns and bool(df["release_date"].isna().any())
-        complete = (not self.aborted_ref[0] and not ongoing
-                    and pd.Timestamp(day) >= pd.Timestamp(self.range_start)
-                    and pd.Timestamp(day) + pd.Timedelta(days=1) <= pd.Timestamp(self.range_end))
+        complete = not self.aborted_ref[0]            # 중단된 추출의 파일만 불완전 (4.5)
         df.to_csv(path, index=False, compression="gzip")
         self.days[day] = {"rows": int(len(df)), "complete": bool(complete), "duplicates": dup}
 
@@ -295,11 +287,6 @@ def load_snapshot(run_dir, kind):
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
-def _read_manifest(run_dir):
-    with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as f:
-        return json.load(f)
-
-
 def _write_manifest(run_dir, manifest):
     tmp = os.path.join(run_dir, "manifest.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -308,29 +295,15 @@ def _write_manifest(run_dir, manifest):
 
 
 def extract(db, run_dir, start, end, kinds=KINDS, ports=None, schema="real", max_rows=DEFAULT_MAX_ROWS,
-            chunk=DEFAULT_CHUNK, lookback_hours=DEFAULT_LOOKBACK_HOURS, stop_checker=None, append=False,
-            now=None):
+            chunk=DEFAULT_CHUNK, lookback_hours=DEFAULT_LOOKBACK_HOURS, stop_checker=None, now=None):
     """읽기 전용 추출. 반환: manifest dict. 중단(상한·stop)이면 manifest["complete"]=False."""
     now = now or datetime.now()
     start, end = pd.Timestamp(start).to_pydatetime(), pd.Timestamp(end).to_pydatetime()
-    manifest_path = os.path.join(run_dir, "manifest.json")
-    if append:
-        if not os.path.exists(manifest_path):
-            raise ExtractError(f"--append-to 대상 run 의 manifest 가 없습니다: {run_dir}")
-        manifest = _read_manifest(run_dir)
-        if not manifest.get("complete") or not manifest.get("range_end"):
-            raise ExtractError("불완전한 스냅샷에는 증분 추출을 덧붙일 수 없습니다 (다시 전체 추출)")
-        start = pd.Timestamp(manifest["range_end"]).to_pydatetime()
-        if end <= start:
-            raise ExtractError(f"--end({end}) 가 기존 스냅샷 끝({start}) 이후여야 합니다")
-        range_start = pd.Timestamp(manifest["range_start"]).to_pydatetime()
-    else:
-        if os.path.exists(run_dir) and os.listdir(run_dir):
-            raise ExtractError(f"이미 존재하는 run 입니다(덮어쓰지 않음): {run_dir}")
-        os.makedirs(run_dir, exist_ok=True)
-        range_start = start
-        manifest = {"stats": {}, "days": {k: {} for k in KINDS}, "rounds": [], "tables": {k: {} for k in KINDS},
-                    "total_rows": 0}
+    if os.path.exists(run_dir) and os.listdir(run_dir):
+        raise ExtractError(f"이미 존재하는 run 입니다(덮어쓰지 않음): {run_dir}")
+    os.makedirs(run_dir, exist_ok=True)
+    manifest = {"stats": {}, "days": {k: {} for k in KINDS}, "rounds": [], "tables": {k: {} for k in KINDS},
+                "total_rows": 0}
     raw_dir = os.path.join(run_dir, "raw")
     round_no = len(manifest["rounds"]) + 1
 
@@ -345,7 +318,7 @@ def extract(db, run_dir, start, end, kinds=KINDS, ports=None, schema="real", max
     manifest.update({
         "tool_version": tool_version(), "tz": "Asia/Seoul (naive)", "schema": schema,
         "database": (db.query("SELECT DATABASE() AS db") or [{}])[0].get("db"),
-        "range_start": str(range_start), "kinds": list(kinds),
+        "range_start": str(start), "kinds": list(kinds),
         "ports_filter": None if ports is None else {"devices": len(set(ports["ip_addr"])), "rows": len(ports)},
         "lookback_hours": lookback_hours, "max_rows": max_rows, "complete": False,
         "round_started_at": str(now), **db.privilege.to_manifest(),
@@ -367,7 +340,7 @@ def extract(db, run_dir, start, end, kinds=KINDS, ports=None, schema="real", max
             if kind == ALARM and schema == "sim" and not tabs[kind]:
                 manifest["sim_alarm_skipped"] = True
             cols_by_table = fetch_columns(db, kind, {t.name for t in need}) if need else {}
-            writer = _DayWriter(kind, raw_dir, manifest["days"].setdefault(kind, {}), range_start, end, stats, aborted)
+            writer = _DayWriter(kind, raw_dir, manifest["days"].setdefault(kind, {}), stats, aborted)
             qframes = []
             for t in need:
                 if aborted[0]:
@@ -435,7 +408,6 @@ def extract(db, run_dir, start, end, kinds=KINDS, ports=None, schema="real", max
     manifest["complete"] = aborted[0] is None
     if not aborted[0]:
         manifest["range_end"] = str(end)
-        manifest["extracted_through"] = str(end)
     else:
         manifest["abort_reason"] = aborted[0]
     _write_manifest(run_dir, manifest)

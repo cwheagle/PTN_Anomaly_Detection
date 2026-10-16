@@ -38,13 +38,13 @@ def test_plan_runs_for_readonly_and_for_root_with_flag(monkeypatch, capsys):
                      "--allow-write-account"]) == 0
 
 
-def test_extract_then_append_via_cli(monkeypatch, tmp_path, capsys):
+def test_extract_via_cli_and_no_overwrite(monkeypatch, tmp_path, capsys):
     _patch(monkeypatch, _srv())
     base = ["extract", "--kinds", "eth", "--runs-dir", str(tmp_path)]
     assert cli.main(base + ["--start", "2026-10-01 10:00", "--end", "2026-10-01 11:00", "--run-id", "r1"]) == 0
     assert (tmp_path / "r1" / "manifest.json").exists() and "완료=True" in capsys.readouterr().out
-    assert cli.main(base + ["--append-to", "r1", "--end", "2026-10-01 12:00"]) == 0
     assert cli.main(base + ["--start", "2026-10-01 10:00", "--end", "2026-10-01 11:00", "--run-id", "r1"]) == 4   # 덮어쓰기 거부
+    assert "append" not in cli.build_parser().format_help()          # 증분 추출은 구현하지 않음 (설계 4.7)
 
 
 def test_unknown_kind_rejected(monkeypatch):

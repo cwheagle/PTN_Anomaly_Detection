@@ -176,7 +176,7 @@ class ReadOnlyDB:
                 import sys
                 print("[경고] --allow-write-account: 권한 검사를 건너뜁니다. 사유: " + ", ".join(priv.denied),
                       file=sys.stderr)
-            # 세션 설정 3개는 여기서만 허용 (실패는 플래그와 무관하게 중단)
+            # 세션 설정 2개는 여기서만 허용 (실패는 플래그와 무관하게 중단)
             for stmt in ("SET SESSION TRANSACTION READ ONLY",
                          f"SET SESSION MAX_EXECUTION_TIME = {int(max_exec_ms)}"):
                 try:

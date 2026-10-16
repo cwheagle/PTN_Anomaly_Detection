@@ -10,7 +10,6 @@ P1-2 실데이터 검증 도구 (설계서 docs/design/p1_2_real_data_check.md) 
 사용법:
   python validation/cli/real_data_check.py plan --start 2026-10-05 --end 2026-10-12
   python validation/cli/real_data_check.py extract --start 2026-07-10 --end 2026-10-13 [--ports ports.csv]
-  python validation/cli/real_data_check.py extract --append-to <run_id> --end 2026-10-20
   (--schema sim: 시뮬레이터 DB cowptn_test 용 — 필터 컬럼·알람 테이블이 없으면 생략)
 """
 import argparse
@@ -53,11 +52,10 @@ def build_parser():
 
     se = sub.add_parser("extract", help="읽기 전용 추출 → 스냅샷")
     common(se)
-    se.add_argument("--start")
+    se.add_argument("--start", required=True)
     se.add_argument("--end", required=True)
     se.add_argument("--ports", help="CSV (열 ip_addr, 선택 cid, lid)")
     se.add_argument("--run-id")
-    se.add_argument("--append-to", metavar="RUN_ID", help="기존 run 에 새 구간만 추가")
     se.add_argument("--max-rows", type=int, default=DEFAULT_MAX_ROWS)
     se.add_argument("--chunk", type=int, default=DEFAULT_CHUNK)
     se.add_argument("--runs-dir", default=RUNS_DIR)
@@ -86,16 +84,13 @@ def main(argv=None):
             print(format_plan(build_plan(db, args.start, args.end, kinds, args.schema, args.lookback_hours)))
             return 0
         if args.cmd == "extract":
-            if args.append_to:
-                run_id, start = args.append_to, args.start or args.end   # 시작은 기존 스냅샷 끝에서 정해짐
-            else:
-                if not args.start:
-                    print("--start 가 필요합니다", file=sys.stderr)
-                    return 2
-                run_id, start = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S"), args.start
+            if not args.start:
+                print("--start 가 필요합니다", file=sys.stderr)
+                return 2
+            run_id, start = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S"), args.start
             ports = load_ports_csv(args.ports) if args.ports else None
             m = extract(db, os.path.join(args.runs_dir, run_id), start, args.end, kinds, ports, args.schema,
-                        args.max_rows, args.chunk, args.lookback_hours, append=bool(args.append_to))
+                        args.max_rows, args.chunk, args.lookback_hours)
             print(f"run {run_id}: 완료={m['complete']} 읽은 행 {m['total_rows']:,} 회차 {len(m['rounds'])}"
                   + (f" 중단={m.get('abort_reason')}" if not m["complete"] else ""))
             for k in kinds:
