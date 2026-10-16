@@ -220,3 +220,14 @@ def test_manual_check_stops_on_single_mismatch():
     assert len(few["warnings"]) == 2
     with pytest.raises(ValueError):
         pj.check_manual(ok.drop(columns=["alarm_lid"]))
+
+
+def test_reclass_report_counts_by_model_and_rule2_distribution():
+    al = pd.DataFrame({"ip_addr": ["a"] * 6, "system_type": [12, 12, 12, 31, 31, 31], "cid": [3, 3, 256, 6, 2, 0], "lid": [1, 1, 255, 1, 1, 0],
+                       "address": ["S.2 -P1", "S.2", "SYSTEM", "S.5", "S.1 -P1", ""], "alarm_type": [1] * 6})
+    r = pj.reclass_report(pj.classify_alarm_rows(al))
+    assert r["by_model"]["12"] == {"rows": 3, "port": 1, "device": 1, "slot": 1, "slot_by_rule2": 1, "bad_key": 0}
+    assert r["by_model"]["31"]["slot_by_rule2"] == 1 and r["by_model"]["31"]["device"] == 1 and r["rule2_total"] == 2
+    assert r["rule2_cid_lid"]["cid_lid_top"] == {"3/1": 1, "6/1": 1} and len(r["rule2_samples"]) == 2
+    j2 = pj.j2_diagnosis(pj.classify_alarm_rows(al), eth_frame([(1, 1)], hours=1))
+    assert j2["row_class_reclassification"]["rule2_total"] == 2

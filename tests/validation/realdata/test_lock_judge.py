@@ -121,24 +121,25 @@ def test_judge_rejects_policy_argument_and_checks_registry_meta_hash(run, monkey
     # 실제 로드 경로(detector=None): 레지스트리 모델 메타의 정책/학습 시각이 잠금과 다르면 거부
     monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: {"track": ft, "version": v, "trained_at": "2020-01-01 00:00:00",
                                                                  "training_window": None, "alert_policy": {"sigma_k": 9.0}})
-    with pytest.raises(pr.PeriodError, match="정책 동결 위반"):
+    with pytest.raises(pr.PeriodError, match="alert_policy"):
         cmds.cmd_report(c, "judge", "judge")
     assert not os.path.exists(pr.run_marker_path(run["runs"], c.periods))
 
 
-def test_failed_replay_before_results_does_not_consume_judge(run):
-    c = locked(run)
-
-    class Boom:
-        def detect(self, *a, **k):
-            raise RuntimeError("model load failed")
-
-    with pytest.raises(RuntimeError):
-        cmds.cmd_report(c, "judge", "judge", detector=Boom())
-    mk = json.load(open(pr.run_marker_path(run["runs"], c.periods)))
-    assert mk["status"] == "failed" and "model load failed" in mk["error"]
-    rep = cmds.cmd_report(c, "judge", "judge", detector=FakeDetector())                       # 결과를 본 적 없으므로 재시도 허용
-    assert rep["header"]["purpose"] == "judge"
-    assert json.load(open(pr.run_marker_path(run["runs"], c.periods)))["attempts"] == 2
-    with pytest.raises(pr.PeriodError, match="1회"):
-        cmds.cmd_report(c, "judge", "judge", detector=FakeDetector())
+@pytest.mark.parametrize("field", ["model_sha", "scaler_sha", "meta_sha", "trained_at"])
+def test_judge_rejects_changed_model_files_after_lock(run, monkeypatch, field):
+    base = {"track": "traffic", "version": "v9", "trained_at": "2020-01-01 00:00:00", "training_window": None, "alert_policy": None,
+            "model_sha": "m1", "scaler_sha": "s1", "meta_sha": "j1"}
+    monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: dict(base))
+    c = ctx_of(run)
+    cmds.cmd_join_check(c, "dev")
+    cmds.cmd_lock(c)                                             # 잠금 시점의 해시 기록
+    assert pr.load_lock(run["runs"], c.periods)["models"]["traffic"]["model_sha"] == "m1"
+    monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: {**base, field: "changed"})          # 같은 버전 문자열인데 파일이 바뀜
+    with pytest.raises(pr.PeriodError, match=field):
+        cmds.cmd_report(c, "judge", "judge")
+    assert not os.path.exists(pr.run_marker_path(run["runs"], c.periods))                           # 측정 전 거부, 표식 소모 없음
+    monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: dict(base))
+    # 해시가 같으면 통과 (표식은 실제 실행에서만 생성)
+    cmds._verify_judge_preconditions(c, "judge", c.periods["J0"], c.periods["D"], None)
+    assert os.path.exists(pr.run_marker_path(run["runs"], c.periods))

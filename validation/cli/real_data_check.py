@@ -191,7 +191,10 @@ def _run_snapshot_command(args):
             if args.summary:
                 print(res["first_line"])
                 print(f"알람 {res['alarm_rows']:,}행, 에피소드 {res['episodes']}, 행 분류 {res['row_classes']}")
-                print(f"슬롯만 있는 address 로 slot 재분류(6.1 보정): {res['slot_only_address_reclassified']}")
+                rc = res["row_class_reclassification"]
+                print(f"행 분류 모델별(port/device/slot/②slot): " + "; ".join(
+                    f"{k}:{v['port']}/{v['device']}/{v['slot']}/{v['slot_by_rule2']}" for k, v in rc["by_model"].items()))
+                print(f"②(cid>0·lid>0 인데 address 가 S.n → slot) {rc['rule2_total']}건, cid/lid 상위 {rc['rule2_cid_lid'].get('cid_lid_top')}")
                 print(f"타겟 이벤트: {res['target_events']}  작업 대용 알람: {res['work_alarms']}")
                 print(f"미분류 상위: {[(r['alarm_name'], r['count']) for r in res['unclassified_top'][:10]]}")
             else:

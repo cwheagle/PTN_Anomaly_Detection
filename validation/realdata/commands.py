@@ -157,8 +157,10 @@ def model_info(ft="traffic", version=None):
         if os.path.exists(reg):
             with open(reg, encoding="utf-8") as f:
                 version = json.load(f).get("active_version")
+    model_path, scaler_path, _ = AnomalyDetector._resolve_paths(ft, version)
     return {"track": ft, "version": version, "trained_at": meta.get("trained_at"), "training_window": meta.get("training_window"),
-            "alert_policy": meta.get("alert_policy"), "meta_path": meta_path}
+            "alert_policy": meta.get("alert_policy"), "meta_path": meta_path,
+            "model_sha": _file_sha(model_path), "scaler_sha": _file_sha(scaler_path), "meta_sha": _file_sha(meta_path)}
 
 
 def _file_sha(path):
@@ -232,14 +234,7 @@ def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
         raise pr.PeriodError(f"알 수 없는 purpose: {purpose}")
     if versions is None and detector is None:
         versions = {"traffic": model_info("traffic")["version"]}          # 활성 버전을 명시해 기록한다
-    try:
-        res = rp.replay(ctx.eth, start, end, versions=versions, policy=policy, detector=detector)
-    except BaseException as e:                       # 결과를 내기 전 실패: 판정을 소진하지 않도록 표식을 failed 로 (재시도 허용)
-        if purpose == "judge":
-            pr.finish_judge_run(ctx.runs_dir, ctx.periods, "failed", repr(e))
-        raise
-    if purpose == "judge":
-        pr.finish_judge_run(ctx.runs_dir, ctx.periods, "done")
+    res = rp.replay(ctx.eth, start, end, versions=versions, policy=policy, detector=detector)
     res["purpose"], res["versions"], res["lock"] = purpose, versions, lock
     if save:
         os.makedirs(ctx.out_dir, exist_ok=True)
@@ -267,11 +262,15 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
         ok, why = pr.check_training_window({"trained_at": m.get("trained_at"), "training_window": m.get("training_window")}, ctx.periods["J0"])
         if not ok:
             raise pr.PeriodError(f"판정 모델 {ft} 학습 구간 검사 실패: {why}")
-    if detector is None:                                  # 현재 레지스트리의 모델·정책이 잠금 때와 같은지 (실제 모델 로드 경로)
+    # 주의: detector 를 직접 주입하면(테스트 전용) 아래 모델·정책·가중치 해시 검사는 생략된다. CLI 는 항상 detector=None 이다.
+    if detector is None:                                  # 현재 레지스트리의 모델·정책·가중치가 잠금 때와 같은지 (실제 모델 로드 경로)
         for ft, m in lock["models"].items():
             cur = model_info(ft, m["version"])
-            if cur["trained_at"] != m.get("trained_at") or pr.stable_hash(cur.get("alert_policy")) != lock["policy_hash"]:
-                raise pr.PeriodError(f"판정 모델 {ft} {m['version']} 의 메타(trained_at·정책)가 잠금 때와 다릅니다 — 정책 동결 위반, 판정 거부 (P6)")
+            diff = [k for k in ("trained_at", "model_sha", "scaler_sha", "meta_sha") if cur.get(k) != m.get(k)]
+            if pr.stable_hash(cur.get("alert_policy")) != lock["policy_hash"]:
+                diff.append("alert_policy")
+            if diff:
+                raise pr.PeriodError(f"판정 모델 {ft} {m['version']} 가 잠금 때와 다릅니다 ({', '.join(diff)}) — 모델/정책 동결 위반, 판정 거부 (P6)")
     pr.claim_judge_run(ctx.runs_dir, ctx.periods, {"started_at": str(pd.Timestamp.now()), "config_hash": lock["config_hash"]})
     return lock
 

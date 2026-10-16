@@ -206,6 +206,11 @@ def slot_only_counts(alarms):
     return {str(k): int(v) for k, v in sl.groupby("system_type").size().items()}
 
 
+def _reclass(alarms):
+    from validation.realdata.port_join import reclass_report
+    return reclass_report(alarms) if len(alarms) else {"by_model": {}, "rule2_total": 0, "rule2_cid_lid": {}, "rule2_samples": []}
+
+
 def no_table_share(alarms):
     """표 없는 모델(또는 모르는 system_type) 장비 비중 — 7.3 첫 줄."""
     dev = alarms.drop_duplicates("ip_addr")
@@ -228,7 +233,7 @@ def summarize_alarms(alarms, episodes, events, top=30):
     return {
         "first_line": f"표 없는 모델 장비 {nts['devices_without_table']}/{nts['devices']} ({nts['share']:.0%}) {nts['models']}"
                       + (" — 비중 ≥ 1/3: C3 판정 보류 사유로 보고 (7.3)" if nts["share"] >= 1 / 3 else ""),
-        "no_table": nts, "alarm_rows": int(len(alarms)), "slot_only_address_reclassified": slot_only_counts(alarms),
+        "no_table": nts, "alarm_rows": int(len(alarms)), "slot_only_address_reclassified": slot_only_counts(alarms), "row_class_reclassification": _reclass(alarms),
  "row_classes": by_class,
         "name_status": alarms["name_status"].value_counts().to_dict(),
         "top_names": names.head(top).to_dict("records"),

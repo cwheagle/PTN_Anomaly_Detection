@@ -138,7 +138,7 @@ def j2_diagnosis(alarms_cls, eth):
     dev = a[a["row_class"].isin(["device", "slot"])]
     shape = dev.groupby(["row_class", dev["addr_port"].map(lambda v: "empty" if v == "" else ("slot-only" if "-P" not in v else "port-form"))]).size()
     p5 = a.groupby("system_type")["p5_same"].mean() if "p5_same" in a.columns else pd.Series(dtype=float)
-    return {"by_model": by_model.to_dict("records"),
+    return {"by_model": by_model.to_dict("records"), "row_class_reclassification": reclass_report(alarms_cls),
             "device_alarm_address_shape": {f"{k[0]}/{k[1]}": int(v) for k, v in shape.items()},
             "p5_same_ratio": {str(k): float(v) for k, v in p5.items()},
             "diff_samples": diff[["ip_addr", "system_type", "cid", "lid", "addr_port", "perf_addr_port"]].head(20).to_dict("records")}
@@ -325,3 +325,22 @@ def cid_slot_offsets(df):
     slot = d["addr_port"].str.extract(r"S\.(\d+)")[0].astype(float)
     d = d.assign(off=d["cid"].astype(float) - slot)[slot.notna()]
     return {str(k): {str(int(o)): int(n) for o, n in g["off"].value_counts().items()} for k, g in d.groupby("system_type")}
+
+
+def reclass_report(alarms_cls):
+    """고정 출력: 모델별 device/slot 로 분류된 행 수, 그중 ②(cid>0·lid>0 인데 address 가 'S.n' 이라 slot 이 된 행)의 건수와 cid/lid 분포.
+    휴리스틱이 포트 알람을 조용히 빼는지 실데이터로 확인하기 위한 출력이다."""
+    a = add_diag_columns(alarms_cls)
+    slot_only = a["addr_port"].map(lambda v: v != "" and "-P" not in v)
+    rule2 = (a["row_class"] == "slot") & (a["lid"] > 0) & slot_only
+    by_model = {}
+    for st, g in a.groupby("system_type"):
+        by_model[str(st)] = {"rows": int(len(g)), "port": int((g["row_class"] == "port").sum()), "device": int((g["row_class"] == "device").sum()),
+                             "slot": int((g["row_class"] == "slot").sum()), "slot_by_rule2": int(rule2[g.index].sum()),
+                             "bad_key": int((g["row_class"] == "bad_key").sum())}
+    r2 = a[rule2]
+    dist = {"cid": {str(k): int(v) for k, v in r2["cid"].value_counts().head(15).items()},
+            "lid": {str(k): int(v) for k, v in r2["lid"].value_counts().head(15).items()},
+            "cid_lid_top": {f"{c}/{l}": int(n) for (c, l), n in r2.groupby(["cid", "lid"]).size().sort_values(ascending=False).head(15).items()}}
+    return {"by_model": by_model, "rule2_total": int(rule2.sum()), "rule2_cid_lid": dist,
+            "rule2_samples": r2[["ip_addr", "system_type", "cid", "lid", "address", "alarm_type"]].head(20).to_dict("records") if len(r2) else []}
