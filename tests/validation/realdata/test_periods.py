@@ -81,9 +81,43 @@ def test_lock_file_opens_judge_range(tmp_path):
     assert (s, e) == (p["J0"], p["D"]) and pr.load_lock(str(tmp_path), p)["alternative"] == "fixed_split_v1"
 
 
-def test_guard_inactive_when_periods_unavailable(tmp_path):
-    p = pr.compute_periods(days(30))                                                 # 판정 구간 자체가 없음 → 봉인 대상 없음
-    pr.require_unsealed(D0, D0 + pd.Timedelta(days=100), p, str(tmp_path), "x")
+def test_provisional_j0_from_28_data_days_seals_but_cannot_lock(tmp_path):
+    p30 = pr.compute_periods(days(30))
+    assert not p30["ok"] and p30["provisional"] and p30["J0"] == days(28)[-1] + pd.Timedelta(days=1)
+    with pytest.raises(pr.PeriodError, match="잠금"):                                           # ok=False 여도 [J0, D) 분석은 거부 (F-14)
+        pr.resolve_range(f"{p30['J0']:%Y-%m-%d}..{p30['D']:%Y-%m-%d}", p30, str(tmp_path), "alarms")
+    with pytest.raises(pr.PeriodError, match="판정 실행 불가|판정 기간"):
+        pr.range_bounds(p30, "judge")
+    assert pr.range_bounds(p30, "dev") == (p30["S"], p30["J0"])
+    p45 = pr.compute_periods(days(45))
+    assert p45["ok"] and p45["J0"] == p30["J0"]                                                    # 데이터가 뒤로 늘어도 28번째 데이터일은 같다
+
+
+def test_under_28_data_days_is_explore_only(tmp_path):
+    p = pr.compute_periods(days(20))
+    assert p["explore_only"] and not p["ok"] and "J0" not in p
+    for spec in ("dev", "judge"):
+        with pytest.raises(pr.PeriodError, match="explore"):
+            pr.resolve_range(spec, p, str(tmp_path), "alarms")
+    s, e = pr.resolve_range("2026-07-12..2026-07-20", p, str(tmp_path), "alarms")
+    assert pr.analysis_purpose(p, s, e) == "explore"
+    assert pr.analysis_purpose(pr.compute_periods(days(57)), D0, D0 + pd.Timedelta(days=3)) == "dev"
+
+
+def test_ledger_is_append_only_and_conflicts_cover_other_snapshots_and_judge_runs(tmp_path):
+    runs = str(tmp_path)
+    p = pr.compute_periods(days(57))
+    assert pr.ledger_conflicts(runs, p) is None                                                     # 장부 없음
+    pr.append_ledger(runs, "alarms --summary", "dev", D0, p["J0"], p, "r1")
+    assert pr.ledger_conflicts(runs, p) == []                                                       # 개발 범위만 → 충돌 없음
+    other = pr.compute_periods(days(30))                                                            # 다른 스냅샷(S 같고 D 짧음)의 explore 성격 기록
+    pr.append_ledger(runs, "replay", "dev", p["J0"] - pd.Timedelta(days=1), p["J0"] + pd.Timedelta(days=1), other, "r0")
+    pr.append_ledger(runs, "report", "judge", p["J0"], p["D"], p, "r1")                             # 이전 판정 실행
+    conf = pr.ledger_conflicts(runs, p)
+    assert [c["run"] for c in conf] == ["r0", "r1"] and len(pr.read_ledger(runs)) == 3
+    # 경계: 끝이 J0 와 같으면(반열림) 충돌 아님
+    pr.append_ledger(runs, "x", "dev", D0, p["J0"], p, "r2")
+    assert len(pr.ledger_conflicts(runs, p)) == 2
 
 
 # ---- 9.7.5 판정 모델 학습 구간 검사 / 잠금 / 1회 표식 -------------------------------------------------

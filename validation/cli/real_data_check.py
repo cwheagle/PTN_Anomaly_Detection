@@ -101,7 +101,7 @@ def build_parser():
     for name, hlp in (("replay", "AI·고정 임계치·롤링 규칙 오프라인 재생 (스냅샷 기반)"), ("report", "C1 원값·C3·C4b·탐지 지연·C6·겹침 보고")):
         sx = sub.add_parser(name, help=hlp)
         snap(sx)
-        sx.add_argument("--purpose", choices=["dev", "judge"], default="dev")
+        sx.add_argument("--purpose", choices=["dev", "judge", "explore"], default="dev")
         sx.add_argument("--versions", nargs="*", default=[], metavar="TRACK=VER")
         sx.add_argument("--policy", help="알람 정책 JSON (AlertPolicy 필드)")
         if name == "report":
@@ -109,7 +109,7 @@ def build_parser():
 
     sm = sub.add_parser("sample", help="방법별 층화 무작위 블라인드 검토 샘플 (재생 결과 필요)")
     snap(sm)
-    sm.add_argument("--purpose", choices=["dev", "judge"], default="dev")
+    sm.add_argument("--purpose", choices=["dev", "judge", "explore"], default="dev")
     sm.add_argument("--seed", type=int, required=True, help="층화 추출 시드 (필수, 기록됨)")
 
     sr = sub.add_parser("score-review", help="검토 CSV 채점: 유효율 Wilson 95%%, C1·C2·C4a")

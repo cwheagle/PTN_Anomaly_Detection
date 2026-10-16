@@ -15,7 +15,7 @@ import pandas as pd
 from validation.evaluation.metrics import KEY
 from validation.realdata.replay import METHODS, incidents_of
 
-QUOTAS = {"dev": {"ai": 30, "fixed": 10, "rolling": 10}, "judge": {"ai": 50, "fixed": 15, "rolling": 10}}
+QUOTAS = {"dev": {"ai": 30, "fixed": 10, "rolling": 10}, "explore": {"ai": 30, "fixed": 10, "rolling": 10}, "judge": {"ai": 50, "fixed": 15, "rolling": 10}}
 MAX_PER_PORT = 3
 LABELS = ("유효-장애", "유효-예방", "정상 변동", "오탐", "판단 불가")
 VALID = ("유효-장애", "유효-예방")

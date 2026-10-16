@@ -81,6 +81,11 @@ class Context:
         self.events = ae.mark_work_and_hw(ae.build_target_events(self.episodes), self.alarms, self.maintenance)
         self.out_dir = os.path.join(run_dir, "out")
 
+    def record(self, command, start, end, purpose=None):
+        """분석 장부에 기록 (가드를 통과한 뒤, 계산 전)."""
+        purpose = purpose or pr.analysis_purpose(self.periods, start, end)
+        return pr.append_ledger(self.runs_dir, command, purpose, start, end, self.periods, os.path.basename(self.run_dir))
+
     def in_range(self, start, end):
         """범위 안 알람·에피소드·이벤트. 에피소드·이벤트의 end 는 분석 범위 끝에서 잘라 표시한다(설계 9.7.2, 개발 출력의 J0 이후 정보 축소; 원 값은 스냅샷에만)."""
         a = self.alarms[(self.alarms["occur_date"] >= start) & (self.alarms["occur_date"] < end)]
@@ -94,6 +99,7 @@ class Context:
 def cmd_alarms(ctx, range_spec, mode):
     """mode = summary | count. 판정 구간과 겹치면 잠금 전 거부(P4)."""
     start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"alarms --{mode}")
+    ctx.record(f"alarms --{mode}", start, end)
     a, ep, ev = ctx.in_range(start, end)
     tag = range_spec.replace("..", "_").replace(" ", "")
     if mode == "summary":
@@ -120,6 +126,7 @@ def cmd_alarms(ctx, range_spec, mode):
 
 def cmd_join_check(ctx, range_spec="dev", manual_csv=None):
     start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, "join-check")
+    ctx.record("join-check", start, end)
     a, ep, _ = ctx.in_range(start, end)
     eth = ctx.eth
     col = "bin_end" if "bin_end" in eth.columns else "occur_date"
@@ -200,6 +207,15 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None):
     """판정 기간 잠금 (9.7.3-4). 조건: 기간 계산 가능, 개발 기간 join-check 결과 존재, 판정 모델 학습 구간 검사 통과(9.7.5)."""
     if not ctx.periods.get("ok"):
         raise pr.PeriodError(ctx.periods.get("reason") or "기간 계산 불가")
+    conflicts = pr.ledger_conflicts(ctx.runs_dir, ctx.periods)
+    if conflicts:
+        raise pr.PeriodError(f"분석 장부에 판정 구간 [{ctx.periods['J0']:%Y-%m-%d}, {ctx.periods['D']:%Y-%m-%d}) 와 겹치는 기록이 {len(conflicts)}건 있어 "
+                             f"잠금을 거부합니다 (이미 본 데이터로 판정할 수 없음, 9.7.4): " + "; ".join(
+                                 f"{r['command']}/{r['purpose']} {r['start'][:10]}~{r['end'][:10]} (S={r['S'][:10]}, D={r['D'][:10]})" for r in conflicts[:5]))
+    ledger_missing = conflicts is None
+    if ledger_missing:
+        import sys as _sys
+        print("[경고] 분석 장부가 없습니다 — 잠금에 ledger_missing 을 기록합니다 (9.7.4)", file=_sys.stderr)
     jpath = join_status_path or os.path.join(ctx.out_dir, "join_check_dev.json")
     if not os.path.exists(jpath):
         raise pr.PeriodError(f"개발 기간 join-check 결과가 없습니다: {jpath} — 먼저 join-check 를 실행하세요 (9.7.3-3)")
@@ -219,7 +235,7 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None):
                "judge_data_days": ctx.periods["judge_data_days"], "data_days": ctx.periods["data_days"],
                "models": {ft: {k: v for k, v in info.items() if k != "meta_path"} for ft, info in model.items()},
                "policy_hash": pr.stable_hash(pol), "config_hash": pr.stable_hash(parts), "config_parts": parts,
-               "join_status": join["join_status"], "dev_event_rate_r": dev["r_per_data_day"], "r_needed_for_20": need,
+               "join_status": join["join_status"], "ledger_missing": ledger_missing, "dev_event_rate_r": dev["r_per_data_day"], "r_needed_for_20": need,
                "c3_hold_expected": bool(dev["r_per_data_day"] < need), "exposure_note": rpt.EXPOSURE_NOTE,
                "locked_at": str(pd.Timestamp.now())}
     path = pr.create_lock(ctx.runs_dir, ctx.periods, payload)
@@ -230,17 +246,25 @@ def _tag(spec):
     return spec.replace("..", "_").replace(" ", "")
 
 
-def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, save=True):
+def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, save=True, command="replay"):
     """재생 (스냅샷 → AI·고정·롤링). purpose=dev: 개발 기간 안에서만. purpose=judge: 잠금·설정 해시·모델 검사·1회 표식을 통과해야 한다."""
-    start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"replay[{purpose}]")
+    start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"{command}[{purpose}]")
     lock = None
-    if purpose == "dev":
-        if ctx.periods.get("ok") and pr.overlaps_judge(start, end, ctx.periods):
+    if purpose == "explore":
+        if not ctx.periods.get("explore_only"):
+            raise pr.PeriodError("purpose=explore 는 데이터일 < 28 로 기간을 정할 수 없을 때만 허용됩니다 — dev/judge 를 쓰세요.")
+        ctx.record(command, start, end, "explore")
+    elif ctx.periods.get("explore_only"):
+        raise pr.PeriodError(ctx.periods["reason"])
+    elif purpose == "dev":
+        if pr.overlaps_judge(start, end, ctx.periods):
             raise pr.PeriodError("purpose=dev 는 판정 구간과 겹칠 수 없습니다 (판정 구간은 purpose=judge 1회만).")
+        ctx.record(command, start, end, "dev")
     elif purpose == "judge":
         if policy is not None:
             raise pr.PeriodError("판정 실행에서는 --policy 를 쓸 수 없습니다 — 정책은 잠금에 동결된 모델 메타 정책만 사용 (P6)")
         lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector)
+        ctx.record(command, start, end, "judge")
         versions = {ft: m["version"] for ft, m in lock["models"].items()}
     else:
         raise pr.PeriodError(f"알 수 없는 purpose: {purpose}")
@@ -290,7 +314,7 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
 def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, key_shift=0):
     if purpose == "judge" and key_shift != 0:
         raise pr.PeriodError("키 어긋남 보정(--diag-key-shift)은 진단 전용이며 판정 실행에는 쓸 수 없습니다 (조인 키 변경은 사용자 결정).")
-    res = cmd_replay(ctx, range_spec, purpose, versions, policy, detector)
+    res = cmd_replay(ctx, range_spec, purpose, versions, policy, detector, command="report")
     if purpose == "judge":
         join_status = res["lock"]["join_status"]
     else:
@@ -365,11 +389,16 @@ def _work_lookup(ctx):
 def cmd_sample(ctx, range_spec, purpose, seed):
     from validation.realdata import review as rv
     start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"sample[{purpose}]")
-    if purpose == "dev" and ctx.periods.get("ok") and pr.overlaps_judge(start, end, ctx.periods):
+    if purpose == "explore" and not ctx.periods.get("explore_only"):
+        raise pr.PeriodError("purpose=explore 는 데이터일 < 28 로 기간을 정할 수 없을 때만 허용됩니다.")
+    if purpose != "explore" and ctx.periods.get("explore_only"):
+        raise pr.PeriodError(ctx.periods["reason"])
+    if purpose == "dev" and pr.overlaps_judge(start, end, ctx.periods):
         raise pr.PeriodError("purpose=dev 샘플은 판정 구간과 겹칠 수 없습니다.")
     if purpose == "judge" and range_spec != "judge":
         raise pr.PeriodError("purpose=judge 샘플은 --range judge 만 허용됩니다.")
     frames = load_replay_frames(ctx, purpose, range_spec)
+    ctx.record("sample", start, end, purpose)
     tag = f"{purpose}_{_tag(range_spec)}"
     rpath = os.path.join(ctx.out_dir, f"sample_review_{tag}.csv")
     if os.path.exists(rpath):

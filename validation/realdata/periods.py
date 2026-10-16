@@ -32,30 +32,43 @@ def data_days_from_eth(eth):
 
 
 def compute_periods(days, dev_days=DEV_DATA_DAYS, min_judge_days=MIN_JUDGE_DATA_DAYS, start=None):
-    """데이터 일 목록 → S, J0, D, 데이터 일 수. 개발 데이터일 부족/판정 데이터일 부족이면 ok=False 와 사유."""
+    """데이터 일 목록 → S, D, J0, 데이터 일 수.
+    - 데이터일 < 28: 개발·판정을 나눌 수 없다 → explore_only (모든 분석은 purpose=explore, 장부에 남아 나중에 판정 구간이 될 수 없음, 9.7.4).
+    - 28 ≤ 데이터일 < 43: ok=False(판정 < 15 데이터일)이지만 잠정 J0 = 28번째 데이터일 다음 날을 계산하고 P4 를 ok=True 와 똑같이 적용(잠금은 불가).
+    - 데이터일 ≥ 43: ok=True."""
     days = sorted(pd.Timestamp(d).normalize() for d in days)
-    out = {"alternative": ALTERNATIVE_ID, "data_days": len(days), "dev_data_days": dev_days, "ok": False, "reason": None}
+    out = {"alternative": ALTERNATIVE_ID, "data_days": len(days), "dev_data_days": dev_days, "ok": False, "reason": None,
+           "provisional": False, "explore_only": False}
     if not days:
         out["reason"] = "데이터 일 0"
+        out["explore_only"] = True
         return out
     out["S"] = pd.Timestamp(start) if start is not None else days[0]
     out["D"] = days[-1] + pd.Timedelta(days=1)
-    if len(days) < dev_days + min_judge_days:
-        out["reason"] = (f"데이터 일 {len(days)} < {dev_days + min_judge_days} (개발 {dev_days} + 판정 최소 {min_judge_days}) — 판정 실행 불가 (9.7.4)")
+    if len(days) < dev_days:
+        out["explore_only"] = True
+        out["reason"] = f"데이터 일 {len(days)} < {dev_days} — 개발/판정을 나눌 수 없음, 모든 분석은 purpose=explore (장부에 남아 나중에 판정 구간이 될 수 없음)"
         return out
     out["J0"] = days[dev_days - 1] + pd.Timedelta(days=1)
     out["judge_data_days"] = len(days) - dev_days
+    if len(days) < dev_days + min_judge_days:
+        out["provisional"] = True
+        out["reason"] = (f"데이터 일 {len(days)} < {dev_days + min_judge_days} (개발 {dev_days} + 판정 최소 {min_judge_days}) — 판정 실행 불가 (9.7.4), "
+                         f"잠정 J0={out['J0']:%Y-%m-%d} 로 [J0, D) 분석은 봉인")
+        return out
     out["ok"] = True
     return out
 
 
 def range_bounds(periods, name):
-    """'dev' → [S, J0), 'judge' → [J0, D)."""
-    if not periods.get("ok"):
-        raise PeriodError(periods.get("reason") or "기간 계산 불가")
+    """'dev' → [S, J0), 'judge' → [J0, D). dev 는 잠정 J0 로도 가능, judge 는 ok 일 때만."""
+    if periods.get("explore_only"):
+        raise PeriodError(periods.get("reason") or "기간 계산 불가 — purpose=explore 의 START..END 범위만 허용")
     if name == "dev":
         return periods["S"], periods["J0"]
     if name == "judge":
+        if not periods.get("ok"):
+            raise PeriodError(periods.get("reason") or "판정 기간 계산 불가")
         return periods["J0"], periods["D"]
     raise PeriodError(f"알 수 없는 기간 이름: {name!r} (dev | judge)")
 
@@ -71,16 +84,16 @@ def lock_path(runs_dir, periods):
 
 def overlaps_judge(start, end, periods):
     """[start, end) 가 판정 구간 [J0, D) 와 겹치는지."""
-    if not periods.get("ok"):
+    if "J0" not in periods:
         return False
     j0, d = periods["J0"], periods["D"]
     return pd.Timestamp(start) < d and pd.Timestamp(end) > j0
 
 
 def require_unsealed(start, end, periods, runs_dir, command):
-    """잠금 파일이 없는데 [start, end) 가 판정 구간과 겹치면 PeriodError (측정 전 거부, P4)."""
-    if not periods.get("ok"):
-        # 기간을 정할 수 없으면(데이터일 부족) 판정 구간 자체가 없으므로 봉인 대상도 없다 — 단 판정 실행은 별도로 불가
+    """잠금 파일이 없는데 [start, end) 가 판정 구간 [J0, D) 와 겹치면 PeriodError (측정 전 거부, P4).
+    J0 는 데이터일 ≥ 28 이면 잠정값으로도 적용한다(잠금은 불가) — 데이터가 뒤로 늘어도 28번째 데이터일은 바뀌지 않는다."""
+    if "J0" not in periods:
         return
     if overlaps_judge(start, end, periods) and not os.path.exists(lock_path(runs_dir, periods)):
         raise PeriodError(
@@ -171,3 +184,45 @@ def claim_judge_run(runs_dir, periods, info):
     except FileExistsError:
         raise PeriodError(f"이 잠금에 대한 판정 실행이 이미 있습니다 (판정 실행은 1회): {p}")
     return p
+
+
+# ---- 분석 장부 (설계 9.7.4, 추가 전용) ------------------------------------------------------------------------
+LEDGER_NAME = "analysis_ledger.jsonl"
+
+
+def ledger_path(runs_dir):
+    return os.path.join(runs_dir, LEDGER_NAME)
+
+
+def analysis_purpose(periods, start, end):
+    """장부에 남길 purpose: 기간 미정(데이터일 < 28)이면 explore, 판정 구간과 겹치면 judge, 아니면 dev."""
+    if periods.get("explore_only"):
+        return "explore"
+    return "judge" if overlaps_judge(start, end, periods) else "dev"
+
+
+def append_ledger(runs_dir, command, purpose, start, end, periods, run_id=None):
+    """분석한 시간 범위·purpose·스냅샷 S/D·시각을 덧붙인다 (파일을 지우거나 다른 runs 폴더를 쓰는 우회는 막지 못함: 운영자 규율)."""
+    os.makedirs(runs_dir, exist_ok=True)
+    rec = {"ts": str(pd.Timestamp.now()), "command": command, "purpose": purpose, "start": str(pd.Timestamp(start)), "end": str(pd.Timestamp(end)),
+           "S": str(periods.get("S")), "D": str(periods.get("D")), "run": run_id}
+    with open(ledger_path(runs_dir), "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
+
+
+def read_ledger(runs_dir):
+    p = ledger_path(runs_dir)
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        return [json.loads(x) for x in f if x.strip()]
+
+
+def ledger_conflicts(runs_dir, periods):
+    """[J0, D) 와 겹치는 장부 기록(이전 판정 실행·다른 S/D 의 스냅샷 것·explore 포함). 장부가 없으면 None."""
+    recs = read_ledger(runs_dir)
+    if recs is None:
+        return None
+    j0, d = pd.Timestamp(periods["J0"]), pd.Timestamp(periods["D"])
+    return [r for r in recs if pd.Timestamp(r["start"]) < d and pd.Timestamp(r["end"]) > j0]
