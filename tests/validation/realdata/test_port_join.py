@@ -50,7 +50,7 @@ def test_classify_alarm_rows():
 def test_classify_real_data_device_and_slot_forms():
     df = pd.DataFrame({"ip_addr": ["a"] * 5, "cid": [256, 3, 6, 3, 2], "lid": [255, 1, 1, 1, 2],
                        "address": ["SYSTEM", "S.2 -P1  ", "S.6", "PAPA.A-FAN-7", "S.1 -P2"]})
-    assert list(pj.classify_alarm_rows(df)["row_class"]) == ["device", "port", "slot", "port", "port"]
+    assert list(pj.classify_alarm_rows(df)["row_class"]) == ["device", "port", "slot", "unit", "port"]    # 비포트 표기(PAPA.A-FAN-7)는 unit
 
 
 def test_cid_offset_scan_shows_shift_without_changing_keys():
@@ -222,12 +222,59 @@ def test_manual_check_stops_on_single_mismatch():
         pj.check_manual(ok.drop(columns=["alarm_lid"]))
 
 
-def test_reclass_report_counts_by_model_and_rule2_distribution():
-    al = pd.DataFrame({"ip_addr": ["a"] * 6, "system_type": [12, 12, 12, 31, 31, 31], "cid": [3, 3, 256, 6, 2, 0], "lid": [1, 1, 255, 1, 1, 0],
-                       "address": ["S.2 -P1", "S.2", "SYSTEM", "S.5", "S.1 -P1", ""], "alarm_type": [1] * 6})
-    r = pj.reclass_report(pj.classify_alarm_rows(al))
-    assert r["by_model"]["12"] == {"rows": 3, "port": 1, "device": 1, "slot": 1, "slot_by_rule2": 1, "bad_key": 0}
-    assert r["by_model"]["31"]["slot_by_rule2"] == 1 and r["by_model"]["31"]["device"] == 1 and r["rule2_total"] == 2
-    assert r["rule2_cid_lid"]["cid_lid_top"] == {"3/1": 1, "6/1": 1} and len(r["rule2_samples"]) == 2
-    j2 = pj.j2_diagnosis(pj.classify_alarm_rows(al), eth_frame([(1, 1)], hours=1))
-    assert j2["row_class_reclassification"]["rule2_total"] == 2
+# ---- F-13 행 분류 (설계 6.1 개정 4, 규칙 1~10) ---------------------------------------------------------------
+F13 = [  # (address, cid, lid, 기대 규칙, 기대 분류)
+    ("SYSTEM", 256, 255, "dev_system", "device"), ("system ", None, None, "dev_system", "device"),                     # 순서: SYSTEM + NULL 키 → device
+    ("x", 256, 255, "dev_256_255", "device"), ("S.1 -P1", 256, 3, "dev_partial", "device"), ("S.1 -P1", 3, 255, "dev_partial", "device"),
+    ("S.1 -P1", 0, 5, "dev_cid0", "device"), ("S.1 -P1", None, 1, "bad_key", "bad_key"), ("S.1 -P1", 2, -1, "bad_key", "bad_key"),
+    ("S.1 -P1", 3, 0, "slot_lid0", "slot"), ("S.6", 6, 1, "slot_addr", "slot"),
+    ("PAPA.A-FAN-7", 3, 1, "unit_addr", "unit"), ("MAIN-P1", 4, 1, "unit_addr", "unit"),
+    ("S.2 -P1  ", 3, 1, "port", "port"), ("", 3, 2, "port_noaddr", "port"), (None, 3, 3, "port_noaddr", "port")]
+
+
+def f13_frame():
+    return pd.DataFrame({"ip_addr": "a", "system_type": 12, "address": [r[0] for r in F13], "cid": [r[1] for r in F13], "lid": [r[2] for r in F13],
+                         "alarm_type": 1})
+
+
+def test_f13_every_rule_has_a_row_and_rule_order_is_applied():
+    out = pj.classify_alarm_rows(f13_frame())
+    assert list(out["row_rule"]) == [r[3] for r in F13] and list(out["row_class"]) == [r[4] for r in F13]
+    assert set(out["row_rule"]) == set(pj.RULE_IDS) and pj.RULE_IDS[0] == "dev_system" and pj.RULE_IDS[-1] == "port_noaddr"
+
+
+def test_unit_and_other_non_port_rows_never_become_episodes_or_target_events():
+    from validation.realdata import alarm_episodes as ae
+    from tests.validation.realdata.test_alarm_episodes import TM, A, names
+    rows = [{"ip_addr": "1.1.1.1", "cid": 3, "lid": 1, "system_type": 31, "alarm_type": A["ETH-LINK-FAIL"], "severity_type": 3,
+             "occur_date": pd.Timestamp("2026-09-01 10:00"), "release_date": pd.Timestamp("2026-09-01 11:00"), "address": ad}
+            for ad in ("PAPA.A-FAN-7", "S.6", "SYSTEM", "S.2 -P1")]
+    a = ae.prepare_alarms(pd.DataFrame(rows), names(), TM, pd.Timestamp("2026-10-13"))
+    assert sorted(a["row_class"]) == ["device", "port", "slot", "unit"]
+    ep = ae.build_episodes(a[a["row_class"] == "port"], TM, pd.Timestamp("2026-10-13"))
+    assert len(ep) == 1                                                                         # 포트 알람 1행만
+
+
+def test_row_rule_report_fixed_tables_and_perf_key_counts():
+    al = f13_frame().assign(system_type=[12] * 8 + [31] * 7)
+    cls = pj.classify_alarm_rows(al)
+    eth = eth_frame([(6, 1), (3, 1)], hours=1, ip="a")                                         # 성능 키 (6,1) (3,1) 존재
+    rep = pj.row_rule_report(cls, eth)
+    assert rep["version"] == "row_class_v2" and rep["rule_order"] == list(pj.RULE_IDS)
+    assert list(rep["by_model_rule"]["12"].keys()) == list(pj.RULE_IDS) and rep["by_model_rule"]["12"]["dev_system"] == 2
+    assert sum(sum(v.values()) for v in rep["by_model_rule"].values()) == len(F13)
+    # 개정 1(cid=0/lid=0 만 장비·슬롯) 대비: SYSTEM/256·255 등 device 로 바뀐 행, slot_addr/unit_addr 가 port 에서 바뀐 행
+    assert rep["reclassified_vs_rev1"] == 8                                                      # 행 0~4(device 로), 9(slot), 10·11(unit)
+    assert rep["with_perf_key"]["slot_addr"]["31"] == {"rows": 1, "with_perf_key": 1} and rep["with_perf_key"]["unit_addr"]["31"] == {"rows": 2, "with_perf_key": 1}
+    assert len(rep["samples"]["unit_addr"]["31"]) == 2 and rep["samples"]["unit_addr"]["31"][0]["perf_key_exists"] in (True, False)
+    txt = pj.format_row_rule_report(rep)
+    assert txt.splitlines()[0].startswith("[행 분류 row_class_v2]") and "model 12:" in txt and "unit_addr 중 성능 키 있음" in txt
+    j2 = pj.j2_diagnosis(cls, eth)
+    assert j2["row_class_rules"]["version"] == "row_class_v2"
+
+
+def test_rev1_comparison_counts_rows_whose_class_changed():
+    df = pd.DataFrame({"ip_addr": "a", "system_type": 1, "address": ["SYSTEM", "S.6", "PAPA.A-FAN-7", "S.2 -P1", "S.1 -P1"],
+                       "cid": [256, 6, 3, 3, 0], "lid": [255, 1, 1, 1, 0], "alarm_type": 1})
+    rep = pj.row_rule_report(pj.classify_alarm_rows(df))
+    assert rep["reclassified_vs_rev1"] == 3                      # SYSTEM(port→device)·S.6(port→slot)·FAN(port→unit)

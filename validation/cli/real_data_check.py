@@ -191,10 +191,8 @@ def _run_snapshot_command(args):
             if args.summary:
                 print(res["first_line"])
                 print(f"알람 {res['alarm_rows']:,}행, 에피소드 {res['episodes']}, 행 분류 {res['row_classes']}")
-                rc = res["row_class_reclassification"]
-                print(f"행 분류 모델별(port/device/slot/②slot): " + "; ".join(
-                    f"{k}:{v['port']}/{v['device']}/{v['slot']}/{v['slot_by_rule2']}" for k, v in rc["by_model"].items()))
-                print(f"②(cid>0·lid>0 인데 address 가 S.n → slot) {rc['rule2_total']}건, cid/lid 상위 {rc['rule2_cid_lid'].get('cid_lid_top')}")
+                from validation.realdata.port_join import format_row_rule_report
+                print(format_row_rule_report(res["row_class_rules"]))
                 print(f"타겟 이벤트: {res['target_events']}  작업 대용 알람: {res['work_alarms']}")
                 print(f"미분류 상위: {[(r['alarm_name'], r['count']) for r in res['unclassified_top'][:10]]}")
             else:
@@ -232,6 +230,8 @@ def _run_snapshot_command(args):
             print(f"join_status = {res['join_status']}  {res['verdict']['reasons']}")
             print(f"J1 1:1 {res['j1']['one_to_one_ratio']:.3f}  J3 에피소드 {res['j3']['with_bins']} 일치 a={res['j3']['match_a']:.3f} "
                   f"c={res['j3']['match_c']:.3f} d={res['j3']['match_d']:.3f}  J4 매칭률 {res['j4']['matched_ratio']:.3f}")
+            from validation.realdata.port_join import format_row_rule_report
+            print(format_row_rule_report(res["j2"]["row_class_rules"]))
             if res["verdict"].get("stop"):
                 print("[멈춤] 조인 검증 실패 — 보고 후 사용자 결정 필요 (address 조인으로 자동 전환하지 않음)")
         return 0

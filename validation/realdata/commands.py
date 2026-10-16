@@ -85,7 +85,7 @@ def cmd_alarms(ctx, range_spec, mode):
     a, ep, ev = ctx.in_range(start, end)
     tag = range_spec.replace("..", "_").replace(" ", "")
     if mode == "summary":
-        res = ae.summarize_alarms(a, ep, ev)
+        res = ae.summarize_alarms(a, ep, ev, eth=ctx.eth)
         res["merge_sensitivity_ref"] = ae.merge_sensitivity(a[a["row_class"] == "port"], ctx.target_map, ctx.periods.get("D", end))
         res["range"] = [start, end]
         write_json(os.path.join(ctx.out_dir, f"alarms_summary_{tag}.json"), res)
@@ -173,7 +173,7 @@ def config_parts(ctx, join_status):
     from validation.realdata import tables as tb
     return {
         "target_map_sha": _file_sha(ctx.target_map_path), "alarm_names_sha": ctx.names_sha, "override_sha": _file_sha(ctx.override_csv),
-        "maintenance_sha": _file_sha(ctx.maintenance_csv), "work_names": list(ae.WORK_NAMES), "hw_patterns": list(ae.HW_PATTERNS),
+        "maintenance_sha": _file_sha(ctx.maintenance_csv), "work_names": list(ae.WORK_NAMES), "hw_patterns": list(ae.HW_PATTERNS), "row_class": {"version": pj.ROW_CLASS_VERSION, "rules": [list(r) for r in pj.ROW_RULES]},
         "rules": {"F1": ae.FLICKER_MERGE_MIN, "F2": ae.MIN_EPISODE_MIN, "F4": ae.EVENT_MERGE_MIN, "F6": ae.WORK_WINDOW_MIN,
                   "F8": ae.HW_WINDOW_MIN, "judge": [list(ae.JUDGE_TYPES), ae.JUDGE_GRADE]},
         "perf_gap": {"c3_lookback_h": 6, "c3_min_ratio": rpt.C3_PERF_MIN_RATIO, "delay_window_h": 1, "c3_min_events": rpt.C3_MIN_EVENTS},
@@ -341,7 +341,7 @@ def _work_lookup(ctx):
         near = g[(g["occur_date"] >= lo) & (g["occur_date"] <= hi)]
         if near.empty:
             return False
-        scope = np.where(near["row_class"] == "device", True, np.where(near["row_class"] == "slot", near["cid"] == cid,
+        scope = np.where(near["row_class"].isin(["device", "unit"]), True, np.where(near["row_class"] == "slot", near["cid"] == cid,
                                                                       (near["cid"] == cid) & (near["lid"] == lid)))
         return bool(np.asarray(scope).any())
     return look

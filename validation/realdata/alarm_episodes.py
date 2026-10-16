@@ -10,6 +10,8 @@ import fnmatch
 import numpy as np
 import pandas as pd
 
+from validation.realdata.port_join import row_rule_report
+
 # 8장 사전 고정 값
 FLICKER_MERGE_MIN = 60          # F1
 MIN_EPISODE_MIN = 15            # F2
@@ -171,7 +173,7 @@ def mark_work_and_hw(events, all_alarms, maintenance=None, work_names=WORK_NAMES
         if w is not None:
             near = w[(w["occur_date"] >= r["t0"] - w_win) & (w["occur_date"] <= r["t0"] + w_win)]
             if len(near):
-                scope = np.where(near["row_class"] == "device", True,
+                scope = np.where(near["row_class"].isin(["device", "unit"]), True,
                                  np.where(near["row_class"] == "slot", near["cid"] == r["cid"],
                                           (near["cid"] == r["cid"]) & (near["lid"] == r["lid"])))
                 near = near[scope.astype(bool)]
@@ -194,23 +196,6 @@ def mark_work_and_hw(events, all_alarms, maintenance=None, work_names=WORK_NAMES
 
 
 # ---- 요약 ----------------------------------------------------------------------------
-def slot_only_counts(alarms):
-    """주소가 슬롯만(`S.n`) 있어 포트 알람이 아니라 slot 으로 재분류된 행(cid>0, lid>0)의 system_type 별 건수 — 6.1 의 cid/lid=0 규칙과 다른 실데이터 보정."""
-    from validation.realdata.port_join import norm_port
-    if alarms.empty or "address" not in alarms.columns:
-        return {}
-    sl = alarms[(alarms["row_class"] == "slot") & (alarms["lid"] > 0)]
-    if sl.empty:
-        return {}
-    sl = sl[sl["address"].map(lambda v: (lambda a: a != "" and "-P" not in a)(norm_port(v)))]
-    return {str(k): int(v) for k, v in sl.groupby("system_type").size().items()}
-
-
-def _reclass(alarms):
-    from validation.realdata.port_join import reclass_report
-    return reclass_report(alarms) if len(alarms) else {"by_model": {}, "rule2_total": 0, "rule2_cid_lid": {}, "rule2_samples": []}
-
-
 def no_table_share(alarms):
     """표 없는 모델(또는 모르는 system_type) 장비 비중 — 7.3 첫 줄."""
     dev = alarms.drop_duplicates("ip_addr")
@@ -221,7 +206,7 @@ def no_table_share(alarms):
             "models": sorted(set(alarms.loc[alarms["name_status"].isin(["no_table", "unknown_model"]), "model"].dropna()))}
 
 
-def summarize_alarms(alarms, episodes, events, top=30):
+def summarize_alarms(alarms, episodes, events, top=30, eth=None):
     """`alarms --summary` 내용. 반환 dict (CLI 가 출력/저장)."""
     nts = no_table_share(alarms)
     names = (alarms.groupby(["alarm_name", "name_status", "target_types"]).size().rename("count").reset_index()
@@ -233,7 +218,7 @@ def summarize_alarms(alarms, episodes, events, top=30):
     return {
         "first_line": f"표 없는 모델 장비 {nts['devices_without_table']}/{nts['devices']} ({nts['share']:.0%}) {nts['models']}"
                       + (" — 비중 ≥ 1/3: C3 판정 보류 사유로 보고 (7.3)" if nts["share"] >= 1 / 3 else ""),
-        "no_table": nts, "alarm_rows": int(len(alarms)), "slot_only_address_reclassified": slot_only_counts(alarms), "row_class_reclassification": _reclass(alarms),
+        "no_table": nts, "alarm_rows": int(len(alarms)), "row_class_rules": row_rule_report(alarms, eth),
  "row_classes": by_class,
         "name_status": alarms["name_status"].value_counts().to_dict(),
         "top_names": names.head(top).to_dict("records"),

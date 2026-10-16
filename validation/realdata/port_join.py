@@ -46,26 +46,57 @@ def prep_keys(df):
 
 
 DEVICE_CID, DEVICE_LID = 256, 255      # 실데이터(2026-10-16 스냅샷): 장비 단위 알람은 cid=256, lid=255, address='SYSTEM'
+ROW_CLASS_VERSION = "row_class_v2"
+# 설계 6.1 (개정 4) 규칙표 — 위에서부터 처음 맞는 규칙. (규칙 ID, 분류)
+ROW_RULES = (("dev_system", "device"), ("dev_256_255", "device"), ("dev_partial", "device"), ("dev_cid0", "device"),
+             ("bad_key", "bad_key"), ("slot_lid0", "slot"), ("slot_addr", "slot"), ("unit_addr", "unit"),
+             ("port", "port"), ("port_noaddr", "port"))
+RULE_IDS = tuple(r for r, _ in ROW_RULES)
 
 
 def classify_alarm_rows(alarms):
-    """6.1 + 실데이터 보정: row_class = port | slot | device | bad_key.
-    설계서 6.1 의 cid=0/lid=0 규칙에 더해, 실데이터에서 확인된 장비 단위 표기(cid=256 또는 lid=255 또는 address='SYSTEM')를
-    device 로, 포트 없이 슬롯만 있는 address(`S.n`, lid 가 0 이 아니어도)를 slot 으로 분류한다. 판정(J)에는 쓰지 않는 분류다."""
+    """설계 6.1 개정 4 규칙표 10개를 위에서부터 처음 맞는 규칙으로 적용. 열: row_rule(규칙 ID), row_class(device|slot|unit|port|bad_key).
+    address 는 행을 판정에서 빼는 방향으로만 쓴다(규칙 1·7·8); 조인 키는 (ip_addr, cid, lid) 그대로다."""
     out = prep_keys(alarms)
     cid, lid = out["cid"], out["lid"]
-    addr = out["address"].astype(str).str.strip().str.upper() if "address" in out.columns else pd.Series("", index=out.index)
-    slot_only = out["address"].map(norm_port).map(lambda v: v != "" and "-P" not in v) if "address" in out.columns \
-        else pd.Series(False, index=out.index)
-    cls = pd.Series("bad_key", index=out.index, dtype="object")
-    ok = cid.notna() & lid.notna() & (cid >= 0) & (lid >= 0)
-    cls[ok & (cid > 0) & (lid > 0)] = "port"
-    cls[ok & (cid > 0) & (lid == 0)] = "slot"
-    cls[ok & (cid > 0) & (lid > 0) & slot_only] = "slot"
-    cls[ok & (cid == 0)] = "device"
-    cls[ok & ((cid == DEVICE_CID) | (lid == DEVICE_LID) | (addr == "SYSTEM"))] = "device"
-    out["row_class"] = cls
+    n = len(out)
+    raw = out["address"] if "address" in out.columns else pd.Series([""] * n, index=out.index)
+    addr = raw.map(lambda v: "" if pd.isna(v) else str(v).strip().upper())
+    ap = raw.map(norm_port)
+    rule = pd.Series("", index=out.index, dtype="object")
+
+    def put(rid, cond):
+        nonlocal rule
+        rule = rule.mask((rule == "") & cond.fillna(False).astype(bool), rid)
+
+    notnull = cid.notna() & lid.notna()
+    put("dev_system", addr == "SYSTEM")
+    put("dev_256_255", notnull & (cid == DEVICE_CID) & (lid == DEVICE_LID))
+    put("dev_partial", (cid == DEVICE_CID).fillna(False) ^ (lid == DEVICE_LID).fillna(False))
+    put("dev_cid0", cid == 0)
+    put("bad_key", ~notnull | (cid < 0) | (lid < 0))
+    put("slot_lid0", (cid > 0) & (lid == 0))
+    pos = (cid > 0) & (lid > 0)
+    put("slot_addr", pos & ap.map(lambda v: v != "" and "-P" not in v))
+    put("unit_addr", pos & (addr != "") & (ap == ""))
+    put("port", pos & ap.map(lambda v: "-P" in v))
+    put("port_noaddr", pos & (addr == ""))
+    cls_of = dict(ROW_RULES)
+    out["row_rule"] = rule.where(rule != "", "unclassified")
+    out["row_class"] = out["row_rule"].map(lambda r: cls_of.get(r, "bad_key"))
     return out
+
+
+def classify_rev1(alarms):
+    """개정 1 규칙(cid=0 → device, cid>0·lid=0 → slot, 키 이상 → bad_key, 나머지 port) — 재분류 건수 비교용."""
+    o = prep_keys(alarms)
+    cid, lid = o["cid"], o["lid"]
+    ok = cid.notna() & lid.notna() & (cid >= 0) & (lid >= 0)
+    cls = pd.Series("port", index=o.index, dtype="object")
+    cls[~ok] = "bad_key"
+    cls[ok & (cid > 0) & (lid == 0)] = "slot"
+    cls[ok & (cid == 0)] = "device"
+    return cls
 
 
 def add_diag_columns(df, alarm=False):
@@ -138,7 +169,7 @@ def j2_diagnosis(alarms_cls, eth):
     dev = a[a["row_class"].isin(["device", "slot"])]
     shape = dev.groupby(["row_class", dev["addr_port"].map(lambda v: "empty" if v == "" else ("slot-only" if "-P" not in v else "port-form"))]).size()
     p5 = a.groupby("system_type")["p5_same"].mean() if "p5_same" in a.columns else pd.Series(dtype=float)
-    return {"by_model": by_model.to_dict("records"), "row_class_reclassification": reclass_report(alarms_cls),
+    return {"by_model": by_model.to_dict("records"), "row_class_rules": row_rule_report(alarms_cls, eth),
             "device_alarm_address_shape": {f"{k[0]}/{k[1]}": int(v) for k, v in shape.items()},
             "p5_same_ratio": {str(k): float(v) for k, v in p5.items()},
             "diff_samples": diff[["ip_addr", "system_type", "cid", "lid", "addr_port", "perf_addr_port"]].head(20).to_dict("records")}
@@ -327,20 +358,41 @@ def cid_slot_offsets(df):
     return {str(k): {str(int(o)): int(n) for o, n in g["off"].value_counts().items()} for k, g in d.groupby("system_type")}
 
 
-def reclass_report(alarms_cls):
-    """고정 출력: 모델별 device/slot 로 분류된 행 수, 그중 ②(cid>0·lid>0 인데 address 가 'S.n' 이라 slot 이 된 행)의 건수와 cid/lid 분포.
-    휴리스틱이 포트 알람을 조용히 빼는지 실데이터로 확인하기 위한 출력이다."""
+def row_rule_report(alarms_cls, eth=None):
+    """고정 출력(설계 6.1 개정 4): system_type × 규칙 ID 건수(규칙 순서 고정), 개정 1 규칙 대비 재분류 건수,
+    slot_addr·unit_addr 행 중 같은 키의 성능 포트가 있는 행 수와 표본 20행(모델별). 휴리스틱이 포트 알람을 조용히 빼는지 확인하는 용도."""
     a = add_diag_columns(alarms_cls)
-    slot_only = a["addr_port"].map(lambda v: v != "" and "-P" not in v)
-    rule2 = (a["row_class"] == "slot") & (a["lid"] > 0) & slot_only
-    by_model = {}
+    rev1 = classify_rev1(alarms_cls)
+    a = a.assign(_rev1=rev1)
+    a["_changed"] = a["_rev1"] != a["row_class"]
+    table = {}
     for st, g in a.groupby("system_type"):
-        by_model[str(st)] = {"rows": int(len(g)), "port": int((g["row_class"] == "port").sum()), "device": int((g["row_class"] == "device").sum()),
-                             "slot": int((g["row_class"] == "slot").sum()), "slot_by_rule2": int(rule2[g.index].sum()),
-                             "bad_key": int((g["row_class"] == "bad_key").sum())}
-    r2 = a[rule2]
-    dist = {"cid": {str(k): int(v) for k, v in r2["cid"].value_counts().head(15).items()},
-            "lid": {str(k): int(v) for k, v in r2["lid"].value_counts().head(15).items()},
-            "cid_lid_top": {f"{c}/{l}": int(n) for (c, l), n in r2.groupby(["cid", "lid"]).size().sort_values(ascending=False).head(15).items()}}
-    return {"by_model": by_model, "rule2_total": int(rule2.sum()), "rule2_cid_lid": dist,
-            "rule2_samples": r2[["ip_addr", "system_type", "cid", "lid", "address", "alarm_type"]].head(20).to_dict("records") if len(r2) else []}
+        table[str(st)] = {rid: int((g["row_rule"] == rid).sum()) for rid in RULE_IDS}
+    keys = set()
+    if eth is not None and len(eth):
+        kt = key_table(eth)
+        keys = set(zip(kt["ip_addr"], kt["cid"], kt["lid"]))
+    a["_inperf"] = [(i, c, l) in keys for i, c, l in zip(a["ip_addr"], a["cid"], a["lid"])]
+    inperf, samples = {}, {}
+    for rid in ("slot_addr", "unit_addr"):
+        sub = a[a["row_rule"] == rid]
+        inperf[rid] = {str(st): {"rows": int(len(g)), "with_perf_key": int(g["_inperf"].sum())} for st, g in sub.groupby("system_type")}
+        samples[rid] = {str(st): g[["ip_addr", "cid", "lid", "address", "alarm_type", "_inperf"]].rename(columns={"_inperf": "perf_key_exists"})
+                        .head(20).to_dict("records") for st, g in sub.groupby("system_type")}
+    sub2 = a[a["row_rule"] == "slot_addr"]
+    cl = {"cid_lid_top": {f"{c}/{l}": int(n) for (c, l), n in sub2.groupby(["cid", "lid"]).size().sort_values(ascending=False).head(15).items()}}
+    return {"version": ROW_CLASS_VERSION, "rule_order": list(RULE_IDS), "by_model_rule": table,
+            "rows": int(len(a)), "reclassified_vs_rev1": int(a["_changed"].sum()),
+            "reclassified_vs_rev1_by_model": {str(st): int(g["_changed"].sum()) for st, g in a.groupby("system_type")},
+            "classes": a["row_class"].value_counts().to_dict(), "with_perf_key": inperf, "samples": samples, "slot_addr_cid_lid": cl}
+
+
+def format_row_rule_report(rep):
+    """고정 순서 텍스트: 모델별 한 줄 (규칙 ID 순서), 재분류 건수, 성능 키가 있는 slot_addr/unit_addr 행 수."""
+    lines = [f"[행 분류 {rep['version']}] 규칙 순서: " + " ".join(rep["rule_order"])]
+    for st, row in rep["by_model_rule"].items():
+        lines.append(f"  model {st}: " + " ".join(f"{rid}={row[rid]}" for rid in rep["rule_order"]))
+    lines.append(f"  개정 1 규칙 대비 재분류 {rep['reclassified_vs_rev1']}건 {rep['reclassified_vs_rev1_by_model']}")
+    for rid in ("slot_addr", "unit_addr"):
+        lines.append(f"  {rid} 중 성능 키 있음: {rep['with_perf_key'][rid]}")
+    return "\n".join(lines)
