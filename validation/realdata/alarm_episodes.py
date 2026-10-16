@@ -194,6 +194,18 @@ def mark_work_and_hw(events, all_alarms, maintenance=None, work_names=WORK_NAMES
 
 
 # ---- 요약 ----------------------------------------------------------------------------
+def slot_only_counts(alarms):
+    """주소가 슬롯만(`S.n`) 있어 포트 알람이 아니라 slot 으로 재분류된 행(cid>0, lid>0)의 system_type 별 건수 — 6.1 의 cid/lid=0 규칙과 다른 실데이터 보정."""
+    from validation.realdata.port_join import norm_port
+    if alarms.empty or "address" not in alarms.columns:
+        return {}
+    sl = alarms[(alarms["row_class"] == "slot") & (alarms["lid"] > 0)]
+    if sl.empty:
+        return {}
+    sl = sl[sl["address"].map(lambda v: (lambda a: a != "" and "-P" not in a)(norm_port(v)))]
+    return {str(k): int(v) for k, v in sl.groupby("system_type").size().items()}
+
+
 def no_table_share(alarms):
     """표 없는 모델(또는 모르는 system_type) 장비 비중 — 7.3 첫 줄."""
     dev = alarms.drop_duplicates("ip_addr")
@@ -216,7 +228,8 @@ def summarize_alarms(alarms, episodes, events, top=30):
     return {
         "first_line": f"표 없는 모델 장비 {nts['devices_without_table']}/{nts['devices']} ({nts['share']:.0%}) {nts['models']}"
                       + (" — 비중 ≥ 1/3: C3 판정 보류 사유로 보고 (7.3)" if nts["share"] >= 1 / 3 else ""),
-        "no_table": nts, "alarm_rows": int(len(alarms)), "row_classes": by_class,
+        "no_table": nts, "alarm_rows": int(len(alarms)), "slot_only_address_reclassified": slot_only_counts(alarms),
+ "row_classes": by_class,
         "name_status": alarms["name_status"].value_counts().to_dict(),
         "top_names": names.head(top).to_dict("records"),
         "unclassified_top": unmapped.head(top).to_dict("records"),

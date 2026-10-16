@@ -162,11 +162,30 @@ def create_lock(runs_dir, periods, payload):
 
 
 def claim_judge_run(runs_dir, periods, info):
-    """판정 실행 1회 보장: 측정 전에 실행 표식을 배타적으로 만든다. 이미 있으면 거부."""
+    """판정 실행 1회 보장: 측정 전에 실행 표식을 배타적으로 만든다. 이미 있으면 거부.
+    복구 규칙: 재생이 결과를 내기 전에 실패해 표식이 status=failed 로 갱신된 경우에만 다시 잡을 수 있다(결과를 본 적이 없으므로)."""
     p = run_marker_path(runs_dir, periods)
+    payload = {**info, "status": "started", "attempts": 1}
+    if os.path.exists(p):
+        old = json.load(open(p, encoding="utf-8"))
+        if old.get("status") != "failed":
+            raise PeriodError(f"이 잠금에 대한 판정 실행이 이미 있습니다 (판정 실행은 1회): {p}")
+        payload["attempts"] = old.get("attempts", 1) + 1
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1, default=str)
+        return p
     try:
         with open(p, "x", encoding="utf-8") as f:
-            json.dump(info, f, ensure_ascii=False, indent=1, default=str)
+            json.dump(payload, f, ensure_ascii=False, indent=1, default=str)
     except FileExistsError:
         raise PeriodError(f"이 잠금에 대한 판정 실행이 이미 있습니다 (판정 실행은 1회): {p}")
     return p
+
+
+def finish_judge_run(runs_dir, periods, status, error=None):
+    """표식 갱신: done(결과 산출) 또는 failed(결과를 내기 전 실패 — 재시도 허용)."""
+    p = run_marker_path(runs_dir, periods)
+    m = json.load(open(p, encoding="utf-8"))
+    m.update(status=status, finished_at=str(pd.Timestamp.now()), error=error)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(m, f, ensure_ascii=False, indent=1, default=str)

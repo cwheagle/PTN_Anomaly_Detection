@@ -44,7 +44,8 @@ def run_ai(df_traffic, versions=None, policy=None, detector=None):
     out["alarm"] = out["is_anomaly"].astype(bool)
     score = out["traffic_score"] if "traffic_score" in out.columns else out.get("anomaly_score", pd.Series(np.nan, index=out.index))
     out["score"] = pd.to_numeric(score, errors="coerce")
-    return out[KEY + ["occur_date", "alarm", "severity", "score"]].reset_index(drop=True)
+    cols = KEY + ["occur_date", "alarm", "severity", "score"] + (["alarm_level"] if "alarm_level" in out.columns else [])
+    return out[cols].reset_index(drop=True)
 
 
 def run_baselines(df_traffic):
@@ -88,10 +89,14 @@ def incidents_of(frame, gap_steps=4):
     ev["nuisance"] = False
     inc, alarms = make_incidents(ev, gap_steps)
     if len(inc) and "severity" in frame.columns:
-        sev = frame.set_index(KEY + ["occur_date"])["severity"]
+        idx = pd.MultiIndex.from_frame(alarms[KEY + ["occur_date"]])
         a = alarms.copy()
-        a["severity"] = sev.reindex(pd.MultiIndex.from_frame(a[KEY + ["occur_date"]])).to_numpy()
+        f = frame.set_index(KEY + ["occur_date"])
+        a["severity"] = f["severity"].reindex(idx).to_numpy()
         inc = inc.merge(a.groupby("incident")["severity"].max().rename("severity_max"), left_on="incident", right_index=True, how="left")
+        if "alarm_level" in frame.columns:
+            a["alarm_level"] = f["alarm_level"].reindex(idx).to_numpy()
+            inc = inc.merge(a.groupby("incident")["alarm_level"].max().rename("level_max"), left_on="incident", right_index=True, how="left")
     return inc, alarms
 
 

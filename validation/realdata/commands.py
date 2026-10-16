@@ -224,13 +224,22 @@ def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
         if ctx.periods.get("ok") and pr.overlaps_judge(start, end, ctx.periods):
             raise pr.PeriodError("purpose=dev 는 판정 구간과 겹칠 수 없습니다 (판정 구간은 purpose=judge 1회만).")
     elif purpose == "judge":
-        lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions)
+        if policy is not None:
+            raise pr.PeriodError("판정 실행에서는 --policy 를 쓸 수 없습니다 — 정책은 잠금에 동결된 모델 메타 정책만 사용 (P6)")
+        lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector)
         versions = {ft: m["version"] for ft, m in lock["models"].items()}
     else:
         raise pr.PeriodError(f"알 수 없는 purpose: {purpose}")
     if versions is None and detector is None:
         versions = {"traffic": model_info("traffic")["version"]}          # 활성 버전을 명시해 기록한다
-    res = rp.replay(ctx.eth, start, end, versions=versions, policy=policy, detector=detector)
+    try:
+        res = rp.replay(ctx.eth, start, end, versions=versions, policy=policy, detector=detector)
+    except BaseException as e:                       # 결과를 내기 전 실패: 판정을 소진하지 않도록 표식을 failed 로 (재시도 허용)
+        if purpose == "judge":
+            pr.finish_judge_run(ctx.runs_dir, ctx.periods, "failed", repr(e))
+        raise
+    if purpose == "judge":
+        pr.finish_judge_run(ctx.runs_dir, ctx.periods, "done")
     res["purpose"], res["versions"], res["lock"] = purpose, versions, lock
     if save:
         os.makedirs(ctx.out_dir, exist_ok=True)
@@ -242,7 +251,7 @@ def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
     return res
 
 
-def _verify_judge_preconditions(ctx, range_spec, start, end, versions):
+def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=None):
     """판정 실행 전 거부 규칙 (측정 전). 잠금 존재·판정 구간 정확히 일치·설정 해시 동일·모델 검사·1회 표식."""
     if range_spec != "judge":
         raise pr.PeriodError("purpose=judge 는 --range judge 만 허용됩니다.")
@@ -258,6 +267,11 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions):
         ok, why = pr.check_training_window({"trained_at": m.get("trained_at"), "training_window": m.get("training_window")}, ctx.periods["J0"])
         if not ok:
             raise pr.PeriodError(f"판정 모델 {ft} 학습 구간 검사 실패: {why}")
+    if detector is None:                                  # 현재 레지스트리의 모델·정책이 잠금 때와 같은지 (실제 모델 로드 경로)
+        for ft, m in lock["models"].items():
+            cur = model_info(ft, m["version"])
+            if cur["trained_at"] != m.get("trained_at") or pr.stable_hash(cur.get("alert_policy")) != lock["policy_hash"]:
+                raise pr.PeriodError(f"판정 모델 {ft} {m['version']} 의 메타(trained_at·정책)가 잠금 때와 다릅니다 — 정책 동결 위반, 판정 거부 (P6)")
     pr.claim_judge_run(ctx.runs_dir, ctx.periods, {"started_at": str(pd.Timestamp.now()), "config_hash": lock["config_hash"]})
     return lock
 
@@ -289,3 +303,91 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
     ev_rows.to_csv(os.path.join(ctx.out_dir, f"report_c3_events_{tag}.csv"), index=False, encoding="utf-8-sig")
     de_rows.to_csv(os.path.join(ctx.out_dir, f"report_delay_events_{tag}.csv"), index=False, encoding="utf-8-sig")
     return rep
+
+
+# ---- 샘플·채점·C5 ---------------------------------------------------------------------------------------
+def load_replay_frames(ctx, purpose, range_spec):
+    """cmd_replay 가 저장한 방법별 재생 프레임. 없으면 먼저 replay/report 를 실행하라고 안내(판정 구간은 여기서 재생하지 않는다)."""
+    path = os.path.join(ctx.out_dir, f"replay_{purpose}_{_tag(range_spec)}.csv.gz")
+    if not os.path.exists(path):
+        raise pr.PeriodError(f"재생 결과가 없습니다: {path} — 먼저 `replay`(또는 `report`)를 같은 --purpose/--range 로 실행하세요")
+    df = pd.read_csv(path, compression="gzip", parse_dates=["occur_date"], low_memory=False)
+    df["ip_addr"] = df["ip_addr"].astype(str).str.strip()
+    return {m: g.drop(columns="method").reset_index(drop=True) for m, g in df.groupby("method")}
+
+
+def _ems_lookup(ctx):
+    by_port = {k: g for k, g in ctx.alarms.groupby(["ip_addr", "cid", "lid"])}
+    by_dev = {ip: g for ip, g in ctx.alarms[ctx.alarms["row_class"] == "device"].groupby("ip_addr")}
+
+    def look(ip, cid, lid, lo, hi):
+        names = []
+        for g in (by_port.get((ip, cid, lid)), by_dev.get(ip)):
+            if g is not None:
+                near = g[(g["occur_date"] >= lo) & (g["occur_date"] <= hi)]
+                names += list(near["alarm_name"])
+        uniq = sorted(set(names))
+        return ";".join(uniq[:10]) + (f";…(+{len(uniq) - 10})" if len(uniq) > 10 else "")
+    return look
+
+
+def _work_lookup(ctx):
+    work = ctx.alarms[ctx.alarms["alarm_name"].isin(ae.WORK_NAMES) & ctx.alarms["name_status"].isin(["ok", "override"])]
+    by_ip = {ip: g for ip, g in work.groupby("ip_addr")}
+
+    def look(ip, cid, lid, lo, hi):
+        g = by_ip.get(ip)
+        if g is None:
+            return False
+        near = g[(g["occur_date"] >= lo) & (g["occur_date"] <= hi)]
+        if near.empty:
+            return False
+        scope = np.where(near["row_class"] == "device", True, np.where(near["row_class"] == "slot", near["cid"] == cid,
+                                                                      (near["cid"] == cid) & (near["lid"] == lid)))
+        return bool(np.asarray(scope).any())
+    return look
+
+
+def cmd_sample(ctx, range_spec, purpose, seed):
+    from validation.realdata import review as rv
+    start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"sample[{purpose}]")
+    if purpose == "dev" and ctx.periods.get("ok") and pr.overlaps_judge(start, end, ctx.periods):
+        raise pr.PeriodError("purpose=dev 샘플은 판정 구간과 겹칠 수 없습니다.")
+    if purpose == "judge" and range_spec != "judge":
+        raise pr.PeriodError("purpose=judge 샘플은 --range judge 만 허용됩니다.")
+    frames = load_replay_frames(ctx, purpose, range_spec)
+    tag = f"{purpose}_{_tag(range_spec)}"
+    rpath = os.path.join(ctx.out_dir, f"sample_review_{tag}.csv")
+    if os.path.exists(rpath):
+        raise pr.PeriodError(f"검토 샘플이 이미 있습니다(라벨 보호를 위해 덮어쓰지 않음): {rpath}")
+    review, key, meta = rv.build_sample(frames, purpose, seed, _ems_lookup(ctx), _work_lookup(ctx))
+    meta["join_note"] = "EMS 알람 열은 (ip_addr,cid,lid) 키 조인 기준 — join_status 가 verified 가 아니면 참고만"
+    review.to_csv(rpath, index=False, encoding="utf-8-sig")
+    key.to_csv(os.path.join(ctx.out_dir, f"sample_key_{tag}.csv"), index=False, encoding="utf-8-sig")      # 비공개 키: 검토자에게 주지 않는다
+    write_json(os.path.join(ctx.out_dir, f"sample_meta_{tag}.json"), meta)
+    return meta
+
+
+def cmd_score_review(ctx_or_out, review_csv, key_csv, report_json=None):
+    from validation.realdata import review as rv
+    review = pd.read_csv(review_csv, encoding="utf-8-sig", dtype={"ip_addr": str})
+    key = pd.read_csv(key_csv, encoding="utf-8-sig")
+    c1 = None
+    if report_json:
+        with open(report_json, encoding="utf-8") as f:
+            c1 = json.load(f)["c1_raw"]
+    res = rv.score_review(review, key, c1)
+    out_dir = ctx_or_out if isinstance(ctx_or_out, str) else ctx_or_out.out_dir
+    write_json(os.path.join(out_dir, "score_review_" + os.path.splitext(os.path.basename(review_csv))[0].replace("sample_review_", "") + ".json"), res)
+    return res
+
+
+def cmd_live(ctx, db, range_spec, purpose, result_schema=None):
+    from validation.realdata import live as lv
+    start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"live[{purpose}]")
+    frames = load_replay_frames(ctx, purpose, range_spec)
+    stored = lv.fetch_results(db, start, end, result_schema)
+    res = lv.compute_c5(stored, frames["ai"])
+    res["range"] = [start, end]
+    write_json(os.path.join(ctx.out_dir, f"live_c5_{purpose}_{_tag(range_spec)}.json"), res)
+    return res

@@ -20,6 +20,9 @@ P1-2 실데이터 검증 도구 (설계서 docs/design/p1_2_real_data_check.md) 
   python validation/cli/real_data_check.py replay --run <run_id> --range dev [--purpose dev] [--versions traffic=v1] [--policy policy.json]
   python validation/cli/real_data_check.py report --run <run_id> --range dev --purpose dev
   python validation/cli/real_data_check.py report --run <run_id> --range judge --purpose judge     # 잠금 후 1회만
+  python validation/cli/real_data_check.py sample --run <run_id> --range dev --purpose dev --seed 7     # 블라인드 검토 샘플 (재생 결과 필요)
+  python validation/cli/real_data_check.py score-review --review out/sample_review_*.csv --key out/sample_key_*.csv [--report out/report_*.json]
+  python validation/cli/real_data_check.py live --run <run_id> --range dev --purpose dev [--result-schema S]   # C5, DB 읽기 전용 접속 필요
   판정 구간과 겹치는 분석은 잠금(periods lock) 전에는 거부된다 (설계 9.7 P4). --range: dev | judge | YYYY-MM-DD..YYYY-MM-DD
 """
 import argparse
@@ -103,6 +106,23 @@ def build_parser():
         sx.add_argument("--policy", help="알람 정책 JSON (AlertPolicy 필드)")
         if name == "report":
             sx.add_argument("--diag-key-shift", type=int, default=0, help="진단 전용: 알람 cid 에 더할 값 (판정 실행에는 거부)")
+
+    sm = sub.add_parser("sample", help="방법별 층화 무작위 블라인드 검토 샘플 (재생 결과 필요)")
+    snap(sm)
+    sm.add_argument("--purpose", choices=["dev", "judge"], default="dev")
+    sm.add_argument("--seed", type=int, required=True, help="층화 추출 시드 (필수, 기록됨)")
+
+    sr = sub.add_parser("score-review", help="검토 CSV 채점: 유효율 Wilson 95%%, C1·C2·C4a")
+    sr.add_argument("--review", required=True)
+    sr.add_argument("--key", required=True)
+    sr.add_argument("--report", help="report_*.json (C1 원값 포함)")
+    sr.add_argument("--out-dir", help="결과 JSON 폴더 (기본: 검토 CSV 폴더)")
+
+    lv = sub.add_parser("live", help="C5 라이브 결과 점검 (DB 읽기 전용)")
+    common(lv)
+    snap(lv)
+    lv.add_argument("--purpose", choices=["dev", "judge"], default="dev")
+    lv.add_argument("--result-schema", help="anomaly_detection 이 있는 스키마 (기본: 접속 스키마)")
     return p
 
 
@@ -129,7 +149,41 @@ def print_report(rep):
         print("  *", n)
 
 
+def _run_live(args):
+    try:
+        ctx = _context(args)
+        cfg = load_db_config(host=args.host, port=args.port, database=args.database, user=args.user)
+        db = ReadOnlyDB.connect(cfg, allow_write_account=args.allow_write_account, max_exec_ms=args.max_exec_ms)
+    except PrivilegeError as e:
+        print(f"[거부] {e}", file=sys.stderr)
+        return 3
+    except (pr.PeriodError, FileNotFoundError) as e:
+        print(f"[거부] {e}", file=sys.stderr)
+        return 5
+    try:
+        res = cmds.cmd_live(ctx, db, args.range, args.purpose, args.result_schema)
+        if res.get("hold"):
+            print(f"C5 보류: {res['reason']}")
+        else:
+            print(f"C5a 처리율 {res['c5a']:.4f} ({res['matched_rows']}/{res['target_rows']}) 통과={res['c5a_pass']}, "
+                  f"C5b 30분 이내 {res['c5b']['within_30min']:.3f} 통과={res['c5b']['pass']}, C5c 공백 {len(res['c5c_gaps'])}구간")
+        return 0
+    except pr.PeriodError as e:
+        print(f"[거부] {e}", file=sys.stderr)
+        return 5
+    finally:
+        db.close()
+
+
 def _run_snapshot_command(args):
+    if args.cmd == "score-review":
+        res = cmds.cmd_score_review(args.out_dir or os.path.dirname(os.path.abspath(args.review)), args.review, args.key, args.report)
+        ai = res["methods"]["ai"]
+        print(f"AI 유효율 {ai['valid_rate']:.3f} (Wilson {ai['wilson_lo']:.3f}~{ai['wilson_hi']:.3f}) 판정 가능 {ai['judgeable']} "
+              f"판단 불가 {ai['unjudgeable_ratio']:.1%} 미검토 {res['unreviewed']} C2 보류={res['c2']['hold']}")
+        if "c4a" in res:
+            print("C4a:", res["c4a"]["status"], " C1:", res.get("c1"))
+        return 0
     try:
         ctx = _context(args)
         if args.cmd == "alarms":
@@ -137,11 +191,16 @@ def _run_snapshot_command(args):
             if args.summary:
                 print(res["first_line"])
                 print(f"알람 {res['alarm_rows']:,}행, 에피소드 {res['episodes']}, 행 분류 {res['row_classes']}")
+                print(f"슬롯만 있는 address 로 slot 재분류(6.1 보정): {res['slot_only_address_reclassified']}")
                 print(f"타겟 이벤트: {res['target_events']}  작업 대용 알람: {res['work_alarms']}")
                 print(f"미분류 상위: {[(r['alarm_name'], r['count']) for r in res['unclassified_top'][:10]]}")
             else:
                 print(f"판정 이벤트 {res['events']} (유형별 {res['by_type']}), 데이터일 {res['data_days']}, r={res['r_per_data_day']:.3f}/데이터일")
                 print(res["note"])
+        elif args.cmd == "sample":
+            meta = cmds.cmd_sample(ctx, args.range, args.purpose, args.seed)
+            print(f"샘플 {meta['rows']}행 (방법별 선택 인시던트 {meta['per_method_incidents']}), 시드 {meta['seed']}. "
+                  f"검토 CSV 만 검토자에게 전달 — 키 파일(sample_key_*)은 비공개")
         elif args.cmd == "periods":
             if args.action == "lock":
                 res = cmds.cmd_lock(ctx, args.version)
@@ -185,8 +244,10 @@ def _connect(args):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.cmd in ("alarms", "join-check", "periods", "replay", "report"):
+    if args.cmd in ("alarms", "join-check", "periods", "replay", "report", "sample", "score-review"):
         return _run_snapshot_command(args)
+    if args.cmd == "live":
+        return _run_live(args)
     kinds = tuple(k.strip() for k in args.kinds.split(",") if k.strip())
     bad = [k for k in kinds if k not in KINDS]
     if bad:

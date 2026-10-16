@@ -111,3 +111,34 @@ def test_dev_report_runs_with_fake_detector_and_writes_outputs(run):
     out = os.listdir(run["rd"] / "out")
     assert any(f.startswith("report_dev_dev") and f.endswith(".json") for f in out) and any(f.startswith("replay_dev_dev") for f in out)
     assert set(rep["c1_raw"]) == {"ai", "fixed", "rolling"} and "ai_incident_tags" in rep
+
+
+def test_judge_rejects_policy_argument_and_checks_registry_meta_hash(run, monkeypatch):
+    c = locked(run)
+    with pytest.raises(pr.PeriodError, match="--policy"):
+        cmds.cmd_report(c, "judge", "judge", policy=object(), detector=FakeDetector())
+    assert not os.path.exists(pr.run_marker_path(run["runs"], c.periods))
+    # 실제 로드 경로(detector=None): 레지스트리 모델 메타의 정책/학습 시각이 잠금과 다르면 거부
+    monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: {"track": ft, "version": v, "trained_at": "2020-01-01 00:00:00",
+                                                                 "training_window": None, "alert_policy": {"sigma_k": 9.0}})
+    with pytest.raises(pr.PeriodError, match="정책 동결 위반"):
+        cmds.cmd_report(c, "judge", "judge")
+    assert not os.path.exists(pr.run_marker_path(run["runs"], c.periods))
+
+
+def test_failed_replay_before_results_does_not_consume_judge(run):
+    c = locked(run)
+
+    class Boom:
+        def detect(self, *a, **k):
+            raise RuntimeError("model load failed")
+
+    with pytest.raises(RuntimeError):
+        cmds.cmd_report(c, "judge", "judge", detector=Boom())
+    mk = json.load(open(pr.run_marker_path(run["runs"], c.periods)))
+    assert mk["status"] == "failed" and "model load failed" in mk["error"]
+    rep = cmds.cmd_report(c, "judge", "judge", detector=FakeDetector())                       # 결과를 본 적 없으므로 재시도 허용
+    assert rep["header"]["purpose"] == "judge"
+    assert json.load(open(pr.run_marker_path(run["runs"], c.periods)))["attempts"] == 2
+    with pytest.raises(pr.PeriodError, match="1회"):
+        cmds.cmd_report(c, "judge", "judge", detector=FakeDetector())

@@ -7,13 +7,23 @@ from validation.realdata.db_readonly import ReadOnlyDB
 ROOT_GRANTS = ["GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION"]
 RO_GRANTS = ["GRANT USAGE ON *.* TO 'ptn_ro'@'10.0.0.1'", "GRANT SELECT ON `ems`.* TO 'ptn_ro'@'10.0.0.1'"]
 
-_SELECT_RE = re.compile(r"^SELECT (?P<cols>.+?) FROM `(?P<t>\w+)` WHERE (?P<where>.+?)"
+_SELECT_RE = re.compile(r"^SELECT (?P<cols>.+?) FROM (?:`\w+`\.)?`(?P<t>\w+)` WHERE (?P<where>.+?)"
                         r"(?: AND `id` > %s ORDER BY `id` LIMIT %s| LIMIT %s)?$", re.DOTALL)
 
 
 def _pad(v):
     """MySQL PAD SPACE 비교(VARCHAR 끝 공백 무시)를 흉내 낸다."""
     return v.rstrip() if isinstance(v, str) else v
+
+
+def _cond_ok(val, op, v):
+    if op == "in":
+        return _pad(val) in {_pad(x) for x in v}
+    if op == "=":
+        return _pad(val) == _pad(v)
+    if val is None:
+        return False
+    return {">=": val >= v, "<=": val <= v, "<": val < v, ">": val > v}[op]
 
 
 class FakeCursor:
@@ -111,7 +121,8 @@ class FakeServer:
                 conds.append((col, "in", set(params[i:i + n])))
                 i += n
             else:
-                conds.append((part.split("`")[1], "eq", params[i]))
+                mm = re.match(r"^`(\w+)` (>=|<=|<|>|=) %s$", part)
+                conds.append((mm.group(1), mm.group(2), params[i]))
                 i += 1
         last_id = limit = None
         if keyset:
@@ -120,8 +131,7 @@ class FakeServer:
             limit = params[i]
         out = []
         for r in sorted(t["rows"], key=lambda r: r.get("id", 0)):
-            if any((_pad(r.get(c)) not in {_pad(x) for x in v}) if op == "in" else (_pad(r.get(c)) != _pad(v))
-                   for c, op, v in conds):
+            if not all(_cond_ok(r.get(c), op, v) for c, op, v in conds):
                 continue
             if last_id is not None and r["id"] <= last_id:
                 continue
