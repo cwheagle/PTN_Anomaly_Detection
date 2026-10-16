@@ -53,6 +53,9 @@ python validation/cli/real_data_check.py extract --start 2026-07-10 --end 2026-1
 - `--schema sim`: 시뮬레이터 DB(`cowptn_test`) 용. 필터 컬럼(`time_type` 등)·알람 테이블이 없으면 생략하고 매니페스트에 남긴다(`real` 은 없으면 중단).
 - 시각이 테이블 시각 ±1.5시간 밖인 행(쓰레기 `occur_date`)은 분석에서 빼고 `quarantine/` 에 보관한다(설계서 4.3a). 종료 코드: 0 완료, 2 인자 오류, 3 권한 거부, 4 중단/불완전.
 
-### real_data_check 판정 실행 주의 (U6~U7)
-- **판정 재생이 실패하면 표식이 소진되어 재시도할 수 없다.** `periods lock` 이후 `report --purpose judge` 는 측정 전에 `locks/judge_*.run.json` 표식을 배타적으로 만들고, 재생 중 오류(모델 로드 실패 등)가 나도 표식은 남는다. 복구 규칙은 설계 9.7.6 의 결정 사항이라 구현하지 않았다(architect 결정 대기).
+### real_data_check 판정 실행 주의 (U6~U7, 설계 9.7.6)
+- **표식 phase**: `report --purpose judge` 는 해시 대조·모델/스케일러/정책 로드·출력 폴더 확인을 **표식 전에** 끝낸다(이 단계 실패는 그냥 다시 실행). 이후 표식 `locks/judge_*.run.json` 이 `claimed` → `computing`(판정 데이터가 처음 모델에 들어가기 직전) → `completed`(출력 파일 sha256 기록)로 진행한다.
+- `claimed` 에서 난 예외(Ctrl+C 포함)는 표식이 `…aborted_<n>.json` 으로 이름이 바뀌고 자동 재실행이 허용된다.
+- `computing` 에서 실패하면 자동 되돌림이 없다. `periods retry-judge --reason "<사유>" --reviewed-by <reviewer>` 로 **1회만** 재시도할 수 있고(잠금의 설정·모델·정책 해시가 그대로여야 하며, 실패 전후 코드 커밋·부분 출력 목록이 `…failed_1.json` 에 기록됨), 두 번째 실패면 이 잠금의 판정은 소진된다. `completed` 뒤에는 재실행하지 않는다.
 - 판정에서는 `--policy` 를 쓸 수 없고, 레지스트리 모델의 `trained_at`·정책·가중치(`model/scaler/meta` sha256)가 잠금 때와 같아야 한다. 테스트에서 `detector` 를 직접 주입하면 이 해시 검사는 생략된다(CLI 는 항상 레지스트리 경로).
+- 모든 분석은 `runs/p1_2/analysis_ledger.jsonl` 에 추가 기록되고, 판정 구간과 겹치는 기록이 있으면 `periods lock` 이 거부된다. 데이터일 < 28 이면 `--purpose explore` 만 허용된다.

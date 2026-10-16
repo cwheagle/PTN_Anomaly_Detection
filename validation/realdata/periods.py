@@ -174,16 +174,101 @@ def create_lock(runs_dir, periods, payload):
     return p
 
 
-def claim_judge_run(runs_dir, periods, info):
-    """판정 실행 1회 보장: 측정 전에 실행 표식을 배타적으로 만든다. 이미 있으면 거부.
-    (재생 중 오류로 소진되는 경우의 복구 규칙은 설계 결정 사항이라 두지 않는다 — architect 확인 중.)"""
+# ---- 판정 실행 표식: phase 모델 (설계 9.7.6, 개정 4) ---------------------------------------------------------
+# 원칙: 판정 구간 결과가 사람·로그에 보였을 수 있으면 소진, 아니면 되돌린다.
+#   claimed   표식 직후(판정 데이터는 아직 모델·베이스라인에 들어가지 않음) → 예외 시 자동으로 aborted_<n> 으로 이름 바꾸고 재실행 허용
+#   computing 판정 구간 데이터가 처음 모델·베이스라인에 들어가기 직전 → 예외 시 자동 되돌림 없음, `periods retry-judge` 1회만
+#   completed 모든 출력 작성 후(출력 파일 sha256 기록) → 재실행 없음
+def _marker_variant(runs_dir, periods, suffix):
+    return lock_path(runs_dir, periods).replace(".json", f".{suffix}.json")
+
+
+def _read_marker(runs_dir, periods):
     p = run_marker_path(runs_dir, periods)
+    return (p, json.load(open(p, encoding="utf-8"))) if os.path.exists(p) else (p, None)
+
+
+def _write_marker(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1, default=str)
+    os.replace(tmp, path)
+
+
+def count_variants(runs_dir, periods, prefix):
+    d = os.path.dirname(lock_path(runs_dir, periods))
+    base = os.path.basename(lock_path(runs_dir, periods))[:-5]
+    return sorted(f for f in (os.listdir(d) if os.path.isdir(d) else []) if f.startswith(f"{base}.{prefix}_") and f.endswith(".json"))
+
+
+def claim_judge_run(runs_dir, periods, info):
+    """판정 실행 1회 표식을 배타적으로 만든다 (phase=claimed). 이미 있으면 phase 별 안내와 함께 거부."""
+    p = run_marker_path(runs_dir, periods)
+    attempt = len(count_variants(runs_dir, periods, "failed")) + 1
+    payload = {**info, "phase": "claimed", "attempt": attempt, "claimed_at": str(pd.Timestamp.now())}
     try:
         with open(p, "x", encoding="utf-8") as f:
-            json.dump(info, f, ensure_ascii=False, indent=1, default=str)
+            json.dump(payload, f, ensure_ascii=False, indent=1, default=str)
     except FileExistsError:
-        raise PeriodError(f"이 잠금에 대한 판정 실행이 이미 있습니다 (판정 실행은 1회): {p}")
+        phase = (_read_marker(runs_dir, periods)[1] or {}).get("phase")
+        hint = {"completed": "완료된 판정은 다시 실행하지 않습니다",
+                "computing": "computing 중 실패했다면 `periods retry-judge --reason ... --reviewed-by ...` 로 1회만 재시도할 수 있습니다",
+                "claimed": "claimed 상태로 남아 있습니다 (프로세스 강제 종료 추정) — `periods retry-judge` 로 처리"}.get(phase, "")
+        raise PeriodError(f"이 잠금에 대한 판정 실행 표식이 이미 있습니다 (phase={phase}; 판정 실행은 1회): {p}. {hint}")
     return p
+
+
+def set_phase(runs_dir, periods, phase):
+    p, m = _read_marker(runs_dir, periods)
+    m["phase"] = phase
+    m[f"{phase}_at"] = str(pd.Timestamp.now())
+    _write_marker(p, m)
+
+
+def abort_claimed(runs_dir, periods, error):
+    """claimed 단계의 예외: 표식을 aborted_<n> 으로 이름을 바꾸고(삭제 아님, 오류 포함) 재실행을 허용한다. 반환: 새 파일 경로."""
+    p, m = _read_marker(runs_dir, periods)
+    n = len(count_variants(runs_dir, periods, "aborted")) + 1
+    m.update(phase="aborted", error=str(error), aborted_at=str(pd.Timestamp.now()))
+    dest = _marker_variant(runs_dir, periods, f"aborted_{n}")
+    _write_marker(dest, m)
+    os.remove(p)
+    return dest
+
+
+def _sha(path):
+    import hashlib
+    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def complete_judge_run(runs_dir, periods, files):
+    """모든 출력 작성 후: phase=completed, 출력 파일 sha256 기록."""
+    p, m = _read_marker(runs_dir, periods)
+    m["outputs"] = {os.path.basename(f): _sha(f) for f in files if os.path.exists(f)}
+    m["phase"] = "completed"
+    m["completed_at"] = str(pd.Timestamp.now())
+    _write_marker(p, m)
+
+
+def retry_judge(runs_dir, periods, reason, reviewed_by, commit_now, partial_outputs=()):
+    """computing(또는 강제 종료된 claimed)에서 실패한 판정을 사람 승인으로 1회만 다시 실행할 수 있게 한다.
+    표식을 failed_1 로 이름을 바꾸고(부분 출력 목록·실패 전후 코드 커밋·사유·검토자 기록) 새 표식을 허용한다.
+    잠금의 설정·모델·정책 해시 일치는 호출 측이 이 함수 전에 검사한다. 두 번째 실패는 소진(이 함수가 거부)."""
+    if not (reason or "").strip() or not (reviewed_by or "").strip():
+        raise PeriodError("retry-judge 는 --reason 과 --reviewed-by(수정 diff 가 판정 규칙·기준값·분류 규칙을 건드리지 않았음을 확인한 reviewer) 가 필요합니다")
+    p, m = _read_marker(runs_dir, periods)
+    if m is None:
+        raise PeriodError("재시도할 판정 실행 표식이 없습니다")
+    if m.get("phase") == "completed":
+        raise PeriodError("완료된 판정은 재실행할 수 없습니다 (사후 정정은 별도 승인 절차, 9.7.6-5)")
+    if count_variants(runs_dir, periods, "failed"):
+        raise PeriodError("재시도는 1회만 허용됩니다 — 두 번째 실패로 이 잠금의 판정이 소진되었습니다. 이 잠금으로는 판정하지 않고 보고하세요 (새 판정 기간은 별도 결정)")
+    m.update(phase="failed", reason=reason.strip(), reviewed_by=reviewed_by.strip(), commit_before=m.get("tool_commit"), commit_after=commit_now,
+             partial_outputs=list(partial_outputs), retried_at=str(pd.Timestamp.now()))
+    dest = _marker_variant(runs_dir, periods, "failed_1")
+    _write_marker(dest, m)
+    os.remove(p)
+    return dest
 
 
 # ---- 분석 장부 (설계 9.7.4, 추가 전용) ------------------------------------------------------------------------

@@ -62,10 +62,17 @@ def run_baselines(df_traffic):
     return out
 
 
-def replay(eth, start, end, versions=None, policy=None, detector=None, warmup_days=WARMUP_DAYS):
+def build_detector(versions=None, policy=None):
+    """운영과 같은 AnomalyDetector (트래픽 트랙만). 모델·스케일러·정책 로드가 여기서 일어난다."""
+    from src.pipeline.inference import AnomalyDetector
+    return AnomalyDetector(policy=policy, versions=versions, tracks=("traffic",))
+
+
+def replay(eth, start, end, versions=None, policy=None, detector=None, warmup_days=WARMUP_DAYS, inp=None):
     """세 방법을 한 번에 재생. 결과는 평가 구간 [start, end) 로 자른 프레임들과 방법별 재생 가능 슬롯 비율.
     반환 dict: frames{방법: DataFrame(키, occur_date, alarm, [severity, score])}, slots{방법: {...}}, input_rows, normal_rows"""
-    inp = traffic_frame(eth, start, end, warmup_days)
+    if inp is None:
+        inp = traffic_frame(eth, start, end, warmup_days)
     s, e = pd.Timestamp(start), pd.Timestamp(end)
     normal = inp[(inp["occur_date"] >= s) & (inp["occur_date"] < e)]
     ai = run_ai(inp, versions, policy, detector)

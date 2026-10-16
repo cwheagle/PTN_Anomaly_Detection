@@ -140,9 +140,9 @@ def test_judge_rejects_changed_model_files_after_lock(run, monkeypatch, field):
         cmds.cmd_report(c, "judge", "judge")
     assert not os.path.exists(pr.run_marker_path(run["runs"], c.periods))                           # 측정 전 거부, 표식 소모 없음
     monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: dict(base))
-    # 해시가 같으면 통과 (표식은 실제 실행에서만 생성)
+    # 해시가 같으면 통과
     cmds._verify_judge_preconditions(c, "judge", c.periods["J0"], c.periods["D"], None)
-    assert os.path.exists(pr.run_marker_path(run["runs"], c.periods))
+    assert not os.path.exists(pr.run_marker_path(run["runs"], c.periods))                           # 검증은 표식을 만들지 않는다(9.7.6-1)
 
 
 # ---- 개정 4 ④⑤: 개발 출력 절단·truncated 경계 -------------------------------------------------------------

@@ -95,7 +95,9 @@ def build_parser():
 
     sp_ = sub.add_parser("periods", help="개발/판정 기간 계산과 판정 구간 잠금 (설계 9.7)")
     snap(sp_)
-    sp_.add_argument("action", choices=["show", "lock"])
+    sp_.add_argument("action", choices=["show", "lock", "retry-judge"])
+    sp_.add_argument("--reason", help="retry-judge: 실패 사유")
+    sp_.add_argument("--reviewed-by", help="retry-judge: 수정 diff 가 판정 규칙·기준값·분류 규칙을 건드리지 않았음을 확인한 reviewer")
     sp_.add_argument("--version", help="판정에 쓸 트래픽 모델 버전 (기본: 활성 버전)")
 
     for name, hlp in (("replay", "AI·고정 임계치·롤링 규칙 오프라인 재생 (스냅샷 기반)"), ("report", "C1 원값·C3·C4b·탐지 지연·C6·겹침 보고")):
@@ -207,6 +209,9 @@ def _run_snapshot_command(args):
                 res = cmds.cmd_lock(ctx, args.version)
                 print(f"잠금 완료: {res['lock_path']}\n  J0={res['J0']} D={res['D']} 판정 데이터일 {res['judge_data_days']} join_status={res['join_status']} "
                       f"r={res['dev_event_rate_r']:.3f} C3 보류 예상={res['c3_hold_expected']}")
+            elif args.action == "retry-judge":
+                dest = cmds.cmd_retry_judge(ctx, args.reason, args.reviewed_by)
+                print(f"재시도 1회 허용: 표식을 {dest} 로 보존했습니다. 이제 report --purpose judge 를 다시 실행하세요 (두 번째 실패는 소진).")
             else:
                 p_ = ctx.periods
                 print({k: str(v) for k, v in p_.items()})

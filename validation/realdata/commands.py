@@ -246,7 +246,7 @@ def _tag(spec):
     return spec.replace("..", "_").replace(" ", "")
 
 
-def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, save=True, command="replay"):
+def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, save=True, command="replay", complete=True):
     """재생 (스냅샷 → AI·고정·롤링). purpose=dev: 개발 기간 안에서만. purpose=judge: 잠금·설정 해시·모델 검사·1회 표식을 통과해야 한다."""
     start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"{command}[{purpose}]")
     lock = None
@@ -261,29 +261,69 @@ def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
             raise pr.PeriodError("purpose=dev 는 판정 구간과 겹칠 수 없습니다 (판정 구간은 purpose=judge 1회만).")
         ctx.record(command, start, end, "dev")
     elif purpose == "judge":
-        if policy is not None:
-            raise pr.PeriodError("판정 실행에서는 --policy 를 쓸 수 없습니다 — 정책은 잠금에 동결된 모델 메타 정책만 사용 (P6)")
-        lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector)
-        ctx.record(command, start, end, "judge")
-        versions = {ft: m["version"] for ft, m in lock["models"].items()}
+        return _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save, command, complete)
     else:
         raise pr.PeriodError(f"알 수 없는 purpose: {purpose}")
     if versions is None and detector is None:
         versions = {"traffic": model_info("traffic")["version"]}          # 활성 버전을 명시해 기록한다
     res = rp.replay(ctx.eth, start, end, versions=versions, policy=policy, detector=detector)
-    res["purpose"], res["versions"], res["lock"] = purpose, versions, lock
+    res["purpose"], res["versions"], res["lock"] = purpose, versions, None
     if save:
-        os.makedirs(ctx.out_dir, exist_ok=True)
-        stacked = pd.concat([f.assign(method=m) for m, f in res["frames"].items()], ignore_index=True)
-        stacked.to_csv(os.path.join(ctx.out_dir, f"replay_{purpose}_{_tag(range_spec)}.csv.gz"), index=False, compression="gzip")
-        write_json(os.path.join(ctx.out_dir, f"replay_{purpose}_{_tag(range_spec)}.json"),
-                   {"range": [start, end], "slots": res["slots"], "versions": versions, "purpose": purpose,
-                    "input_rows": res["input_rows"], "normal_rows": res["normal_rows"]})
+        res["files"] = _save_replay(ctx, res, purpose, range_spec, start, end, versions)
     return res
 
 
+def _save_replay(ctx, res, purpose, range_spec, start, end, versions):
+    os.makedirs(ctx.out_dir, exist_ok=True)
+    stacked = pd.concat([f.assign(method=m) for m, f in res["frames"].items()], ignore_index=True)
+    f1 = os.path.join(ctx.out_dir, f"replay_{purpose}_{_tag(range_spec)}.csv.gz")
+    f2 = os.path.join(ctx.out_dir, f"replay_{purpose}_{_tag(range_spec)}.json")
+    stacked.to_csv(f1, index=False, compression="gzip")
+    write_json(f2, {"range": [start, end], "slots": res["slots"], "versions": versions, "purpose": purpose,
+                    "input_rows": res["input_rows"], "normal_rows": res["normal_rows"]})
+    return [f1, f2]
+
+
+def _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save, command, complete):
+    """판정 재생 (설계 9.7.6, 개정 4): 표식 전에 할 수 있는 일(해시 대조·모델/스케일러/정책 로드·스냅샷·출력 폴더 쓰기 확인)을 먼저 끝낸다.
+    그 단계의 실패는 표식이 없으므로 그냥 다시 실행하면 된다. 이후 phase: claimed → computing → completed."""
+    if policy is not None:
+        raise pr.PeriodError("판정 실행에서는 --policy 를 쓸 수 없습니다 — 정책은 잠금에 동결된 모델 메타 정책만 사용 (P6)")
+    lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector)
+    versions = {ft: m["version"] for ft, m in lock["models"].items()}
+    det = detector if detector is not None else rp.build_detector(versions, None)          # 모델 로드: 표식 전
+    os.makedirs(ctx.out_dir, exist_ok=True)
+    probe = os.path.join(ctx.out_dir, ".write_probe")
+    open(probe, "w").close()
+    os.remove(probe)
+    ctx.record(command, start, end, "judge")
+    from validation.realdata.extract import tool_version
+    pr.claim_judge_run(ctx.runs_dir, ctx.periods, {"started_at": str(pd.Timestamp.now()), "config_hash": lock["config_hash"], "tool_commit": tool_version()})
+    try:                                                                                   # phase=claimed: 판정 데이터는 아직 모델에 들어가지 않음
+        inp = rp.traffic_frame(ctx.eth, start, end)
+    except BaseException as e:                                                             # Ctrl+C 포함
+        pr.abort_claimed(ctx.runs_dir, ctx.periods, repr(e))
+        raise
+    pr.set_phase(ctx.runs_dir, ctx.periods, "computing")                                   # 이 줄부터 실패는 자동 되돌림 없음
+    res = rp.replay(ctx.eth, start, end, versions=versions, detector=det, inp=inp)
+    res["purpose"], res["versions"], res["lock"] = "judge", versions, lock
+    res["files"] = _save_replay(ctx, res, "judge", range_spec, start, end, versions) if save else []
+    if complete:
+        pr.complete_judge_run(ctx.runs_dir, ctx.periods, res["files"])
+    return res
+
+
+def cmd_retry_judge(ctx, reason, reviewed_by, detector=None):
+    """`periods retry-judge`: 잠금의 설정·모델·정책 해시가 그대로인지 확인한 뒤 표식을 failed_1 로 돌리고 1회 재시도를 허용한다."""
+    from validation.realdata.extract import tool_version
+    start, end = pr.range_bounds(ctx.periods, "judge")
+    _verify_judge_preconditions(ctx, "judge", start, end, None, detector)
+    partial = sorted(f for f in (os.listdir(ctx.out_dir) if os.path.isdir(ctx.out_dir) else []) if "_judge_" in f)
+    return pr.retry_judge(ctx.runs_dir, ctx.periods, reason, reviewed_by, tool_version(), partial)
+
+
 def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=None):
-    """판정 실행 전 거부 규칙 (측정 전). 잠금 존재·판정 구간 정확히 일치·설정 해시 동일·모델 검사·1회 표식."""
+    """판정 실행 전 거부 규칙 (측정 전, 표식 생성 없음). 잠금 존재·판정 구간 정확히 일치·설정 해시 동일·모델/정책/가중치 검사."""
     if range_spec != "judge":
         raise pr.PeriodError("purpose=judge 는 --range judge 만 허용됩니다.")
     lock = pr.load_lock(ctx.runs_dir, ctx.periods)
@@ -307,14 +347,13 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
                 diff.append("alert_policy")
             if diff:
                 raise pr.PeriodError(f"판정 모델 {ft} {m['version']} 가 잠금 때와 다릅니다 ({', '.join(diff)}) — 모델/정책 동결 위반, 판정 거부 (P6)")
-    pr.claim_judge_run(ctx.runs_dir, ctx.periods, {"started_at": str(pd.Timestamp.now()), "config_hash": lock["config_hash"]})
     return lock
 
 
 def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, key_shift=0):
     if purpose == "judge" and key_shift != 0:
         raise pr.PeriodError("키 어긋남 보정(--diag-key-shift)은 진단 전용이며 판정 실행에는 쓸 수 없습니다 (조인 키 변경은 사용자 결정).")
-    res = cmd_replay(ctx, range_spec, purpose, versions, policy, detector, command="report")
+    res = cmd_replay(ctx, range_spec, purpose, versions, policy, detector, command="report", complete=False)
     if purpose == "judge":
         join_status = res["lock"]["join_status"]
     else:
@@ -340,6 +379,9 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
     write_json(os.path.join(ctx.out_dir, f"report_{tag}.json"), rep)
     ev_rows.to_csv(os.path.join(ctx.out_dir, f"report_c3_events_{tag}.csv"), index=False, encoding="utf-8-sig")
     de_rows.to_csv(os.path.join(ctx.out_dir, f"report_delay_events_{tag}.csv"), index=False, encoding="utf-8-sig")
+    if purpose == "judge":                                                               # 모든 출력 작성 후 completed (출력 해시 기록)
+        pr.complete_judge_run(ctx.runs_dir, ctx.periods, res.get("files", []) + [os.path.join(ctx.out_dir, f"report_{tag}.json"),
+                              os.path.join(ctx.out_dir, f"report_c3_events_{tag}.csv"), os.path.join(ctx.out_dir, f"report_delay_events_{tag}.csv")])
     return rep
 
 
