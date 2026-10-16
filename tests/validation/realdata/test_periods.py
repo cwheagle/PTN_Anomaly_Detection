@@ -84,3 +84,38 @@ def test_lock_file_opens_judge_range(tmp_path):
 def test_guard_inactive_when_periods_unavailable(tmp_path):
     p = pr.compute_periods(days(30))                                                 # 판정 구간 자체가 없음 → 봉인 대상 없음
     pr.require_unsealed(D0, D0 + pd.Timedelta(days=100), p, str(tmp_path), "x")
+
+
+# ---- 9.7.5 판정 모델 학습 구간 검사 / 잠금 / 1회 표식 -------------------------------------------------
+J0 = pd.Timestamp("2026-08-22")
+
+
+@pytest.mark.parametrize("meta,ok", [
+    ({"trained_at": "2026-08-22 00:00:00"}, True),                                                   # (a) 정확히 J0 → 통과
+    ({"trained_at": "2026-08-22 00:00:01"}, False),                                                  # (a) 초과 + 학습 구간 없음 → 거부
+    ({"trained_at": "2026-09-18 10:07:08", "training_window": {"mode": "port_split", "start": "2026-07-10", "end": "2026-08-22"}}, True),     # (b)
+    ({"trained_at": "2026-09-18", "training_window": {"mode": "port_split", "start": "2026-07-10", "end": "2026-08-22 00:00:01"}}, False),    # (c) > J0
+    ({"trained_at": "2026-09-18", "training_window": {"mode": "date", "train_end": "2026-08-01", "test_end": "2026-08-22"}}, True),          # 날짜 모드
+    ({"trained_at": "2026-09-18", "training_window": {"mode": "date", "train_end": "2026-08-01", "test_end": "2026-09-01"}}, False),
+    ({"trained_at": "2026-09-18", "training_window": {"mode": "date"}}, False),                                                              # 끝 시각 없음
+    ({"trained_at": "2026-09-18", "training_window": {"end": "garbage"}}, False),                                                           # 파싱 불가
+    ({"trained_at": "garbage"}, False), ({}, False), (None, False)])
+def test_training_window_check_fail_closed(meta, ok):
+    assert pr.check_training_window(meta, J0)[0] is ok
+
+
+def test_stable_hash_is_order_independent_and_changes_with_content():
+    assert pr.stable_hash({"a": 1, "b": [1, 2]}) == pr.stable_hash({"b": [1, 2], "a": 1})
+    assert pr.stable_hash({"a": 1}) != pr.stable_hash({"a": 2})
+
+
+def test_lock_is_exclusive_and_run_marker_is_one_shot(tmp_path):
+    p = pr.compute_periods(days(57))
+    path = pr.create_lock(str(tmp_path), p, {"x": 1})
+    assert json.load(open(path))["x"] == 1
+    with pytest.raises(pr.PeriodError, match="이미 잠긴"):
+        pr.create_lock(str(tmp_path), p, {"x": 2})
+    assert json.load(open(path))["x"] == 1
+    pr.claim_judge_run(str(tmp_path), p, {"a": 1})
+    with pytest.raises(pr.PeriodError, match="1회"):
+        pr.claim_judge_run(str(tmp_path), p, {"a": 2})

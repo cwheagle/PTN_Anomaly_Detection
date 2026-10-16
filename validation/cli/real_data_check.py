@@ -16,6 +16,10 @@ P1-2 실데이터 검증 도구 (설계서 docs/design/p1_2_real_data_check.md) 
   python validation/cli/real_data_check.py alarms --run <run_id> --summary [--range dev]
   python validation/cli/real_data_check.py alarms --run <run_id> --count-only --range dev
   python validation/cli/real_data_check.py join-check --run <run_id> [--range dev] [--manual join_manual.csv]
+  python validation/cli/real_data_check.py periods --run <run_id> show|lock [--version v1]
+  python validation/cli/real_data_check.py replay --run <run_id> --range dev [--purpose dev] [--versions traffic=v1] [--policy policy.json]
+  python validation/cli/real_data_check.py report --run <run_id> --range dev --purpose dev
+  python validation/cli/real_data_check.py report --run <run_id> --range judge --purpose judge     # 잠금 후 1회만
   판정 구간과 겹치는 분석은 잠금(periods lock) 전에는 거부된다 (설계 9.7 P4). --range: dev | judge | YYYY-MM-DD..YYYY-MM-DD
 """
 import argparse
@@ -85,6 +89,20 @@ def build_parser():
     sj = sub.add_parser("join-check", help="포트 조인 안전 검사 J1~J4 (스냅샷 기반)")
     snap(sj)
     sj.add_argument("--manual", help="join_manual.csv (M1 수동 확인)")
+
+    sp_ = sub.add_parser("periods", help="개발/판정 기간 계산과 판정 구간 잠금 (설계 9.7)")
+    snap(sp_)
+    sp_.add_argument("action", choices=["show", "lock"])
+    sp_.add_argument("--version", help="판정에 쓸 트래픽 모델 버전 (기본: 활성 버전)")
+
+    for name, hlp in (("replay", "AI·고정 임계치·롤링 규칙 오프라인 재생 (스냅샷 기반)"), ("report", "C1 원값·C3·C4b·탐지 지연·C6·겹침 보고")):
+        sx = sub.add_parser(name, help=hlp)
+        snap(sx)
+        sx.add_argument("--purpose", choices=["dev", "judge"], default="dev")
+        sx.add_argument("--versions", nargs="*", default=[], metavar="TRACK=VER")
+        sx.add_argument("--policy", help="알람 정책 JSON (AlertPolicy 필드)")
+        if name == "report":
+            sx.add_argument("--diag-key-shift", type=int, default=0, help="진단 전용: 알람 cid 에 더할 값 (판정 실행에는 거부)")
     return p
 
 
@@ -92,6 +110,23 @@ def _context(args):
     from validation.realdata.alarm_names import DEFAULT_NAMES_PATH
     return cmds.Context(os.path.join(args.runs_dir, args.run), args.runs_dir, names_path=args.alarm_names or DEFAULT_NAMES_PATH,
                         override_csv=args.alarm_override, maintenance_csv=args.maintenance)
+
+
+def print_report(rep):
+    h = rep["header"]
+    print(f"[report] purpose={h['purpose']} range={h['range'][0]}~{h['range'][1]} join_status={h['join_status']} models={h['model_versions']}")
+    print("방법별 재생 가능 슬롯:", {m: f"{v['ratio']:.1%}" for m, v in h["slots"].items()})
+    for m, v in rep["c1_raw"].items():
+        print(f"  C1 원값 {m:8s} 인시던트 {v['incidents']:6d} / 포트·일 {v['port_days']:6d} = {v['incidents_per_port_day']:.4f}")
+    c3 = rep["c3"]["합계"]
+    print(f"  C3 합계: 이벤트 {c3['events_total']} 포함 {c3['included']} 제외 {c3['excluded']} 보류={c3['hold']} {c3['hold_reasons']}")
+    for m, v in c3["methods"].items():
+        print(f"    {m:8s} 선행 탐지율 {v['rate']:.3f} (≥1h {v['lead_ge_1h']:.3f} ≥3h {v['lead_ge_3h']:.3f} ≥6h {v['lead_ge_6h']:.3f})")
+    d = rep["delay"]
+    print(f"  단절 탐지 지연: 이벤트 {d['events_total']} 포함 {d['included']} 제외 {d['excluded']}")
+    print("  겹침:", rep["overlap"])
+    for n in h["fixed_notes"]:
+        print("  *", n)
 
 
 def _run_snapshot_command(args):
@@ -107,6 +142,29 @@ def _run_snapshot_command(args):
             else:
                 print(f"판정 이벤트 {res['events']} (유형별 {res['by_type']}), 데이터일 {res['data_days']}, r={res['r_per_data_day']:.3f}/데이터일")
                 print(res["note"])
+        elif args.cmd == "periods":
+            if args.action == "lock":
+                res = cmds.cmd_lock(ctx, args.version)
+                print(f"잠금 완료: {res['lock_path']}\n  J0={res['J0']} D={res['D']} 판정 데이터일 {res['judge_data_days']} join_status={res['join_status']} "
+                      f"r={res['dev_event_rate_r']:.3f} C3 보류 예상={res['c3_hold_expected']}")
+            else:
+                p_ = ctx.periods
+                print({k: str(v) for k, v in p_.items()})
+                print("잠금:", "있음" if pr.load_lock(ctx.runs_dir, p_) else "없음")
+        elif args.cmd in ("replay", "report"):
+            versions = dict(x.split("=", 1) for x in args.versions) or None
+            policy = None
+            if args.policy:
+                import json as _json
+                from src.pipeline.alerting import policy_from_meta
+                policy = policy_from_meta(_json.load(open(args.policy, encoding="utf-8")))
+            if args.cmd == "replay":
+                res = cmds.cmd_replay(ctx, args.range, args.purpose, versions, policy)
+                print(f"재생 입력 {res['input_rows']:,}행, 평가 구간 정상 행 {res['normal_rows']:,}, 방법별 재생 가능 슬롯: "
+                      + ", ".join(f"{m} {v['ratio']:.1%}" for m, v in res["slots"].items()))
+            else:
+                rep = cmds.cmd_report(ctx, args.range, args.purpose, versions, policy, key_shift=args.diag_key_shift)
+                print_report(rep)
         else:
             res = cmds.cmd_join_check(ctx, args.range, args.manual)
             print(f"join_status = {res['join_status']}  {res['verdict']['reasons']}")
@@ -115,7 +173,7 @@ def _run_snapshot_command(args):
             if res["verdict"].get("stop"):
                 print("[멈춤] 조인 검증 실패 — 보고 후 사용자 결정 필요 (address 조인으로 자동 전환하지 않음)")
         return 0
-    except pr.PeriodError as e:
+    except (pr.PeriodError, FileNotFoundError) as e:
         print(f"[거부] {e}", file=sys.stderr)
         return 5
 
@@ -127,7 +185,7 @@ def _connect(args):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.cmd in ("alarms", "join-check"):
+    if args.cmd in ("alarms", "join-check", "periods", "replay", "report"):
         return _run_snapshot_command(args)
     kinds = tuple(k.strip() for k in args.kinds.split(",") if k.strip())
     bad = [k for k in kinds if k not in KINDS]

@@ -109,3 +109,64 @@ def load_lock(runs_dir, periods):
         return None
     with open(p, encoding="utf-8") as f:
         return json.load(f)
+
+
+# ---- 판정 모델 학습 구간 검사 (9.7.5, 측정 전 거부, fail closed) ---------------------------------------------
+def _ts(v):
+    try:
+        t = pd.Timestamp(v)
+        return None if pd.isna(t) else t
+    except (TypeError, ValueError):
+        return None
+
+
+def check_training_window(meta, j0):
+    """판정 모델 메타 검사. (a) trained_at ≤ J0 → 통과 (b) training_window 의 끝 시각이 있고 ≤ J0 → 통과
+    (c) 그 밖(끝 시각 없음·파싱 불가·> J0)은 거부. 반환 (ok, 사유)."""
+    j0 = pd.Timestamp(j0)
+    trained = _ts((meta or {}).get("trained_at"))
+    if trained is not None and trained <= j0:
+        return True, f"trained_at {trained} ≤ J0 {j0} (a)"
+    tw = (meta or {}).get("training_window")
+    if isinstance(tw, dict):
+        ends = [t for t in (_ts(tw.get(k)) for k in ("end", "train_end", "test_end")) if t is not None]
+        if ends:
+            e = max(ends)
+            if e <= j0:
+                return True, f"training_window 끝 {e} ≤ J0 {j0} (b)"
+            return False, f"training_window 끝 {e} > J0 {j0} — 판정 구간과 겹칠 수 있음 (c)"
+    return False, (f"trained_at {trained} > J0 {j0} 이고 training_window 의 끝 시각이 없거나 읽을 수 없음 — fail closed (c)"
+                   if trained is not None else "trained_at 도 training_window 도 읽을 수 없음 — fail closed (c)")
+
+
+def stable_hash(obj):
+    """설정 해시: 키 정렬 JSON 의 sha256 (Timestamp 등은 문자열)."""
+    import hashlib
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+
+def run_marker_path(runs_dir, periods):
+    return lock_path(runs_dir, periods).replace(".json", ".run.json")
+
+
+def create_lock(runs_dir, periods, payload):
+    """잠금 파일을 배타적으로 만든다 (이미 있으면 PeriodError). 잠금 뒤 값은 바꾸지 않는다."""
+    p = lock_path(runs_dir, periods)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    try:
+        with open(p, "x", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1, default=str)
+    except FileExistsError:
+        raise PeriodError(f"이미 잠긴 판정 기간입니다 (잠금 파일 존재, 다시 만들 수 없음): {p}")
+    return p
+
+
+def claim_judge_run(runs_dir, periods, info):
+    """판정 실행 1회 보장: 측정 전에 실행 표식을 배타적으로 만든다. 이미 있으면 거부."""
+    p = run_marker_path(runs_dir, periods)
+    try:
+        with open(p, "x", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=1, default=str)
+    except FileExistsError:
+        raise PeriodError(f"이 잠금에 대한 판정 실행이 이미 있습니다 (판정 실행은 1회): {p}")
+    return p

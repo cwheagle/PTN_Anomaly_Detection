@@ -2,6 +2,8 @@
 P1-2 스냅샷 기반 하위 명령 본체 (DB 접속 없음). CLI(`validation/cli/real_data_check.py`)가 호출한다.
 모든 출력은 `<run>/out/` 아래에 쓴다(validation/runs 는 git 제외 — IP·국소명이 들어갈 수 있음).
 """
+import hashlib
+import inspect
 import json
 import os
 
@@ -11,6 +13,8 @@ import pandas as pd
 from validation.realdata import alarm_episodes as ae
 from validation.realdata import periods as pr
 from validation.realdata import port_join as pj
+from validation.realdata import replay as rp
+from validation.realdata import report as rpt
 from validation.realdata.alarm_names import DEFAULT_NAMES_PATH, DEFAULT_TARGET_MAP, AlarmNames, TargetMap
 from validation.realdata.extract import load_snapshot
 
@@ -48,6 +52,8 @@ class Context:
     def __init__(self, run_dir, runs_dir, names_path=DEFAULT_NAMES_PATH, map_path=DEFAULT_TARGET_MAP, override_csv=None,
                  maintenance_csv=None):
         self.run_dir, self.runs_dir = run_dir, runs_dir
+        self.target_map_path, self.override_csv, self.maintenance_csv = map_path, override_csv, maintenance_csv
+        self.names_sha = hashlib.sha256(open(names_path, "rb").read()).hexdigest() if os.path.exists(names_path) else None
         with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as f:
             self.manifest = json.load(f)
         if not self.manifest.get("complete"):
@@ -137,3 +143,149 @@ def cmd_join_check(ctx, range_spec="dev", manual_csv=None):
     write_json(os.path.join(ctx.out_dir, f"join_check_{tag}.json"), res)
     detail.to_csv(os.path.join(ctx.out_dir, f"join_j3_detail_{tag}.csv"), index=False, encoding="utf-8-sig")
     return res
+
+
+# ---- 모델 정보·잠금·재생·보고 ------------------------------------------------------------------------------
+def model_info(ft="traffic", version=None):
+    """레지스트리의 활성(또는 지정) 버전의 메타: version, trained_at, training_window, alert_policy."""
+    from src.pipeline.inference import AnomalyDetector
+    _, _, meta_path = AnomalyDetector._resolve_paths(ft, version)
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    if version is None:
+        reg = os.path.join(os.path.dirname(meta_path), f"{ft}_registry.json")
+        if os.path.exists(reg):
+            with open(reg, encoding="utf-8") as f:
+                version = json.load(f).get("active_version")
+    return {"track": ft, "version": version, "trained_at": meta.get("trained_at"), "training_window": meta.get("training_window"),
+            "alert_policy": meta.get("alert_policy"), "meta_path": meta_path}
+
+
+def _file_sha(path):
+    return hashlib.sha256(open(path, "rb").read()).hexdigest() if path and os.path.exists(path) else None
+
+
+def config_parts(ctx, join_status):
+    """잠금 해시에 들어가는 설정 (매핑 CSV·작업 대용 목록·F1~F8·성능 공백 기준·격리 기준·조인 판정 결과·베이스라인 기본값)."""
+    from validation.evaluation import baselines as bl
+    from validation.realdata import tables as tb
+    return {
+        "target_map_sha": _file_sha(ctx.target_map_path), "alarm_names_sha": ctx.names_sha, "override_sha": _file_sha(ctx.override_csv),
+        "maintenance_sha": _file_sha(ctx.maintenance_csv), "work_names": list(ae.WORK_NAMES), "hw_patterns": list(ae.HW_PATTERNS),
+        "rules": {"F1": ae.FLICKER_MERGE_MIN, "F2": ae.MIN_EPISODE_MIN, "F4": ae.EVENT_MERGE_MIN, "F6": ae.WORK_WINDOW_MIN,
+                  "F8": ae.HW_WINDOW_MIN, "judge": [list(ae.JUDGE_TYPES), ae.JUDGE_GRADE]},
+        "perf_gap": {"c3_lookback_h": 6, "c3_min_ratio": rpt.C3_PERF_MIN_RATIO, "delay_window_h": 1, "c3_min_events": rpt.C3_MIN_EVENTS},
+        "quarantine_margin": str(tb.QUARANTINE_MARGIN), "join_status": join_status,
+        "baselines": {"fixed": {k: v.default for k, v in inspect.signature(bl.fixed_threshold).parameters.items() if v.default is not inspect.Parameter.empty},
+                      "rolling": {k: v.default for k, v in inspect.signature(bl.rolling_rule).parameters.items() if v.default is not inspect.Parameter.empty}},
+        "periods": {k: str(ctx.periods.get(k)) for k in ("S", "J0", "D")}, "alternative": ctx.periods.get("alternative"),
+    }
+
+
+def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None):
+    """판정 기간 잠금 (9.7.3-4). 조건: 기간 계산 가능, 개발 기간 join-check 결과 존재, 판정 모델 학습 구간 검사 통과(9.7.5)."""
+    if not ctx.periods.get("ok"):
+        raise pr.PeriodError(ctx.periods.get("reason") or "기간 계산 불가")
+    jpath = join_status_path or os.path.join(ctx.out_dir, "join_check_dev.json")
+    if not os.path.exists(jpath):
+        raise pr.PeriodError(f"개발 기간 join-check 결과가 없습니다: {jpath} — 먼저 join-check 를 실행하세요 (9.7.3-3)")
+    with open(jpath, encoding="utf-8") as f:
+        join = json.load(f)
+    model = model_infos or {"traffic": model_info("traffic", version)}
+    for ft, info in model.items():
+        ok, why = pr.check_training_window(info, ctx.periods["J0"])
+        info["window_check"] = {"ok": ok, "reason": why}
+        if not ok:
+            raise pr.PeriodError(f"판정 모델 {ft} {info.get('version')} 학습 구간 검사 실패 (9.7.5, 측정 전 거부): {why}")
+    dev = ae.count_judge_events(ctx.events, ctx.periods["S"], ctx.periods["J0"], ctx.data_days)
+    need = 20 / ctx.periods["judge_data_days"]
+    parts = config_parts(ctx, join["join_status"])
+    pol = (model.get("traffic") or {}).get("alert_policy")
+    payload = {"alternative": ctx.periods["alternative"], "S": ctx.periods["S"], "D": ctx.periods["D"], "J0": ctx.periods["J0"],
+               "judge_data_days": ctx.periods["judge_data_days"], "data_days": ctx.periods["data_days"],
+               "models": {ft: {k: v for k, v in info.items() if k != "meta_path"} for ft, info in model.items()},
+               "policy_hash": pr.stable_hash(pol), "config_hash": pr.stable_hash(parts), "config_parts": parts,
+               "join_status": join["join_status"], "dev_event_rate_r": dev["r_per_data_day"], "r_needed_for_20": need,
+               "c3_hold_expected": bool(dev["r_per_data_day"] < need), "exposure_note": rpt.EXPOSURE_NOTE,
+               "locked_at": str(pd.Timestamp.now())}
+    path = pr.create_lock(ctx.runs_dir, ctx.periods, payload)
+    return {"lock_path": path, **{k: payload[k] for k in ("J0", "D", "judge_data_days", "join_status", "dev_event_rate_r", "c3_hold_expected", "config_hash")}}
+
+
+def _tag(spec):
+    return spec.replace("..", "_").replace(" ", "")
+
+
+def cmd_replay(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, save=True):
+    """재생 (스냅샷 → AI·고정·롤링). purpose=dev: 개발 기간 안에서만. purpose=judge: 잠금·설정 해시·모델 검사·1회 표식을 통과해야 한다."""
+    start, end = pr.resolve_range(range_spec, ctx.periods, ctx.runs_dir, f"replay[{purpose}]")
+    lock = None
+    if purpose == "dev":
+        if ctx.periods.get("ok") and pr.overlaps_judge(start, end, ctx.periods):
+            raise pr.PeriodError("purpose=dev 는 판정 구간과 겹칠 수 없습니다 (판정 구간은 purpose=judge 1회만).")
+    elif purpose == "judge":
+        lock = _verify_judge_preconditions(ctx, range_spec, start, end, versions)
+        versions = {ft: m["version"] for ft, m in lock["models"].items()}
+    else:
+        raise pr.PeriodError(f"알 수 없는 purpose: {purpose}")
+    if versions is None and detector is None:
+        versions = {"traffic": model_info("traffic")["version"]}          # 활성 버전을 명시해 기록한다
+    res = rp.replay(ctx.eth, start, end, versions=versions, policy=policy, detector=detector)
+    res["purpose"], res["versions"], res["lock"] = purpose, versions, lock
+    if save:
+        os.makedirs(ctx.out_dir, exist_ok=True)
+        stacked = pd.concat([f.assign(method=m) for m, f in res["frames"].items()], ignore_index=True)
+        stacked.to_csv(os.path.join(ctx.out_dir, f"replay_{purpose}_{_tag(range_spec)}.csv.gz"), index=False, compression="gzip")
+        write_json(os.path.join(ctx.out_dir, f"replay_{purpose}_{_tag(range_spec)}.json"),
+                   {"range": [start, end], "slots": res["slots"], "versions": versions, "purpose": purpose,
+                    "input_rows": res["input_rows"], "normal_rows": res["normal_rows"]})
+    return res
+
+
+def _verify_judge_preconditions(ctx, range_spec, start, end, versions):
+    """판정 실행 전 거부 규칙 (측정 전). 잠금 존재·판정 구간 정확히 일치·설정 해시 동일·모델 검사·1회 표식."""
+    if range_spec != "judge":
+        raise pr.PeriodError("purpose=judge 는 --range judge 만 허용됩니다.")
+    lock = pr.load_lock(ctx.runs_dir, ctx.periods)
+    if lock is None:
+        raise pr.PeriodError("잠금 파일이 없습니다 — periods lock 후에만 판정 실행 가능")
+    parts = config_parts(ctx, lock["join_status"])
+    if pr.stable_hash(parts) != lock["config_hash"]:
+        raise pr.PeriodError("현재 설정 해시가 잠금 때와 다릅니다 (매핑 CSV·작업 대용 목록·규칙 등이 바뀜) — 판정 거부 (9.7.6)")
+    if versions and {k: v for k, v in versions.items()} != {ft: m["version"] for ft, m in lock["models"].items()}:
+        raise pr.PeriodError("--versions 가 잠금에 기록된 판정 모델 버전과 다릅니다 (동결, P6)")
+    for ft, m in lock["models"].items():
+        ok, why = pr.check_training_window({"trained_at": m.get("trained_at"), "training_window": m.get("training_window")}, ctx.periods["J0"])
+        if not ok:
+            raise pr.PeriodError(f"판정 모델 {ft} 학습 구간 검사 실패: {why}")
+    pr.claim_judge_run(ctx.runs_dir, ctx.periods, {"started_at": str(pd.Timestamp.now()), "config_hash": lock["config_hash"]})
+    return lock
+
+
+def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, key_shift=0):
+    if purpose == "judge" and key_shift != 0:
+        raise pr.PeriodError("키 어긋남 보정(--diag-key-shift)은 진단 전용이며 판정 실행에는 쓸 수 없습니다 (조인 키 변경은 사용자 결정).")
+    res = cmd_replay(ctx, range_spec, purpose, versions, policy, detector)
+    if purpose == "judge":
+        join_status = res["lock"]["join_status"]
+    else:
+        jp = os.path.join(ctx.out_dir, "join_check_dev.json")
+        join_status = json.load(open(jp, encoding="utf-8"))["join_status"] if os.path.exists(jp) else "not_checked"
+    start, end = res["range"]
+    net_days = []
+    if ctx.maintenance is not None:
+        for r in ctx.maintenance.itertuples():
+            net_days += list(pd.date_range(pd.Timestamp(r.start).normalize(), pd.Timestamp(r.end).normalize(), freq="D"))
+    a, ep, _ = ctx.in_range(start, end)
+    info = {"short_episodes": int(ep["is_short"].sum()) if len(ep) else 0,
+            "no_table_devices": ae.no_table_share(a)["devices_without_table"] if len(a) else 0}
+    header = {"model_versions": res["versions"], "privilege_check": ctx.manifest.get("privilege_check"),
+              "snapshot_complete": ctx.manifest.get("complete"), "periods": {k: str(ctx.periods.get(k)) for k in ("S", "J0", "D")}}
+    rep = rpt.build_report(ctx.events, ctx.episodes, info, res, ctx.eth, ctx.periods["D"], ctx.data_days, join_status, purpose,
+                           header, key_shift, net_days)
+    tag = f"{purpose}_{_tag(range_spec)}"
+    ev_rows, de_rows = rep.pop("c3_events"), rep.pop("delay_events")
+    write_json(os.path.join(ctx.out_dir, f"report_{tag}.json"), rep)
+    ev_rows.to_csv(os.path.join(ctx.out_dir, f"report_c3_events_{tag}.csv"), index=False, encoding="utf-8-sig")
+    de_rows.to_csv(os.path.join(ctx.out_dir, f"report_delay_events_{tag}.csv"), index=False, encoding="utf-8-sig")
+    return rep
