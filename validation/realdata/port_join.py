@@ -25,8 +25,8 @@ _ADDR_RE = re.compile(r"S\.\s*(\d+)\s*-\s*P\s*(\d+)", re.IGNORECASE)
 _SLOT_RE = re.compile(r"S\.\s*(\d+)", re.IGNORECASE)
 
 
-def norm_port(address):
-    """address → 'S.<n>-P<m>' (정규식의 마지막 일치), 없으면 'S.<n>' 또는 ''."""
+def norm_port_base(address):
+    """address → 'S.<n>-P<m>' (정규식의 마지막 일치), 없으면 'S.<n>' 또는 ''. 행 분류 규칙 7·8·9 의 판단 기준(MAIN 확장 전)."""
     if address is None or (isinstance(address, float) and np.isnan(address)) or pd.isna(address):
         return ""
     s = str(address)
@@ -35,6 +35,21 @@ def norm_port(address):
         return f"S.{int(m[-1].group(1))}-P{int(m[-1].group(2))}"
     m = list(_SLOT_RE.finditer(s))
     return f"S.{int(m[-1].group(1))}" if m else ""
+
+
+_MAIN_FIND_RE = re.compile(r"MAIN-P\s*(\d+)", re.IGNORECASE)
+
+
+def norm_port(address):
+    """진단 열 addr_port (설계 6.1, 개정 6): norm_port_base 결과가 빈 값일 때만 `MAIN-P<n>` 의 마지막 일치를 `MAIN-P<n>` 으로.
+    성능 address 안의 MAIN 포트와 알람 `MAIN-Pn` 을 J1·J2 에서 대조하기 위함이다. 행 분류 규칙 8 의 '빈 값' 판단은 확장 전(base) 기준."""
+    b = norm_port_base(address)
+    if b != "":
+        return b
+    if address is None or pd.isna(address):
+        return ""
+    m = list(_MAIN_FIND_RE.finditer(str(address)))
+    return f"MAIN-P{int(m[-1].group(1))}" if m else ""
 
 
 def prep_keys(df):
@@ -47,23 +62,30 @@ def prep_keys(df):
 
 
 DEVICE_CID, DEVICE_LID = 256, 255      # 실데이터(2026-10-16 스냅샷): 장비 단위 알람은 cid=256, lid=255, address='SYSTEM'
-ROW_CLASS_VERSION = "row_class_v2"
-# 설계 6.1 (개정 4) 규칙표 — 위에서부터 처음 맞는 규칙. (규칙 ID, 분류)
+ROW_CLASS_VERSION = "row_class_v4"
+# 설계 6.1 (개정 4·6·7) 규칙표 — 위에서부터 처음 맞는 규칙. (규칙 ID, 분류)
 ROW_RULES = (("dev_system", "device"), ("dev_256_255", "device"), ("dev_partial", "device"), ("dev_cid0", "device"),
-             ("bad_key", "bad_key"), ("slot_lid0", "slot"), ("slot_addr", "slot"), ("unit_addr", "unit"),
-             ("port", "port"), ("port_noaddr", "port"))
+             ("bad_key", "bad_key"), ("slot_lid0", "slot"), ("slot_addr", "slot"),
+             ("port_main", "port"), ("service_main", "service"), ("main_lid_mismatch", "unit"),
+             ("unit_addr", "unit"), ("port", "port"), ("port_noaddr", "port"))
 RULE_IDS = tuple(r for r, _ in ROW_RULES)
+_MAIN_PLAIN_RE = re.compile(r"^MAIN-P(\d+)\s*$")               # 7a/7b: 접미 없음 (addr 은 앞뒤 공백 제거·대문자)
+_MAIN_SUFFIX_RE = re.compile(r"^MAIN-P(\d+)\s+\S.*$")          # 7s: 접미 변형 (예: MAIN-P9 PW-5021)
 
 
 def classify_alarm_rows(alarms):
-    """설계 6.1 개정 4 규칙표 10개를 위에서부터 처음 맞는 규칙으로 적용. 열: row_rule(규칙 ID), row_class(device|slot|unit|port|bad_key).
-    address 는 행을 판정에서 빼는 방향으로만 쓴다(규칙 1·7·8); 조인 키는 (ip_addr, cid, lid) 그대로다."""
+    """설계 6.1 규칙표(row_class_v4, 13개 규칙)를 위에서부터 처음 맞는 규칙으로 적용. 열: row_rule(규칙 ID), row_class(device|slot|unit|service|port|bad_key).
+    address 는 행을 판정에서 빼는 방향으로만 쓴다(규칙 1·7·7s·7b·8). 예외 7a(MAIN-Pn, 접미 없음, lid=n)는 키가 이미 포트 모양인 행을 되돌리는 것이다.
+    조인 키는 (ip_addr, 알람 cid − k, lid) 이다(apply_offsets)."""
     out = prep_keys(alarms)
     cid, lid = out["cid"], out["lid"]
     n = len(out)
     raw = out["address"] if "address" in out.columns else pd.Series([""] * n, index=out.index)
     addr = raw.map(lambda v: "" if pd.isna(v) else str(v).strip().upper())
-    ap = raw.map(norm_port)
+    ap = raw.map(norm_port_base)
+    plain = addr.map(lambda v: _MAIN_PLAIN_RE.match(v))
+    plain_n = plain.map(lambda m: int(m.group(1)) if m else -1)
+    suffix = addr.map(lambda v: bool(_MAIN_SUFFIX_RE.match(v)))
     rule = pd.Series("", index=out.index, dtype="object")
 
     def put(rid, cond):
@@ -79,6 +101,9 @@ def classify_alarm_rows(alarms):
     put("slot_lid0", (cid > 0) & (lid == 0))
     pos = (cid > 0) & (lid > 0)
     put("slot_addr", pos & ap.map(lambda v: v != "" and "-P" not in v))
+    put("port_main", pos & plain.map(lambda m: m is not None) & (lid == plain_n))
+    put("service_main", pos & suffix)
+    put("main_lid_mismatch", pos & plain.map(lambda m: m is not None) & (lid != plain_n))
     put("unit_addr", pos & (addr != "") & (ap == ""))
     put("port", pos & ap.map(lambda v: "-P" in v))
     put("port_noaddr", pos & (addr == ""))
@@ -124,7 +149,7 @@ def apply_offsets(cls_df, offsets=None):
     mask = out["row_class"].isin(["port", "slot"])
     bad = mask & (out["cid_j"] <= 0).fillna(False)
     ok = mask & ~bad
-    out.loc[ok, "cid"] = out.loc[ok, "cid_j"]
+    out.loc[ok, "cid"] = out.loc[ok, "cid_j"]                # service 행의 cid_j 는 열로만 남기고(포함 규칙이 켜질 때 승격), cid 는 원 값 유지
     out.loc[bad, "row_class"] = "bad_key"
     out["cid_nonpositive"] = bad
     return out
@@ -477,6 +502,22 @@ def cid_slot_offsets(df):
     return {str(k): {str(int(o)): int(n) for o, n in g["off"].value_counts().items()} for k, g in d.groupby("system_type")}
 
 
+_TRAIL_RE = re.compile(r"S\.\s*\d+\s*-\s*P\s*\d+(.*)$", re.IGNORECASE)
+
+
+def trailing_tokens_report(alarms_cls, sample=20):
+    """규칙 9·10 행 중 address 에 `S.n-Pm` 뒤로 다른 토큰(서비스 접미 등)이 남는 행의 모델별 건수와 표본 (설계 6.1 확인 필요 항목)."""
+    p = alarms_cls[alarms_cls["row_rule"].isin(["port", "port_noaddr"])]
+    if "address" not in p.columns or p.empty:
+        return {"total": 0, "by_model": {}, "samples": {}, "rows_checked": int(len(p))}
+    rest = p["address"].map(lambda v: (lambda m: m.group(1).strip() if m else "")(_TRAIL_RE.search(str(v))) if pd.notna(v) else "")
+    hit = p[rest != ""].assign(trailing=rest[rest != ""])
+    by = {str(st): int(len(g)) for st, g in hit.groupby("system_type")}
+    samples = {str(st): g[["ip_addr", "cid", "lid", "address", "trailing", "alarm_type"]].head(sample).to_dict("records") for st, g in hit.groupby("system_type")}
+    top = {str(st): g["trailing"].value_counts().head(5).to_dict() for st, g in hit.groupby("system_type")}
+    return {"total": int(len(hit)), "rows_checked": int(len(p)), "by_model": by, "top_tokens": top, "samples": samples}
+
+
 def row_rule_report(alarms_cls, eth=None):
     """고정 출력(설계 6.1 개정 4): system_type × 규칙 ID 건수(규칙 순서 고정), 개정 1 규칙 대비 재분류 건수,
     slot_addr·unit_addr 행 중 같은 키의 성능 포트가 있는 행 수와 표본 20행(모델별). 휴리스틱이 포트 알람을 조용히 빼는지 확인하는 용도."""
@@ -493,14 +534,15 @@ def row_rule_report(alarms_cls, eth=None):
         keys = set(zip(kt["ip_addr"], kt["cid"], kt["lid"]))
     a["_inperf"] = [(i, c, l) in keys for i, c, l in zip(a["ip_addr"], a["cid"], a["lid"])]
     inperf, samples = {}, {}
-    for rid in ("slot_addr", "unit_addr"):
+    for rid in ("slot_addr", "unit_addr", "service_main", "main_lid_mismatch"):
         sub = a[a["row_rule"] == rid]
         inperf[rid] = {str(st): {"rows": int(len(g)), "with_perf_key": int(g["_inperf"].sum())} for st, g in sub.groupby("system_type")}
         samples[rid] = {str(st): g[["ip_addr", "cid", "lid", "address", "alarm_type", "_inperf"]].rename(columns={"_inperf": "perf_key_exists"})
                         .head(20).to_dict("records") for st, g in sub.groupby("system_type")}
     sub2 = a[a["row_rule"] == "slot_addr"]
     cl = {"cid_lid_top": {f"{c}/{l}": int(n) for (c, l), n in sub2.groupby(["cid", "lid"]).size().sort_values(ascending=False).head(15).items()}}
-    return {"version": ROW_CLASS_VERSION, "rule_order": list(RULE_IDS), "by_model_rule": table,
+    trailing = trailing_tokens_report(alarms_cls)
+    return {"version": ROW_CLASS_VERSION, "trailing_tokens_after_port": trailing, "rule_order": list(RULE_IDS), "by_model_rule": table,
             "rows": int(len(a)), "reclassified_vs_rev1": int(a["_changed"].sum()),
             "reclassified_vs_rev1_by_model": {str(st): int(g["_changed"].sum()) for st, g in a.groupby("system_type")},
             "classes": a["row_class"].value_counts().to_dict(), "with_perf_key": inperf, "samples": samples, "slot_addr_cid_lid": cl}
@@ -512,6 +554,8 @@ def format_row_rule_report(rep):
     for st, row in rep["by_model_rule"].items():
         lines.append(f"  model {st}: " + " ".join(f"{rid}={row[rid]}" for rid in rep["rule_order"]))
     lines.append(f"  개정 1 규칙 대비 재분류 {rep['reclassified_vs_rev1']}건 {rep['reclassified_vs_rev1_by_model']}")
-    for rid in ("slot_addr", "unit_addr"):
-        lines.append(f"  {rid} 중 성능 키 있음: {rep['with_perf_key'][rid]}")
+    for rid in ("slot_addr", "unit_addr", "service_main", "main_lid_mismatch"):
+        lines.append(f"  {rid} 중 성능 키 있음: {rep['with_perf_key'].get(rid, {})}")
+    t = rep.get("trailing_tokens_after_port", {})
+    lines.append(f"  S.n-Pm 뒤에 토큰이 남는 address(규칙 9·10 행 {t.get('rows_checked', 0)} 중): {t.get('total', 0)}건 모델별 {t.get('by_model')} 상위 토큰 {t.get('top_tokens')}")
     return "\n".join(lines)

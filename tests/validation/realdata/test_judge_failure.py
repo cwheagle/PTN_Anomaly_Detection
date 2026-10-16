@@ -137,3 +137,38 @@ def test_cli_has_retry_judge_action():
     from validation.cli import real_data_check as cli
     a = cli.build_parser().parse_args(["periods", "--run", "r", "retry-judge", "--reason", "x", "--reviewed-by", "y"])
     assert a.action == "retry-judge" and a.reason == "x" and a.reviewed_by == "y"
+
+
+def test_final_report_lists_abort_count_errors_and_retry_reason(run, monkeypatch):
+    c = locked(run)
+    real = rp.traffic_frame
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("memory error")
+        return real(*a, **k)
+
+    monkeypatch.setattr(rp, "traffic_frame", flaky)
+    with pytest.raises(RuntimeError):
+        judge(c, FakeDetector())                                                    # claimed 실패 → aborted_1
+    with pytest.raises(RuntimeError, match="detect failed"):
+        judge(c, Boom())                                                            # computing 실패 (오류가 표식에 남는다)
+    cmds.cmd_retry_judge(c, "detector 버그 수정", "reviewer-a", detector=FakeDetector())
+    rep = judge(c, FakeDetector())
+    h = rep["judge_history"]
+    assert h["aborted_count"] == 1 and "memory error" in h["aborted"][0]["error"]
+    assert h["retry_count"] == 1 and h["retried"][0]["reason"] == "detector 버그 수정" and h["retried"][0]["reviewed_by"] == "reviewer-a"
+    assert "detect failed" in h["retried"][0]["error"] and h["retried"][0]["commit_before"] and h["retried"][0]["commit_after"]
+    dev = cmds.cmd_report(c, "dev", "dev", detector=FakeDetector())
+    assert "judge_history" not in dev                                               # 개발 보고에는 없음
+
+
+def test_default_runs_dir_matches_design_ledger_location_and_warns_otherwise(run, capsys):
+    import os as _os
+    from validation.cli import real_data_check as cli
+    assert _os.path.abspath(cli.RUNS_DIR) == _os.path.abspath(cmds.CANONICAL_RUNS_DIR)
+    assert pr.ledger_path(cmds.CANONICAL_RUNS_DIR).replace("\\", "/").endswith("validation/runs/p1_2/analysis_ledger.jsonl")
+    ctx_of(run)
+    assert "기본" in capsys.readouterr().err                                         # 테스트의 임시 runs 폴더는 기본이 아니므로 경고

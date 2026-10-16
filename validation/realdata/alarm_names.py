@@ -17,6 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 DEFAULT_NAMES_PATH = os.path.join(ROOT, "validation", "runs", "ref", "alarm_names.json")
 DEFAULT_TARGET_MAP = os.path.join(HERE, "alarm_target_map.csv")
 
+TARGET_MAP_VERSION = "target_map_v2"      # 개정 8 (2026-10-16): 단절 1차에 DCC-FAIL·PW-LOC·LSP-LOC 추가, 성능 단절 일치가 낮은 알람은 보조
 UNCLASSIFIED = "미분류"
 TARGET_TYPES = {"CRC증가", "트래픽단절", "광관찰", "제외", "해당없음"}
 GRADES = {"1차", "보조", "사용안함", "관찰참고"}

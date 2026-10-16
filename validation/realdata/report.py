@@ -26,6 +26,8 @@ C6_BAND = (0.5, 2.0)
 C6_MAX_OUT_DAYS = 2
 LEAD_BUCKETS = ((15, 60), (60, 180), (180, 360), (360, 1440))     # 분, [lo, hi)
 
+PERF_GAP_NOTE = ("단절 정답 알람은 개발 구간에서 '알람 직후 성능 데이터가 사라지는 비율'로 골랐다. 따라서 단절 정답과 성능 공백 지표"
+                 "(9.4·9.5 의 perf_gap, J3 의 '행 없음')는 부분적으로 같은 현상을 본다.")
 CIRCULAR_NOTE = ("CRC증가: EMS 임계와 규칙 임계가 같은 카운터일 수 있음 — ETH-ERR 의 발생 조건을 모르는 동안 C3 해석 보류 "
                  "(target_definition.md 5.3).")
 EXPOSURE_NOTE = ("판정 기간은 과거 데이터라 완전히 처음 보는 데이터가 아니다: 2026-10-16 lead 의 실DB 집계로 07-10~10-12 의 원 알람 월별 건수와 "
@@ -113,7 +115,8 @@ def c3_events(events, frames, perf, shift=0):
     rows = []
     for _, r in events.iterrows():
         key, t0 = _key(r, shift), pd.Timestamp(r["t0"])
-        rec = {"ip_addr": r["ip_addr"], "cid": r["cid"], "lid": r["lid"], "target_type": r["target_type"], "grade": r["grade"], "t0": t0}
+        rec = {"ip_addr": r["ip_addr"], "cid": r["cid"], "lid": r["lid"], "target_type": r["target_type"], "grade": r["grade"], "t0": t0,
+               "alarm_names": r["alarm_names"] if "alarm_names" in r.index else ""}
         if not perf.has(key):
             rec["status"] = "no_port"
         else:
@@ -132,7 +135,10 @@ def c3_summary(ev_rows, hold_reason=None):
     """include = status ok. 방법별 선행 탐지율·1h/3h/6h 누적 비율·구간별 건수. 20건 미만이면 판정 보류(값은 참고)."""
     inc = ev_rows[ev_rows["status"] == "ok"] if len(ev_rows) else ev_rows
     n = int(len(inc))
-    out = {"events_total": int(len(ev_rows)), "included": n,
+    only = ev_rows["alarm_names"] == "ETH-LINK-FAIL" if len(ev_rows) and "alarm_names" in ev_rows.columns else pd.Series([], dtype=bool)
+    out = {"notes": [PERF_GAP_NOTE], "eth_link_fail_only": {"total": int(only.sum()), "included": int((only & (ev_rows["status"] == "ok")).sum()) if len(only) else 0,
+                                                         "note": "ETH-LINK-FAIL 은 성능 직후 공백 비율이 낮은데도 사용자 결정으로 1차 (7.4) — 단독 이벤트 수를 따로 적는다"},
+           "events_total": int(len(ev_rows)), "included": n,
            "excluded": {"no_port": int((ev_rows["status"] == "no_port").sum()) if len(ev_rows) else 0,
                         "perf_gap": int((ev_rows["status"] == "perf_gap").sum()) if len(ev_rows) else 0},
            "hold": bool(n < C3_MIN_EVENTS or hold_reason), "hold_reasons": [], "methods": {}}
@@ -167,7 +173,8 @@ def delay_events(events, frames, perf, d_end, shift=0):
     for _, r in events.iterrows():
         key, t0 = _key(r, shift), pd.Timestamp(r["t0"])
         be = bin_end(t0)
-        rec = {"ip_addr": r["ip_addr"], "cid": r["cid"], "lid": r["lid"], "t0": t0, "bin_end": be}
+        rec = {"ip_addr": r["ip_addr"], "cid": r["cid"], "lid": r["lid"], "t0": t0, "bin_end": be,
+               "alarm_names": r["alarm_names"] if "alarm_names" in r.index else ""}
         if t0 + DELAY_WINDOW > pd.Timestamp(d_end):
             rec["status"] = "truncated"
         elif not perf.has(key):
@@ -198,7 +205,13 @@ def delay_events(events, frames, perf, d_end, shift=0):
 def delay_summary(dr, join_status):
     inc = dr[dr["status"] == "ok"] if len(dr) else dr
     n = int(len(inc))
-    out = {"events_total": int(len(dr)), "included": n, "join_status": join_status,
+    only = dr["alarm_names"] == "ETH-LINK-FAIL" if len(dr) and "alarm_names" in dr.columns else pd.Series([], dtype=bool)
+    total = int(len(dr))
+    gap = int((dr["status"] == "perf_gap").sum()) if total else 0
+    out = {"first_line": f"perf_gap {gap}/{total} ({(gap / total) if total else float('nan'):.1%}) — 사건 직후 성능 행이 없어 지연 분모에서 제외된 비율", "perf_gap_ratio": (gap / total) if total else float("nan"),
+           "notes": [PERF_GAP_NOTE, "남은 이벤트(행이 남아 있는 단절)는 대표성이 낮은 소수일 수 있다 (8.7)"],
+           "eth_link_fail_only": {"total": int(only.sum()), "included": int((only & (dr["status"] == "ok")).sum()) if len(only) else 0},
+           "events_total": total, "included": n, "join_status": join_status,
            "excluded": {k: int((dr["status"] == k).sum()) if len(dr) else 0 for k in ("truncated", "no_port", "perf_gap")},
            "list_individually": n < DELAY_LIST_BELOW, "methods": {}}
     for m in METHODS:
@@ -291,7 +304,7 @@ def build_report(ctx_events, ctx_episodes, ctx_alarms_info, replay_result, eth, 
     hold = None if join_status == "verified" else f"join_status = {join_status} (6.3)"
     rep = {"header": {**header, "purpose": purpose, "join_status": join_status, "range": [start, end], "key_shift_diagnostic": shift,
                       "slots": replay_result["slots"], "baselines_use_optical": False,
-                      "fixed_notes": [KEY_CORRECTION_NOTE, CIRCULAR_NOTE] + ([EXPOSURE_NOTE] if purpose == "judge" else [])},
+                      "fixed_notes": [KEY_CORRECTION_NOTE, PERF_GAP_NOTE, CIRCULAR_NOTE] + ([EXPOSURE_NOTE] if purpose == "judge" else [])},
            "c1_raw": c1_raw(frames), "overlap": overlap(frames)}
     rep["c3"] = {}
     for tt in ("합계", "CRC증가", "트래픽단절"):

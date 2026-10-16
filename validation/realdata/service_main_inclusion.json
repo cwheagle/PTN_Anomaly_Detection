@@ -1,0 +1,14 @@
+{
+ "rule": "n >= 30 and ratio >= 0.5",
+ "n": 0,
+ "ratio": NaN,
+ "include": false,
+ "by_name": {},
+ "service_main_rows": 0,
+ "decision": "보조(참고 열, 판정 제외)",
+ "range": [
+  "2026-07-10 00:00:00",
+  "2026-08-07 00:00:00"
+ ],
+ "measured_at": "2026-10-16 15:31:27.422653"
+}

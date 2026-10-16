@@ -170,7 +170,8 @@ F13 = [  # (address, cid, lid, 기대 규칙, 기대 분류)
     ("x", 256, 255, "dev_256_255", "device"), ("S.1 -P1", 256, 3, "dev_partial", "device"), ("S.1 -P1", 3, 255, "dev_partial", "device"),
     ("S.1 -P1", 0, 5, "dev_cid0", "device"), ("S.1 -P1", None, 1, "bad_key", "bad_key"), ("S.1 -P1", 2, -1, "bad_key", "bad_key"),
     ("S.1 -P1", 3, 0, "slot_lid0", "slot"), ("S.6", 6, 1, "slot_addr", "slot"),
-    ("PAPA.A-FAN-7", 3, 1, "unit_addr", "unit"), ("MAIN-P1", 4, 1, "unit_addr", "unit"),
+    ("PAPA.A-FAN-7", 3, 1, "unit_addr", "unit"), ("MAIN-P1", 4, 1, "port_main", "port"), ("main-p2  ", 4, 2, "port_main", "port"),
+    ("MAIN-P9  PW-5021", 4, 9, "service_main", "service"), ("MAIN-P3", 4, 1, "main_lid_mismatch", "unit"),
     ("S.2 -P1  ", 3, 1, "port", "port"), ("", 3, 2, "port_noaddr", "port"), (None, 3, 3, "port_noaddr", "port")]
 
 
@@ -179,7 +180,7 @@ def f13_frame():
                          "alarm_type": 1})
 
 
-def test_f13_every_rule_has_a_row_and_rule_order_is_applied():
+def test_f13_f17_every_rule_has_a_row_and_rule_order_is_applied():
     out = pj.classify_alarm_rows(f13_frame())
     assert list(out["row_rule"]) == [r[3] for r in F13] and list(out["row_class"]) == [r[4] for r in F13]
     assert set(out["row_rule"]) == set(pj.RULE_IDS) and pj.RULE_IDS[0] == "dev_system" and pj.RULE_IDS[-1] == "port_noaddr"
@@ -198,21 +199,40 @@ def test_unit_and_other_non_port_rows_never_become_episodes_or_target_events():
 
 
 def test_row_rule_report_fixed_tables_and_perf_key_counts():
-    al = f13_frame().assign(system_type=[12] * 8 + [31] * 7)
+    n = len(F13)
+    al = f13_frame().assign(system_type=[12] * 8 + [31] * (n - 8))
     cls = pj.classify_alarm_rows(al)
-    eth = eth_frame([(6, 1), (3, 1)], hours=1, ip="a")                                         # 성능 키 (6,1) (3,1) 존재
+    eth = eth_frame([(6, 1), (3, 1), (4, 1), (4, 9)], hours=1, ip="a")                           # 성능 키 (6,1) (3,1) (4,1) (4,9) 존재
     rep = pj.row_rule_report(cls, eth)
-    assert rep["version"] == "row_class_v2" and rep["rule_order"] == list(pj.RULE_IDS)
+    assert rep["version"] == "row_class_v4" and rep["rule_order"] == list(pj.RULE_IDS)
     assert list(rep["by_model_rule"]["12"].keys()) == list(pj.RULE_IDS) and rep["by_model_rule"]["12"]["dev_system"] == 2
-    assert sum(sum(v.values()) for v in rep["by_model_rule"].values()) == len(F13)
-    # 개정 1(cid=0/lid=0 만 장비·슬롯) 대비: SYSTEM/256·255 등 device 로 바뀐 행, slot_addr/unit_addr 가 port 에서 바뀐 행
-    assert rep["reclassified_vs_rev1"] == 8                                                      # 행 0~4(device 로), 9(slot), 10·11(unit)
-    assert rep["with_perf_key"]["slot_addr"]["31"] == {"rows": 1, "with_perf_key": 1} and rep["with_perf_key"]["unit_addr"]["31"] == {"rows": 2, "with_perf_key": 1}
-    assert len(rep["samples"]["unit_addr"]["31"]) == 2 and rep["samples"]["unit_addr"]["31"][0]["perf_key_exists"] in (True, False)
+    assert sum(sum(v.values()) for v in rep["by_model_rule"].values()) == n
+    assert rep["reclassified_vs_rev1"] == 9                                                      # 행 0~4(device 로), S.6(slot), FAN(unit), service_main, main_lid_mismatch
+    w = rep["with_perf_key"]
+    assert w["slot_addr"]["31"] == {"rows": 1, "with_perf_key": 1} and w["unit_addr"]["31"] == {"rows": 1, "with_perf_key": 1}
+    assert w["service_main"]["31"] == {"rows": 1, "with_perf_key": 1} and w["main_lid_mismatch"]["31"] == {"rows": 1, "with_perf_key": 1}
     txt = pj.format_row_rule_report(rep)
-    assert txt.splitlines()[0].startswith("[행 분류 row_class_v2]") and "model 12:" in txt and "unit_addr 중 성능 키 있음" in txt
+    assert txt.splitlines()[0].startswith("[행 분류 row_class_v4]") and "model 12:" in txt and "unit_addr 중 성능 키 있음" in txt and "service_main 중 성능 키 있음" in txt
+    assert "S.n-Pm 뒤에 토큰이 남는" in txt
     j2 = pj.j2_diagnosis(cls, eth)
-    assert j2["row_class_rules"]["version"] == "row_class_v2"
+    assert j2["row_class_rules"]["version"] == "row_class_v4"
+
+
+def test_trailing_tokens_after_port_are_reported_by_model():
+    df = pd.DataFrame({"ip_addr": "a", "system_type": [12, 12, 31, 31], "cid": 3, "lid": [1, 2, 1, 1], "alarm_type": 1,
+                       "address": ["S.2 -P1", "S.2 -P2 PW-5021", "CA-S.1 -P1 LSP-9", "S.1 -P1"]})
+    r = pj.trailing_tokens_report(pj.classify_alarm_rows(df))
+    assert r["total"] == 2 and r["by_model"] == {"12": 1, "31": 1} and r["rows_checked"] == 4
+    assert r["top_tokens"]["12"] == {"PW-5021": 1} and r["samples"]["31"][0]["trailing"] == "LSP-9"
+
+
+def test_main_regex_rules_7a_7s_7b_and_addr_port_extension():
+    df = pd.DataFrame({"ip_addr": "a", "system_type": 9, "cid": 2, "lid": [1, 1, 3, 2, 4], "alarm_type": 1,
+                       "address": ["MAIN-P1", "MAIN-P1 PW-5011", "MAIN-P1", " main-p2 ", "MAIN-PX"]})
+    out = pj.classify_alarm_rows(df)
+    assert list(out["row_rule"]) == ["port_main", "service_main", "main_lid_mismatch", "port_main", "unit_addr"]
+    assert pj.norm_port("CA-UT7080-MAIN-P1") == "MAIN-P1" and pj.norm_port("S.2 -P1  ") == "S.2-P1" and pj.norm_port("MAIN-P3 X") == "MAIN-P3"
+    assert pj.norm_port_base("MAIN-P1") == ""                                                    # 규칙 8 의 '빈 값' 판단은 확장 전 기준
 
 
 def test_rev1_comparison_counts_rows_whose_class_changed():

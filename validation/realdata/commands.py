@@ -15,10 +15,13 @@ from validation.realdata import periods as pr
 from validation.realdata import port_join as pj
 from validation.realdata import replay as rp
 from validation.realdata import report as rpt
+from validation.realdata.alarm_names import TARGET_MAP_VERSION  # noqa: E402
 from validation.realdata.alarm_names import DEFAULT_NAMES_PATH, DEFAULT_TARGET_MAP, AlarmNames, TargetMap
 from validation.realdata.extract import load_snapshot
 
 DEFAULT_OFFSET_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), pj.OFFSET_FILE)
+CANONICAL_RUNS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "validation", "runs", "p1_2")
+DEFAULT_SERVICE_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "service_main_inclusion.json")
 
 
 def _jsonable(o):
@@ -61,11 +64,16 @@ class Context:
     """스냅샷 한 번 로드 + 기간 계산 + 알람 준비. 판정 구간을 포함한 전체를 읽지만 출력은 resolve_range 가 허용한 범위만."""
 
     def __init__(self, run_dir, runs_dir, names_path=DEFAULT_NAMES_PATH, map_path=DEFAULT_TARGET_MAP, override_csv=None,
-                 maintenance_csv=None, offset_csv=None):
+                 maintenance_csv=None, offset_csv=None, service_json=None):
         self.run_dir, self.runs_dir = run_dir, runs_dir
+        if os.path.abspath(runs_dir) != os.path.abspath(CANONICAL_RUNS_DIR):             # 장부·잠금 폴더가 갈라지면 봉인이 약해진다 (설계 9.7.4 5)
+            import sys as _sys
+            print(f"[경고] runs 폴더가 기본({CANONICAL_RUNS_DIR})과 다릅니다 — 분석 장부·잠금이 이 폴더에만 기록됩니다: {runs_dir}", file=_sys.stderr)
         self.offset_csv = offset_csv or DEFAULT_OFFSET_CSV
         self.offsets = pj.load_offsets(self.offset_csv)
         self.offsets_table_models = set(self.offsets)
+        self.service_json = service_json or DEFAULT_SERVICE_JSON
+        self.service_include = bool(json.load(open(self.service_json, encoding="utf-8")).get("include")) if os.path.exists(self.service_json) else False
         self.target_map_path, self.override_csv, self.maintenance_csv = map_path, override_csv, maintenance_csv
         self.names_sha = hashlib.sha256(open(names_path, "rb").read()).hexdigest() if os.path.exists(names_path) else None
         with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as f:
@@ -80,7 +88,7 @@ class Context:
         self.target_map = TargetMap.load(map_path, known_names=self.names.all_names())
         self.maintenance = ae.load_maintenance(maintenance_csv) if maintenance_csv else None
         d_end = self.periods.get("D")
-        self.alarms = ae.prepare_alarms(self.raw_alarms, self.names, self.target_map, d_end, self.offsets)
+        self.alarms = ae.prepare_alarms(self.raw_alarms, self.names, self.target_map, d_end, self.offsets, self.service_include)
         port = self.alarms[self.alarms["row_class"] == "port"]
         self.episodes = ae.build_episodes(port, self.target_map, d_end) if d_end is not None else ae.build_episodes(port, self.target_map, pd.Timestamp.max)
         self.events = ae.mark_work_and_hw(ae.build_target_events(self.episodes), self.alarms, self.maintenance)
@@ -138,15 +146,21 @@ def cmd_join_check(ctx, range_spec="dev", manual_csv=None, write_offsets=False):
     col = "bin_end" if "bin_end" in eth.columns else "occur_date"
     e = eth[(pd.to_datetime(eth[col]) >= start) & (pd.to_datetime(eth[col]) < end)]
     scan = pj.offset_scan(a, e)
+    service_measure = ae.measure_service_main(a, e, ctx.target_map)
     table = pj.derive_offset_table(scan)
     if write_offsets:
         if pr.load_lock(ctx.runs_dir, ctx.periods) is not None:
             raise pr.PeriodError("잠금 뒤에는 오프셋 표를 바꿀 수 없습니다 (설정 해시, 9.7.6)")
         pj.write_offsets_csv(table, ctx.offset_csv)
+        # 개정 8: service_main 조건부 포함 측정 (개발 구간만) → 설정 파일에 기록, 설정 해시에 포함
+        svc = ae.measure_service_main(a, e, ctx.target_map)
+        with open(ctx.service_json, "w", encoding="utf-8") as f:
+            json.dump({**svc, "range": [str(start), str(end)], "measured_at": str(pd.Timestamp.now())}, f, ensure_ascii=False, indent=1, default=str)
+        ctx.service_include = bool(svc["include"])
         ctx.offsets = pj.load_offsets(ctx.offset_csv)
         ctx.offsets_table_models = set(ctx.offsets)
         # 표가 바뀌었을 수 있으므로 보정 키로 알람을 다시 준비한다
-        ctx.alarms = ae.prepare_alarms(ctx.raw_alarms, ctx.names, ctx.target_map, ctx.periods.get("D"), ctx.offsets)
+        ctx.alarms = ae.prepare_alarms(ctx.raw_alarms, ctx.names, ctx.target_map, ctx.periods.get("D"), ctx.offsets, ctx.service_include)
         port = ctx.alarms[ctx.alarms["row_class"] == "port"]
         ctx.episodes = ae.build_episodes(port, ctx.target_map, ctx.periods["D"])
         ctx.events = ae.mark_work_and_hw(ae.build_target_events(ctx.episodes), ctx.alarms, ctx.maintenance)
@@ -178,6 +192,8 @@ def cmd_join_check(ctx, range_spec="dev", manual_csv=None, write_offsets=False):
                        "reasons": verdict["reasons"] + [f"M1 수동 확인에서 보정 키가 다른 포트 {len(manual['mismatches'])}건 — J 판정과 무관하게 멈춤"]}
     detail = j3.pop("detail")
     res = {"range": [start, end], "join_status": verdict["status"], "verdict": verdict, "key_correction_note": pj.KEY_CORRECTION_NOTE,
+           "target_map_version": TARGET_MAP_VERSION, "service_main": {**service_measure, "applied_include": bool(ctx.service_include)},
+           "j3_note": __import__("validation.realdata.report", fromlist=["x"]).PERF_GAP_NOTE,
            "offset_table": table.to_dict("records"), "offset_table_written": bool(write_offsets), "j0s_scan": scan, "j1": j1, "j2": j2, "j3": j3, "j4": j4,
            "model_rates": rates, "diagnostic_j3_unshifted_k0": j3_raw, "diagnostic_cid_offset_scan": pj.cid_offset_scan(a, e),
            "diagnostic_cid_slot_offsets": {"perf": pj.cid_slot_offsets(e), "alarm": pj.cid_slot_offsets(a[a["row_class"] == "port"])},
@@ -231,7 +247,8 @@ def config_parts(ctx, join_status):
     from validation.evaluation import baselines as bl
     from validation.realdata import tables as tb
     return {
-        "target_map_sha": _file_sha(ctx.target_map_path), "alarm_names_sha": ctx.names_sha, "override_sha": _file_sha(ctx.override_csv),
+        "target_map_version": TARGET_MAP_VERSION, "target_map_sha": _file_sha(ctx.target_map_path),
+        "service_main_inclusion": {"file_sha": _file_sha(ctx.service_json), "include": ctx.service_include, "rule": [ae.SERVICE_MIN_N, ae.SERVICE_MIN_RATIO, ae.SERVICE_PRE_MIN_SLOTS]}, "alarm_names_sha": ctx.names_sha, "override_sha": _file_sha(ctx.override_csv),
         "maintenance_sha": _file_sha(ctx.maintenance_csv), "work_names": list(ae.WORK_NAMES), "hw_patterns": list(ae.HW_PATTERNS), "row_class": {"version": pj.ROW_CLASS_VERSION, "rules": [list(r) for r in pj.ROW_RULES]},
         "alarm_cid_offsets": {"file_sha": _file_sha(ctx.offset_csv), "table": {str(k): v for k, v in sorted(ctx.offsets.items())}, "default_k": pj.DEFAULT_K,
                               "criteria": [pj.OFFSET_MIN_ALARMS, pj.OFFSET_MIN_J4, pj.OFFSET_MIN_GAIN, pj.J4_MIN, pj.J2_MIN]},
@@ -285,7 +302,7 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_
     payload = {"alternative": ctx.periods["alternative"], "S": ctx.periods["S"], "D": ctx.periods["D"], "J0": ctx.periods["J0"],
                "judge_data_days": ctx.periods["judge_data_days"], "data_days": ctx.periods["data_days"],
                "models": {ft: {k: v for k, v in info.items() if k != "meta_path"} for ft, info in model.items()},
-               "training_policy": {"model_config": "unchanged", "train_seed": 0, "val_port_fraction": 0.10, "alert_policy": None, "suspect": "rule B only"},
+               "ledger_path": pr.ledger_path(ctx.runs_dir), "training_policy": {"model_config": "unchanged", "train_seed": 0, "val_port_fraction": 0.10, "alert_policy": None, "suspect": "rule B only"},
                "policy_hash": pr.stable_hash(pol), "config_hash": pr.stable_hash(parts), "config_parts": parts,
                "join_status": join["join_status"], "ledger_missing": ledger_missing, "dev_event_rate_r": dev["r_per_data_day"], "r_needed_for_20": need,
                "c3_hold_expected": bool(dev["r_per_data_day"] < need), "exposure_note": rpt.EXPOSURE_NOTE,
@@ -366,7 +383,11 @@ def _judge_replay(ctx, range_spec, start, end, versions, policy, detector, save,
         pr.abort_claimed(ctx.runs_dir, ctx.periods, repr(e))
         raise
     pr.set_phase(ctx.runs_dir, ctx.periods, "computing")                                   # 이 줄부터 실패는 자동 되돌림 없음
-    res = rp.replay(ctx.eth, start, end, versions=versions, detector=det, inp=inp)
+    try:
+        res = rp.replay(ctx.eth, start, end, versions=versions, detector=det, inp=inp)
+    except BaseException as e:                                                             # computing 단계 실패: 오류를 표식에 남기고 자동 되돌림 없음
+        pr.note_error(ctx.runs_dir, ctx.periods, repr(e))
+        raise
     res["model_meta"] = lock["models"].get("traffic")
     res["purpose"], res["versions"], res["lock"] = "judge", versions, lock
     res["files"] = _save_replay(ctx, res, "judge", range_spec, start, end, versions) if save else []
@@ -472,6 +493,8 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
     rep = rpt.build_report(events, ep_view, info, res, ctx.eth, end, ctx.data_days, join_status, purpose,
                            header, key_shift, net_days)
     rep["join_in_range"] = {**jr, "offset_unverified": unver, "join_status_used": join_status}
+    if purpose == "judge":                                                                 # 설계 9.7.6-3·4: 되돌림 횟수·오류, retry-judge 사유를 최종 판정 보고에 적는다
+        rep["judge_history"] = pr.judge_history(ctx.runs_dir, ctx.periods)
     tag = f"{purpose}_{_tag(range_spec)}"
     ev_rows, de_rows = rep.pop("c3_events"), rep.pop("delay_events")
     write_json(os.path.join(ctx.out_dir, f"report_{tag}.json"), rep)

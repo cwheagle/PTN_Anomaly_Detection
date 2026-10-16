@@ -156,6 +156,7 @@ def print_report(rep):
     d = rep["delay"]
     print(f"  단절 탐지 지연: 이벤트 {d['events_total']} 포함 {d['included']} 제외 {d['excluded']}")
     print("  겹침:", rep["overlap"])
+    print("  지연 표 첫 줄:", rep["delay"]["first_line"], "| ETH-LINK-FAIL 단독(지연):", rep["delay"]["eth_link_fail_only"], "| (C3):", rep["c3"]["합계"]["eth_link_fail_only"])
     for n in h["fixed_notes"]:
         print("  *", n)
 
@@ -263,7 +264,10 @@ def _run_snapshot_command(args):
             print("모델별 J4/J2:", {m: (round(v["j4"], 3), round(v["j2"], 3) if v["j2"] == v["j2"] else None) for m, v in res["model_rates"].items()})
             from validation.realdata.port_join import format_row_rule_report
             print(format_row_rule_report(res["j2"]["row_class_rules"]))
+            sm = res["service_main"]
+            print(f"service_main(1차 단절 이름) 측정: n={sm['n']} 직후 성능 행 0 비율={sm['ratio']:.3f} → {sm['decision']} (적용 중 include={sm['applied_include']})")
             print(f"* {res['key_correction_note']}")
+            print(f"* J3: {res['j3_note']}")
             if res["verdict"].get("stop"):
                 print("[멈춤] 조인 검증 실패 — 보고 후 사용자 결정 필요 (address·다른 k 로 자동 전환하지 않음)")
         return 0

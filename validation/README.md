@@ -57,5 +57,8 @@ python validation/cli/real_data_check.py extract --start 2026-07-10 --end 2026-1
 - **표식 phase**: `report --purpose judge` 는 해시 대조·모델/스케일러/정책 로드·출력 폴더 확인을 **표식 전에** 끝낸다(이 단계 실패는 그냥 다시 실행). 이후 표식 `locks/judge_*.run.json` 이 `claimed` → `computing`(판정 데이터가 처음 모델에 들어가기 직전) → `completed`(출력 파일 sha256 기록)로 진행한다.
 - `claimed` 에서 난 예외(Ctrl+C 포함)는 표식이 `…aborted_<n>.json` 으로 이름이 바뀌고 자동 재실행이 허용된다.
 - `computing` 에서 실패하면 자동 되돌림이 없다. `periods retry-judge --reason "<사유>" --reviewed-by <reviewer>` 로 **1회만** 재시도할 수 있고(잠금의 설정·모델·정책 해시가 그대로여야 하며, 실패 전후 코드 커밋·부분 출력 목록이 `…failed_1.json` 에 기록됨), 두 번째 실패면 이 잠금의 판정은 소진된다. `completed` 뒤에는 재실행하지 않는다.
+- `--reviewed-by` 는 비어 있지 않은 문자열인지만 검사한다(자기 확인이 가능한 한계): 수정 diff 가 판정 규칙·기준값·분류 규칙을 건드리지 않았는지는 도구가 아니라 reviewer 의 diff 검토가 보장한다. 도구가 강제하는 것은 잠금의 설정·모델·정책 해시 일치와 실패 전후 커밋·부분 출력 목록의 기록이다.
+- 최종 판정 보고(`report_judge_*.json`)의 `judge_history` 에 `aborted_<n>` 횟수·오류와 retry-judge 사유·검토자·실패 오류·전후 커밋이 들어간다.
+- 분석 장부·잠금은 기본 `validation/runs/p1_2/` 에 기록된다. `--runs-dir` 로 다른 폴더를 쓰면 장부가 갈라져 봉인이 약해지므로 도구가 경고한다.
 - 판정에서는 `--policy` 를 쓸 수 없고, 레지스트리 모델의 `trained_at`·정책·가중치(`model/scaler/meta` sha256)가 잠금 때와 같아야 한다. 테스트에서 `detector` 를 직접 주입하면 이 해시 검사는 생략된다(CLI 는 항상 레지스트리 경로).
 - 모든 분석은 `runs/p1_2/analysis_ledger.jsonl` 에 추가 기록되고, 판정 구간과 겹치는 기록이 있으면 `periods lock` 이 거부된다. 데이터일 < 28 이면 `--purpose explore` 만 허용된다.

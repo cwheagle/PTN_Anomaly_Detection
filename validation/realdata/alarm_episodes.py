@@ -37,7 +37,7 @@ def severity_label(v):
         return "기타-NA"
 
 
-def prepare_alarms(alarms, names, target_map, d_end=None, offsets=None):
+def prepare_alarms(alarms, names, target_map, d_end=None, offsets=None, service_include=False):
     """스냅샷 알람 → 키 정리, 시각 파싱, 행 분류(원 cid 기준), 알람 cid 오프셋 보정(포트·slot 행만, 설계 6.3), 알람명·타겟 유형 부착.
     d_end 이후에 발생한 행은 버린다. 이후 모든 계산은 보정된 `cid`(=cid_j)를 쓰고 원 값은 `cid_raw` 에 남는다."""
     from validation.realdata.port_join import apply_offsets, classify_alarm_rows
@@ -49,6 +49,13 @@ def prepare_alarms(alarms, names, target_map, d_end=None, offsets=None):
         a = a[a["occur_date"] < pd.Timestamp(d_end)]
     a = names.resolve_frame(a)
     a = target_map.classify_frame(a)
+    if service_include:                                    # 개정 8: 조건부 포함 — service_main 의 1차 단절 이름 알람을 포트 알람과 같은 키(cid_j, lid)로 승격
+        is_cut1 = pd.Series([any(t == "트래픽단절" and g == "1차" for t, g in zip(ts.split(";"), gs.split(";")))
+                             for ts, gs in zip(a["target_types"], a["grades"])], index=a.index)
+        promote = (a["row_rule"] == "service_main") & is_cut1 & (a["cid_j"] > 0).fillna(False)
+        a.loc[promote, "cid"] = a.loc[promote, "cid_j"]
+        a.loc[promote, "row_class"] = "port"
+        a.loc[(a["row_rule"] == "service_main") & is_cut1 & ~promote, "row_class"] = "bad_key"
     a["severity"] = a["severity_type"].map(severity_label) if "severity_type" in a.columns else "기타-NA"
     return a.reset_index(drop=True)
 
@@ -265,3 +272,39 @@ def count_judge_events(events, start, end, data_days):
             "excluded_work_suspect": int(((events["t0"] >= pd.Timestamp(start)) & (events["t0"] < pd.Timestamp(end)) & events["work_suspect"]
                                           & (events["grade"] == JUDGE_GRADE)).sum()) if len(events) else 0,
             "note": "성능 공백 제외(9.4)는 적용하지 않은 건수 — 재생 입력이 필요함"}
+
+
+# ---- service_main 조건부 포함 측정 (설계 8.7, 사전 고정 규칙) ----------------------------------------------------
+SERVICE_MIN_N, SERVICE_MIN_RATIO = 30, 0.5
+SERVICE_PRE_MIN_SLOTS = 12          # '직전 6시간 정상 수집' = [t−6h, t) 의 15분 슬롯 24개 중 12개 이상 (C3 성능 공백 기준과 같은 선)
+
+
+def measure_service_main(alarms, eth, target_map):
+    """service_main 행 중 1차 단절 이름 알람에 대해 lead 측정과 같은 방식: 보정 키(cid_j, lid)의 포트가 직전 6시간 정상 수집이던 알람에서
+    알람 직후 1시간 성능 행이 0개인 비율. n ≥ 30 이고 비율 ≥ 50% 이면 포함(include=True), 아니면 보조. 개발 구간 알람만 넘겨야 한다."""
+    from validation.realdata.report import PerfIndex
+    sm = alarms[alarms["row_rule"] == "service_main"]
+    rows = []
+    perf = PerfIndex(eth) if len(eth) else None
+    for r in sm.itertuples():
+        cut1 = any(t == "트래픽단절" and g == "1차" for t, g in zip(r.target_types.split(";"), r.grades.split(";")))
+        if not cut1 or perf is None or pd.isna(r.cid_j) or r.cid_j <= 0:
+            continue
+        key = (r.ip_addr, int(r.cid_j), int(r.lid))
+        if not perf.has(key):
+            continue
+        t = r.occur_date
+        if perf.count(key, t - pd.Timedelta(hours=6), t) < SERVICE_PRE_MIN_SLOTS:
+            continue
+        rows.append({"alarm_name": r.alarm_name, "post_zero": perf.count_closed(key, t + pd.Timedelta(seconds=1), t + pd.Timedelta(hours=1)) == 0})
+    n = len(rows)
+    ratio = (sum(x["post_zero"] for x in rows) / n) if n else float("nan")
+    by = {}
+    for x in rows:
+        d = by.setdefault(x["alarm_name"], [0, 0])
+        d[0] += 1
+        d[1] += int(x["post_zero"])
+    include = bool(n >= SERVICE_MIN_N and ratio == ratio and ratio >= SERVICE_MIN_RATIO)
+    return {"rule": f"n >= {SERVICE_MIN_N} and ratio >= {SERVICE_MIN_RATIO}", "n": n, "ratio": ratio, "include": include,
+            "by_name": {k: {"n": v[0], "post_zero_ratio": v[1] / v[0]} for k, v in by.items()},
+            "service_main_rows": int(len(sm)), "decision": "포함(판정 정답, 포트 알람과 같은 키)" if include else "보조(참고 열, 판정 제외)"}

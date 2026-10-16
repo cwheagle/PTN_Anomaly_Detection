@@ -225,6 +225,27 @@ def set_phase(runs_dir, periods, phase):
     _write_marker(p, m)
 
 
+def note_error(runs_dir, periods, error):
+    """computing 단계의 예외를 표식에 남긴다 (phase 는 그대로 computing — 자동 되돌림 없음, retry-judge 로만 재시도)."""
+    p, m = _read_marker(runs_dir, periods)
+    if m is not None:
+        m["error"] = str(error)
+        _write_marker(p, m)
+
+
+def judge_history(runs_dir, periods):
+    """판정 실행 이력(설계 9.7.6-3·4): aborted_<n> 횟수·오류, retry-judge(failed_1) 사유·검토자·실패 오류·커밋. 최종 판정 보고에 적는다."""
+    d = os.path.dirname(lock_path(runs_dir, periods))
+    out = {"aborted": [], "retried": []}
+    for kind, key in (("aborted", "aborted"), ("failed", "retried")):
+        for f in count_variants(runs_dir, periods, kind):
+            m = json.load(open(os.path.join(d, f), encoding="utf-8"))
+            out[key].append({k: m.get(k) for k in ("error", "reason", "reviewed_by", "commit_before", "commit_after", "partial_outputs", "claimed_at", "aborted_at", "retried_at")
+                             if m.get(k) is not None})
+    out["aborted_count"], out["retry_count"] = len(out["aborted"]), len(out["retried"])
+    return out
+
+
 def abort_claimed(runs_dir, periods, error):
     """claimed 단계의 예외: 표식을 aborted_<n> 으로 이름을 바꾸고(삭제 아님, 오류 포함) 재실행을 허용한다. 반환: 새 파일 경로."""
     p, m = _read_marker(runs_dir, periods)
