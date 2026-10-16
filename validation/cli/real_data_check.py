@@ -264,8 +264,14 @@ def _run_snapshot_command(args):
             print("모델별 J4/J2:", {m: (round(v["j4"], 3), round(v["j2"], 3) if v["j2"] == v["j2"] else None) for m, v in res["model_rates"].items()})
             from validation.realdata.port_join import format_row_rule_report
             print(format_row_rule_report(res["j2"]["row_class_rules"]))
+            print("J4(규칙 9·9s) 모델별:", {m: (v["alarms"], round(v["matched"], 3)) for m, v in ((x["system_type"], x) for x in res["j4"]["by_model"])},
+                  "| 규칙 10 참고 매칭률:", res["j4"]["rule10_ref"]["matched_ratio"])
+            print("J4m(7a MAIN-Pn):", {m: {k: v[k] for k in ("matched", "key_mismatch", "port_no_perf")} | {"mismatch_ratio": v["mismatch_ratio"], "제외": v["excluded"]}
+                                      for m, v in res["j4m"]["by_model"].items()})
             sm = res["service_main"]
-            print(f"service_main(1차 단절 이름) 측정: n={sm['n']} 직후 성능 행 0 비율={sm['ratio']:.3f} → {sm['decision']} (적용 중 include={sm['applied_include']})")
+            for g, v in sm["groups"].items():
+                print(f"service 측정[{g}]: n={v['n']} 직후 성능 행 0 비율={v['ratio']:.3f} → {v['decision']}")
+            print("  9s 접미 유형별:", {k: (v["n"], round(v["ratio"], 3)) for k, v in sm["by_suffix"].items()}, "적용 중:", sm["applied_include"])
             print(f"* {res['key_correction_note']}")
             print(f"* J3: {res['j3_note']}")
             if res["verdict"].get("stop"):

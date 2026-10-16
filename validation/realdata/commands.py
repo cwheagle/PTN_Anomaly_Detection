@@ -73,7 +73,7 @@ class Context:
         self.offsets = pj.load_offsets(self.offset_csv)
         self.offsets_table_models = set(self.offsets)
         self.service_json = service_json or DEFAULT_SERVICE_JSON
-        self.service_include = bool(json.load(open(self.service_json, encoding="utf-8")).get("include")) if os.path.exists(self.service_json) else False
+        self.service_include = self._load_service_include(self.service_json)
         self.target_map_path, self.override_csv, self.maintenance_csv = map_path, override_csv, maintenance_csv
         self.names_sha = hashlib.sha256(open(names_path, "rb").read()).hexdigest() if os.path.exists(names_path) else None
         with open(os.path.join(run_dir, "manifest.json"), encoding="utf-8") as f:
@@ -93,6 +93,17 @@ class Context:
         self.episodes = ae.build_episodes(port, self.target_map, d_end) if d_end is not None else ae.build_episodes(port, self.target_map, pd.Timestamp.max)
         self.events = ae.mark_work_and_hw(ae.build_target_events(self.episodes), self.alarms, self.maintenance)
         self.out_dir = os.path.join(run_dir, "out")
+
+    @staticmethod
+    def _load_service_include(path):
+        """service 포함 그룹 {service_main, service_port_nonP, service_port_P: bool}. 파일이 없으면 모두 보조(False)."""
+        if not os.path.exists(path):
+            return {g: False for g in ae.SERVICE_GROUPS}
+        d = json.load(open(path, encoding="utf-8"))
+        m = d.get("include_map")
+        if m is None:                                          # 개정 8 형식(service_main 단일 include) 호환
+            m = {"service_main": bool(d.get("include"))}
+        return {g: bool(m.get(g, False)) for g in ae.SERVICE_GROUPS}
 
     def record(self, command, start, end, purpose=None):
         """분석 장부에 기록 (가드를 통과한 뒤, 계산 전)."""
@@ -156,7 +167,7 @@ def cmd_join_check(ctx, range_spec="dev", manual_csv=None, write_offsets=False):
         svc = ae.measure_service_main(a, e, ctx.target_map)
         with open(ctx.service_json, "w", encoding="utf-8") as f:
             json.dump({**svc, "range": [str(start), str(end)], "measured_at": str(pd.Timestamp.now())}, f, ensure_ascii=False, indent=1, default=str)
-        ctx.service_include = bool(svc["include"])
+        ctx.service_include = {g: bool(v) for g, v in svc["include_map"].items()}
         ctx.offsets = pj.load_offsets(ctx.offset_csv)
         ctx.offsets_table_models = set(ctx.offsets)
         # 표가 바뀌었을 수 있으므로 보정 키로 알람을 다시 준비한다
@@ -178,6 +189,7 @@ def cmd_join_check(ctx, range_spec="dev", manual_csv=None, write_offsets=False):
     j2 = pj.j2_diagnosis(a, e)
     j3 = pj.j3_physical_match(cut[cols], e)
     j4 = pj.j4_coverage(a, e)
+    j4m_res = pj.j4m(a, e)
     verdict = pj.judge_join(j1, j3, {m: rates[m] for m in table_models if m in rates} if rates else {})
     # 진단(판정 아님): 그대로 맞춘 조인(k=0) J3 (b) — 키 어긋남의 모양 확인
     raw = cut[cols].copy()
@@ -192,10 +204,10 @@ def cmd_join_check(ctx, range_spec="dev", manual_csv=None, write_offsets=False):
                        "reasons": verdict["reasons"] + [f"M1 수동 확인에서 보정 키가 다른 포트 {len(manual['mismatches'])}건 — J 판정과 무관하게 멈춤"]}
     detail = j3.pop("detail")
     res = {"range": [start, end], "join_status": verdict["status"], "verdict": verdict, "key_correction_note": pj.KEY_CORRECTION_NOTE,
-           "target_map_version": TARGET_MAP_VERSION, "service_main": {**service_measure, "applied_include": bool(ctx.service_include)},
+           "target_map_version": TARGET_MAP_VERSION, "service_main": {**service_measure, "applied_include": dict(ctx.service_include)},
            "j3_note": __import__("validation.realdata.report", fromlist=["x"]).PERF_GAP_NOTE,
            "offset_table": table.to_dict("records"), "offset_table_written": bool(write_offsets), "j0s_scan": scan, "j1": j1, "j2": j2, "j3": j3, "j4": j4,
-           "model_rates": rates, "diagnostic_j3_unshifted_k0": j3_raw, "diagnostic_cid_offset_scan": pj.cid_offset_scan(a, e),
+           "j4m": j4m_res, "model_rates": rates, "diagnostic_j3_unshifted_k0": j3_raw, "diagnostic_cid_offset_scan": pj.cid_offset_scan(a, e),
            "diagnostic_cid_slot_offsets": {"perf": pj.cid_slot_offsets(e), "alarm": pj.cid_slot_offsets(a[a["row_class"] == "port"])},
            "manual": manual, "note": "address 조인·다른 k 는 진단용이며 어떤 경우에도 판정 조인을 자동으로 바꾸지 않는다 (설계 6.3)"}
     tag = range_spec.replace("..", "_")
@@ -205,8 +217,9 @@ def cmd_join_check(ctx, range_spec="dev", manual_csv=None, write_offsets=False):
 
 
 def join_for_report(ctx, a, e, judge):
-    """리포트용 조인 상태 (설계 6.3 '판정 구간에서의 해석'): 구간 전체 J4 < 0.8 또는 J2 < 0.9 → degraded(C3·지연 보류).
-    오프셋 표에 없는 모델은 J4·J2 를 구간에서 계산해 미달이면 offset_unverified 로 이벤트를 제외(판정 실행에서만 적용)."""
+    """리포트용 조인 상태 (설계 6.3 '판정 구간에서의 해석', 개정 9): 규칙 9·9s 의 구간 J4 < 0.8 또는 J2 < 0.9 → degraded(C3·지연 보류).
+    오프셋 표에 없는 모델은 규칙 9·9s J4 와 J2 가 미달이면 offset_unverified 로 이벤트를 제외(판정 실행에서만 적용). 7a(MAIN-Pn)는 J4m 으로 따로 보고
+    키 불일치 비율 > 0.2 인 모델의 7a 이벤트만 제외한다(조인 전체는 유지)."""
     kt_ips = set(pj.key_table(e)["ip_addr"]) if len(e) else set()
     rates = pj.model_join_rates(a, e)
     j4 = pj.j4_coverage(a, e)
@@ -217,7 +230,7 @@ def join_for_report(ctx, a, e, judge):
     degraded = bool(not (j4["matched_ratio"] >= pj.J4_MIN) or not (overall_j2 >= pj.J2_MIN))
     unverified = sorted(m for m, r in rates.items() if m not in ctx.offsets_table_models and not (r["j4"] >= pj.J4_MIN and r["j2"] >= pj.J2_MIN))
     return {"j4": j4["matched_ratio"], "j2": overall_j2, "degraded": degraded, "model_rates": rates, "offset_unverified_models": unverified,
-            "table_models": sorted(ctx.offsets_table_models), "devices_in_perf": len(kt_ips)}
+            "table_models": sorted(ctx.offsets_table_models), "devices_in_perf": len(kt_ips), "j4m": pj.j4m(a, e), "rule10_ref": j4["rule10_ref"]}
 
 
 # ---- 모델 정보·잠금·재생·보고 ------------------------------------------------------------------------------
@@ -248,7 +261,7 @@ def config_parts(ctx, join_status):
     from validation.realdata import tables as tb
     return {
         "target_map_version": TARGET_MAP_VERSION, "target_map_sha": _file_sha(ctx.target_map_path),
-        "service_main_inclusion": {"file_sha": _file_sha(ctx.service_json), "include": ctx.service_include, "rule": [ae.SERVICE_MIN_N, ae.SERVICE_MIN_RATIO, ae.SERVICE_PRE_MIN_SLOTS]}, "alarm_names_sha": ctx.names_sha, "override_sha": _file_sha(ctx.override_csv),
+        "service_inclusion": {"file_sha": _file_sha(ctx.service_json), "include": ctx.service_include, "rule": [ae.SERVICE_MIN_N, ae.SERVICE_MIN_RATIO, ae.SERVICE_PRE_MIN_SLOTS]}, "alarm_names_sha": ctx.names_sha, "override_sha": _file_sha(ctx.override_csv),
         "maintenance_sha": _file_sha(ctx.maintenance_csv), "work_names": list(ae.WORK_NAMES), "hw_patterns": list(ae.HW_PATTERNS), "row_class": {"version": pj.ROW_CLASS_VERSION, "rules": [list(r) for r in pj.ROW_RULES]},
         "alarm_cid_offsets": {"file_sha": _file_sha(ctx.offset_csv), "table": {str(k): v for k, v in sorted(ctx.offsets.items())}, "default_k": pj.DEFAULT_K,
                               "criteria": [pj.OFFSET_MIN_ALARMS, pj.OFFSET_MIN_J4, pj.OFFSET_MIN_GAIN, pj.J4_MIN, pj.J2_MIN]},
@@ -472,9 +485,13 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
     if purpose == "judge":
         if jr["degraded"]:
             join_status = "degraded"                                    # 판정 구간 J4 < 0.8 또는 J2 < 0.9 → C3·탐지 지연 보류 (6.3)
+        if jr["j4m"]["excluded_models"]:                              # 개정 9: 7a(MAIN-Pn) 키 불일치 비율 > 0.2 인 모델의 7a 이벤트만 제외
+            bad7a = events["system_type"].isin(jr["j4m"]["excluded_models"]) & events["rules"].fillna("").str.contains("port_main")
+            unver["j4m_excluded"] = {"models": jr["j4m"]["excluded_models"], "events": int(bad7a.sum())}
+            events = events[~bad7a]
         if jr["offset_unverified_models"]:
             bad = events["system_type"].isin(jr["offset_unverified_models"])
-            unver = {"models": jr["offset_unverified_models"], "events": int(bad.sum()),
+            unver = {**unver, "models": jr["offset_unverified_models"], "events": int(bad.sum()),
                      "devices": sorted(events.loc[bad, "ip_addr"].unique().tolist())}
             events = events[~bad]
     info = {"short_episodes": int(ep["is_short"].sum()) if len(ep) else 0,

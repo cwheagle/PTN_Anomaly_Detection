@@ -172,6 +172,7 @@ F13 = [  # (address, cid, lid, 기대 규칙, 기대 분류)
     ("S.1 -P1", 3, 0, "slot_lid0", "slot"), ("S.6", 6, 1, "slot_addr", "slot"),
     ("PAPA.A-FAN-7", 3, 1, "unit_addr", "unit"), ("MAIN-P1", 4, 1, "port_main", "port"), ("main-p2  ", 4, 2, "port_main", "port"),
     ("MAIN-P9  PW-5021", 4, 9, "service_main", "service"), ("MAIN-P3", 4, 1, "main_lid_mismatch", "unit"),
+    ("S.2 -P1 PW-1234", 3, 1, "service_port", "service"), ("S.2 -P1  tp_x(P)", 3, 1, "service_port", "service"),
     ("S.2 -P1  ", 3, 1, "port", "port"), ("", 3, 2, "port_noaddr", "port"), (None, 3, 3, "port_noaddr", "port")]
 
 
@@ -204,18 +205,18 @@ def test_row_rule_report_fixed_tables_and_perf_key_counts():
     cls = pj.classify_alarm_rows(al)
     eth = eth_frame([(6, 1), (3, 1), (4, 1), (4, 9)], hours=1, ip="a")                           # 성능 키 (6,1) (3,1) (4,1) (4,9) 존재
     rep = pj.row_rule_report(cls, eth)
-    assert rep["version"] == "row_class_v4" and rep["rule_order"] == list(pj.RULE_IDS)
+    assert rep["version"] == "row_class_v5" and rep["rule_order"] == list(pj.RULE_IDS)
     assert list(rep["by_model_rule"]["12"].keys()) == list(pj.RULE_IDS) and rep["by_model_rule"]["12"]["dev_system"] == 2
     assert sum(sum(v.values()) for v in rep["by_model_rule"].values()) == n
-    assert rep["reclassified_vs_rev1"] == 9                                                      # 행 0~4(device 로), S.6(slot), FAN(unit), service_main, main_lid_mismatch
+    assert rep["reclassified_vs_rev1"] == 11                                                     # 행 0~4(device), S.6(slot), FAN(unit), service_main, main_lid_mismatch, service_port 2
     w = rep["with_perf_key"]
     assert w["slot_addr"]["31"] == {"rows": 1, "with_perf_key": 1} and w["unit_addr"]["31"] == {"rows": 1, "with_perf_key": 1}
     assert w["service_main"]["31"] == {"rows": 1, "with_perf_key": 1} and w["main_lid_mismatch"]["31"] == {"rows": 1, "with_perf_key": 1}
     txt = pj.format_row_rule_report(rep)
-    assert txt.splitlines()[0].startswith("[행 분류 row_class_v4]") and "model 12:" in txt and "unit_addr 중 성능 키 있음" in txt and "service_main 중 성능 키 있음" in txt
-    assert "S.n-Pm 뒤에 토큰이 남는" in txt
+    assert txt.splitlines()[0].startswith("[행 분류 row_class_v5]") and "model 12:" in txt and "unit_addr 중 성능 키 있음" in txt and "service_main 중 성능 키 있음" in txt
+    assert "규칙 9s(service_port" in txt
     j2 = pj.j2_diagnosis(cls, eth)
-    assert j2["row_class_rules"]["version"] == "row_class_v4"
+    assert j2["row_class_rules"]["version"] == "row_class_v5"
 
 
 def test_trailing_tokens_after_port_are_reported_by_model():

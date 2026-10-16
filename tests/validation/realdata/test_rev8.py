@@ -49,7 +49,7 @@ def test_config_hash_includes_map_version_and_service_inclusion(run, tmp_path):
     c = locked(run)
     parts = pr.load_lock(run["runs"], c.periods)["config_parts"]
     assert parts["target_map_version"] == "target_map_v2" and len(parts["target_map_sha"]) == 64
-    assert parts["service_main_inclusion"]["include"] is False and parts["service_main_inclusion"]["rule"] == [30, 0.5, 12]
+    assert parts["service_inclusion"]["include"] == {"service_main": False, "service_port_nonP": False, "service_port_P": False} and parts["service_inclusion"]["rule"] == [30, 0.5, 12]
     svc = tmp_path / "svc.json"
     svc.write_text(json.dumps({"include": True}), encoding="utf-8")
     c2 = cmds.Context(str(run["rd"]), run["runs"], names_path=run["names"], service_json=str(svc))

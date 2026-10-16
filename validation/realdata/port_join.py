@@ -62,14 +62,29 @@ def prep_keys(df):
 
 
 DEVICE_CID, DEVICE_LID = 256, 255      # 실데이터(2026-10-16 스냅샷): 장비 단위 알람은 cid=256, lid=255, address='SYSTEM'
-ROW_CLASS_VERSION = "row_class_v4"
+ROW_CLASS_VERSION = "row_class_v5"
 # 설계 6.1 (개정 4·6·7) 규칙표 — 위에서부터 처음 맞는 규칙. (규칙 ID, 분류)
 ROW_RULES = (("dev_system", "device"), ("dev_256_255", "device"), ("dev_partial", "device"), ("dev_cid0", "device"),
              ("bad_key", "bad_key"), ("slot_lid0", "slot"), ("slot_addr", "slot"),
              ("port_main", "port"), ("service_main", "service"), ("main_lid_mismatch", "unit"),
-             ("unit_addr", "unit"), ("port", "port"), ("port_noaddr", "port"))
+             ("unit_addr", "unit"), ("service_port", "service"), ("port", "port"), ("port_noaddr", "port"))
 RULE_IDS = tuple(r for r, _ in ROW_RULES)
 _MAIN_PLAIN_RE = re.compile(r"^MAIN-P(\d+)\s*$")               # 7a/7b: 접미 없음 (addr 은 앞뒤 공백 제거·대문자)
+_TRAIL_RE = re.compile(r"S\.\s*\d+\s*-\s*P\s*\d+(.*)$", re.IGNORECASE)               # S.n-Pm 뒤에 남는 토큰 (9s 판단, 접미 유형 분류)
+
+
+def suffix_type(token):
+    """서비스·터널 접미 유형: PW(`PW-nnnn`), tp_P(`tp_…(P)`, 보호 경로 추정), tp_W(`tp_…(W)`, 운용 경로 추정), other."""
+    t = (token or "").strip()
+    if re.match(r"^PW-\d+", t, re.IGNORECASE):
+        return "PW"
+    if t.lower().startswith("tp_") and t.endswith("(P)"):
+        return "tp_P"
+    if t.lower().startswith("tp_") and t.endswith("(W)"):
+        return "tp_W"
+    return "other"
+
+
 _MAIN_SUFFIX_RE = re.compile(r"^MAIN-P(\d+)\s+\S.*$")          # 7s: 접미 변형 (예: MAIN-P9 PW-5021)
 
 
@@ -105,11 +120,17 @@ def classify_alarm_rows(alarms):
     put("service_main", pos & suffix)
     put("main_lid_mismatch", pos & plain.map(lambda m: m is not None) & (lid != plain_n))
     put("unit_addr", pos & (addr != "") & (ap == ""))
+    trail = raw.map(lambda v: (lambda m: m.group(1).strip() if m else "")(_TRAIL_RE.search(str(v))) if pd.notna(v) else "")
+    put("service_port", pos & ap.map(lambda v: "-P" in v) & (trail != ""))                      # 9s: S.n-Pm 뒤 서비스·터널 접미
     put("port", pos & ap.map(lambda v: "-P" in v))
     put("port_noaddr", pos & (addr == ""))
     cls_of = dict(ROW_RULES)
     out["row_rule"] = rule.where(rule != "", "unclassified")
     out["row_class"] = out["row_rule"].map(lambda r: cls_of.get(r, "bad_key"))
+    # 서비스 접미 유형 (service_main 은 MAIN-Pn 뒤 토큰, service_port 는 S.n-Pm 뒤 토큰)
+    sm_tok = addr.map(lambda v: (lambda m: v[m.end(1):].strip() if m else "")(re.match(r"^MAIN-P(\d+)", v)))
+    out["suffix_type"] = [suffix_type(tr) if r == "service_port" else (suffix_type(st) if r == "service_main" else "")
+                          for r, tr, st in zip(out["row_rule"], trail, sm_tok)]
     return out
 
 
@@ -342,22 +363,68 @@ def j3_physical_match(episodes, eth, seed=J3_SEED, min_minutes=J3_MIN_MINUTES, m
 
 
 # ---- J4 ------------------------------------------------------------------------------
+J4_RULES = ("port", "service_port")                  # 설계 6.3 (개정 9): 키 검사 대상 = 규칙 9·9s (S.n-Pm 형)
+
+
+def _key_cid(df):
+    """알람 행의 보정 키 cid: cid_j 열이 있으면 그것(승격 여부와 무관), 없으면 cid."""
+    return df["cid_j"] if "cid_j" in df.columns else df["cid"]
+
+
 def j4_coverage(alarms_cls, eth):
-    """포트 알람 중 보정 키(알람 cid 는 이미 cid_j)의 성능 포트가 있는 비율. 분모는 **성능 스냅샷에 있는 장비(ip_addr)의 포트 알람만**
-    (성능이 아예 없는 알람 장비는 따로 셈: no_perf_device)."""
+    """J4 (개정 9): 규칙 9·9s(`S.n-Pm` 형) 포트 알람 중 보정 키(cid_j)의 성능 포트가 있는 비율. 분모는 성능 스냅샷에 있는 장비의 알람만
+    (성능이 아예 없는 알람 장비는 no_perf_device 로 따로 셈). 7a(port_main)는 J4m, 규칙 10(port_noaddr)은 참고 매칭률(`rule10_ref`)."""
     kt = key_table(eth)
     keys = set(zip(kt["ip_addr"], kt["cid"], kt["lid"]))
     ips = set(kt["ip_addr"])
-    p = alarms_cls[alarms_cls["row_class"] == "port"].copy()
+    p = alarms_cls[alarms_cls["row_rule"].isin(J4_RULES)].copy()
+    p["_k"] = _key_cid(p)
+    p = p[p["_k"].notna() & (p["_k"] > 0).fillna(False)] if len(p) else p
     p["device_in_perf"] = p["ip_addr"].isin(ips)
-    p["matched"] = [(k in keys) for k in zip(p["ip_addr"], p["cid"], p["lid"])]
+    p["matched"] = [(k in keys) for k in zip(p["ip_addr"], p["_k"], p["lid"])]
     q = p[p["device_in_perf"]]
     by_model = q.groupby("system_type").agg(alarms=("matched", "size"), matched=("matched", "mean")).reset_index()
-    return {"port_alarms": len(p), "port_alarms_in_perf_devices": int(len(q)), "no_perf_device": int((~p["device_in_perf"]).sum()),
+    r10 = alarms_cls[alarms_cls["row_rule"] == "port_noaddr"]
+    r10 = r10[r10["ip_addr"].isin(ips)]
+    r10_m = [(i, c, l) in keys for i, c, l in zip(r10["ip_addr"], _key_cid(r10), r10["lid"])]
+    return {"rules": list(J4_RULES), "port_alarms": len(p), "port_alarms_in_perf_devices": int(len(q)), "no_perf_device": int((~p["device_in_perf"]).sum()),
             "no_perf_device_by_model": {str(k): int(v) for k, v in p[~p["device_in_perf"]].groupby("system_type").size().items()},
             "matched_ratio": float(q["matched"].mean()) if len(q) else float("nan"),
             "by_model": by_model.to_dict("records"),
+            "rule10_ref": {"rows_in_perf_devices": int(len(r10)), "matched_ratio": (float(np.mean(r10_m)) if r10_m else float("nan")), "note": "참고 출력 — 판정 기준에 쓰지 않음"},
             "unmatched_samples": q.loc[~q["matched"], ["ip_addr", "system_type", "cid", "lid", "alarm_type", "occur_date"]].head(20).to_dict("records")}
+
+
+J4M_MAX_MISMATCH = 0.2
+
+
+def j4m(alarms_cls, eth):
+    """J4m (개정 9): 7a(port_main) 알람마다 같은 장비 성능에 `addr_port = MAIN-P<n>` 인 포트가 있는지 본다. 없으면 port_no_perf(주소로 확인),
+    있는데 보정 키가 그 포트와 다르면 key_mismatch, 같으면 matched. 모델별 mismatch/(matched+mismatch) > 0.2 이면 그 모델의 7a 이벤트를 판정에서 뺀다."""
+    kt = key_table(eth)
+    by_addr = {}
+    for r in kt.itertuples():
+        if str(r.addr_port).startswith("MAIN-P"):
+            by_addr.setdefault((r.ip_addr, r.addr_port), set()).add((r.cid, r.lid))
+    a = add_diag_columns(alarms_cls[alarms_cls["row_rule"] == "port_main"])
+    res = {}
+    rows = []
+    for r in a.itertuples():
+        keys = by_addr.get((r.ip_addr, r.addr_port))
+        k = (r.cid_j if hasattr(r, "cid_j") and pd.notna(r.cid_j) else r.cid, r.lid)
+        status = "port_no_perf" if not keys else ("matched" if k in keys else "key_mismatch")
+        rows.append((r.system_type, status))
+    for st, status in rows:
+        d = res.setdefault(str(st), {"matched": 0, "key_mismatch": 0, "port_no_perf": 0})
+        d[status] += 1
+    excluded = []
+    for st, d in res.items():
+        den = d["matched"] + d["key_mismatch"]
+        d["mismatch_ratio"] = (d["key_mismatch"] / den) if den else float("nan")
+        d["excluded"] = bool(den and d["mismatch_ratio"] > J4M_MAX_MISMATCH)
+        if d["excluded"]:
+            excluded.append(int(st))
+    return {"by_model": res, "excluded_models": sorted(excluded), "max_mismatch": J4M_MAX_MISMATCH, "rows": len(a)}
 
 
 def offset_scan(alarms_cls, eth, ks=SCAN_KS):
@@ -370,11 +437,7 @@ def offset_scan(alarms_cls, eth, ks=SCAN_KS):
     cid_raw = a["cid_raw"] if "cid_raw" in a.columns else a["cid"]
     a = a.assign(_c=cid_raw)
     a = add_diag_columns(a, alarm=False)
-    p = a[(a["row_class"].isin(["port", "bad_key"])) & a["_c"].notna() & a["ip_addr"].isin(ips)]
-    if "cid_nonpositive" in p.columns:
-        p = p[(p["row_class"] == "port") | p["cid_nonpositive"]]
-    else:
-        p = p[p["row_class"] == "port"]
+    p = a[a["row_rule"].isin(J4_RULES) & a["_c"].notna() & a["ip_addr"].isin(ips)]            # 규칙 9·9s (개정 9, bad_key 로 바뀐 것 포함)
     out = {}
     for st, g in p.groupby("system_type"):
         res = {}
@@ -506,16 +569,18 @@ _TRAIL_RE = re.compile(r"S\.\s*\d+\s*-\s*P\s*\d+(.*)$", re.IGNORECASE)
 
 
 def trailing_tokens_report(alarms_cls, sample=20):
-    """규칙 9·10 행 중 address 에 `S.n-Pm` 뒤로 다른 토큰(서비스 접미 등)이 남는 행의 모델별 건수와 표본 (설계 6.1 확인 필요 항목)."""
-    p = alarms_cls[alarms_cls["row_rule"].isin(["port", "port_noaddr"])]
-    if "address" not in p.columns or p.empty:
-        return {"total": 0, "by_model": {}, "samples": {}, "rows_checked": int(len(p))}
-    rest = p["address"].map(lambda v: (lambda m: m.group(1).strip() if m else "")(_TRAIL_RE.search(str(v))) if pd.notna(v) else "")
-    hit = p[rest != ""].assign(trailing=rest[rest != ""])
-    by = {str(st): int(len(g)) for st, g in hit.groupby("system_type")}
-    samples = {str(st): g[["ip_addr", "cid", "lid", "address", "trailing", "alarm_type"]].head(sample).to_dict("records") for st, g in hit.groupby("system_type")}
-    top = {str(st): g["trailing"].value_counts().head(5).to_dict() for st, g in hit.groupby("system_type")}
-    return {"total": int(len(hit)), "rows_checked": int(len(p)), "by_model": by, "top_tokens": top, "samples": samples}
+    """규칙 9s(service_port, `S.n-Pm` 뒤 서비스·터널 접미) 행의 모델별 건수·접미 유형별 건수·표본 (설계 6.1 개정 9). 규칙 9·10 행 중 비율 분모 포함."""
+    base = alarms_cls[alarms_cls["row_rule"].isin(["port", "port_noaddr", "service_port"])]
+    p = alarms_cls[alarms_cls["row_rule"] == "service_port"]
+    if p.empty:
+        return {"total": 0, "rows_checked": int(len(base)), "by_model": {}, "by_type": {}, "top_tokens": {}, "samples": {}}
+    tok = p["address"].map(lambda v: (lambda m: m.group(1).strip() if m else "")(_TRAIL_RE.search(str(v))))
+    hit = p.assign(trailing=tok)
+    return {"total": int(len(hit)), "rows_checked": int(len(base)), "by_model": {str(st): int(len(g)) for st, g in hit.groupby("system_type")},
+            "by_type": {str(t): int(n) for t, n in hit["suffix_type"].value_counts().items()},
+            "by_model_type": {str(st): {str(t): int(n) for t, n in g["suffix_type"].value_counts().items()} for st, g in hit.groupby("system_type")},
+            "top_tokens": {str(st): g["trailing"].value_counts().head(5).to_dict() for st, g in hit.groupby("system_type")},
+            "samples": {str(st): g[["ip_addr", "cid", "lid", "address", "trailing", "suffix_type", "alarm_type"]].head(sample).to_dict("records") for st, g in hit.groupby("system_type")}}
 
 
 def row_rule_report(alarms_cls, eth=None):
@@ -534,7 +599,7 @@ def row_rule_report(alarms_cls, eth=None):
         keys = set(zip(kt["ip_addr"], kt["cid"], kt["lid"]))
     a["_inperf"] = [(i, c, l) in keys for i, c, l in zip(a["ip_addr"], a["cid"], a["lid"])]
     inperf, samples = {}, {}
-    for rid in ("slot_addr", "unit_addr", "service_main", "main_lid_mismatch"):
+    for rid in ("slot_addr", "unit_addr", "service_main", "service_port", "main_lid_mismatch"):
         sub = a[a["row_rule"] == rid]
         inperf[rid] = {str(st): {"rows": int(len(g)), "with_perf_key": int(g["_inperf"].sum())} for st, g in sub.groupby("system_type")}
         samples[rid] = {str(st): g[["ip_addr", "cid", "lid", "address", "alarm_type", "_inperf"]].rename(columns={"_inperf": "perf_key_exists"})
@@ -554,8 +619,8 @@ def format_row_rule_report(rep):
     for st, row in rep["by_model_rule"].items():
         lines.append(f"  model {st}: " + " ".join(f"{rid}={row[rid]}" for rid in rep["rule_order"]))
     lines.append(f"  개정 1 규칙 대비 재분류 {rep['reclassified_vs_rev1']}건 {rep['reclassified_vs_rev1_by_model']}")
-    for rid in ("slot_addr", "unit_addr", "service_main", "main_lid_mismatch"):
+    for rid in ("slot_addr", "unit_addr", "service_main", "service_port", "main_lid_mismatch"):
         lines.append(f"  {rid} 중 성능 키 있음: {rep['with_perf_key'].get(rid, {})}")
     t = rep.get("trailing_tokens_after_port", {})
-    lines.append(f"  S.n-Pm 뒤에 토큰이 남는 address(규칙 9·10 행 {t.get('rows_checked', 0)} 중): {t.get('total', 0)}건 모델별 {t.get('by_model')} 상위 토큰 {t.get('top_tokens')}")
+    lines.append(f"  규칙 9s(service_port, S.n-Pm 뒤 접미; 규칙 9·9s·10 행 {t.get('rows_checked', 0)} 중): {t.get('total', 0)}건 유형별 {t.get('by_type')} 모델별 {t.get('by_model')}")
     return "\n".join(lines)

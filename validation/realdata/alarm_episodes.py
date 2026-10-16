@@ -37,6 +37,19 @@ def severity_label(v):
         return "기타-NA"
 
 
+SERVICE_GROUPS = ("service_main", "service_port_nonP", "service_port_P")
+
+
+def service_group(a):
+    """행 → service 포함 그룹: service_main / service_port_nonP / service_port_P((P) 접미 행은 따로 측정·판단, 설계 9s) / '' (해당 없음)."""
+    out = pd.Series("", index=a.index, dtype="object")
+    out[a["row_rule"] == "service_main"] = "service_main"
+    sp = a["row_rule"] == "service_port"
+    out[sp & (a["suffix_type"] == "tp_P")] = "service_port_P"
+    out[sp & (a["suffix_type"] != "tp_P")] = "service_port_nonP"
+    return out
+
+
 def prepare_alarms(alarms, names, target_map, d_end=None, offsets=None, service_include=False):
     """스냅샷 알람 → 키 정리, 시각 파싱, 행 분류(원 cid 기준), 알람 cid 오프셋 보정(포트·slot 행만, 설계 6.3), 알람명·타겟 유형 부착.
     d_end 이후에 발생한 행은 버린다. 이후 모든 계산은 보정된 `cid`(=cid_j)를 쓰고 원 값은 `cid_raw` 에 남는다."""
@@ -49,13 +62,16 @@ def prepare_alarms(alarms, names, target_map, d_end=None, offsets=None, service_
         a = a[a["occur_date"] < pd.Timestamp(d_end)]
     a = names.resolve_frame(a)
     a = target_map.classify_frame(a)
-    if service_include:                                    # 개정 8: 조건부 포함 — service_main 의 1차 단절 이름 알람을 포트 알람과 같은 키(cid_j, lid)로 승격
+    inc = service_include if isinstance(service_include, dict) else ({"service_main": True} if service_include else {})
+    if inc:                                                # 개정 8·9: 조건부 포함 — 측정을 통과한 service 그룹의 1차 단절 이름 알람을 포트와 같은 키(cid_j, lid)로 승격
         is_cut1 = pd.Series([any(t == "트래픽단절" and g == "1차" for t, g in zip(ts.split(";"), gs.split(";")))
                              for ts, gs in zip(a["target_types"], a["grades"])], index=a.index)
-        promote = (a["row_rule"] == "service_main") & is_cut1 & (a["cid_j"] > 0).fillna(False)
+        grp = service_group(a)
+        sel = is_cut1 & grp.isin([k for k, v in inc.items() if v])
+        promote = sel & (a["cid_j"] > 0).fillna(False)
         a.loc[promote, "cid"] = a.loc[promote, "cid_j"]
         a.loc[promote, "row_class"] = "port"
-        a.loc[(a["row_rule"] == "service_main") & is_cut1 & ~promote, "row_class"] = "bad_key"
+        a.loc[sel & ~promote, "row_class"] = "bad_key"
     a["severity"] = a["severity_type"].map(severity_label) if "severity_type" in a.columns else "기타-NA"
     return a.reset_index(drop=True)
 
@@ -70,7 +86,7 @@ def build_episodes(port_alarms, target_map, d_end, merge_min=FLICKER_MERGE_MIN, 
     """F1·F2·F3·F7. 같은 (ip, cid, lid, alarm_name) 의 발생을 시간순으로 놓고 다음 occur ≤ 병합 끝 + merge_min 이면 한 에피소드.
     F3: release 가 NULL 이거나 d_end 보다 늦으면 끝을 d_end 로 자르고 ongoing=True (추출 날짜에 결과가 좌우되지 않게 — 4.7)."""
     cols = ["ip_addr", "cid", "lid", "alarm_name", "system_type", "model", "name_status", "start", "end", "duration_min",
-            "ongoing", "n_alarms", "is_short", "target_grades", "cid_raw", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
+            "ongoing", "n_alarms", "is_short", "target_grades", "cid_raw", "rules", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
     if port_alarms.empty:
         return pd.DataFrame(columns=cols)
     d_end = pd.Timestamp(d_end)
@@ -90,12 +106,13 @@ def build_episodes(port_alarms, target_map, d_end, merge_min=FLICKER_MERGE_MIN, 
                 cur["ongoing"] = cur["ongoing"] or bool(r.ongoing)
                 cur["n_alarms"] += 1
                 cur["sev"].append(r.severity)
+                cur["rules"].add(getattr(r, "row_rule", ""))
                 continue
             if cur is not None:
                 out.append(cur)
             cur = {"ip_addr": ip, "cid": cid, "lid": lid, "alarm_name": name, "system_type": r.system_type, "model": r.model,
                    "name_status": r.name_status, "start": r.occur_date, "end": r.end_eff, "ongoing": bool(r.ongoing),
-                   "n_alarms": 1, "sev": [r.severity], "cid_raw": getattr(r, "cid_raw", r.cid)}
+                   "n_alarms": 1, "sev": [r.severity], "cid_raw": getattr(r, "cid_raw", r.cid), "rules": {getattr(r, "row_rule", "")}}
         out.append(cur)
     ep = pd.DataFrame(out)
     ep["duration_min"] = (ep["end"] - ep["start"]).dt.total_seconds() / 60
@@ -103,6 +120,7 @@ def build_episodes(port_alarms, target_map, d_end, merge_min=FLICKER_MERGE_MIN, 
     for lab in ("CRITICAL", "MAJOR", "MINOR"):
         ep[f"n_{lab}"] = ep["sev"].map(lambda s: sum(1 for x in s if x == lab))
     ep["n_other"] = ep["sev"].map(lambda s: sum(1 for x in s if x not in ("CRITICAL", "MAJOR", "MINOR")))
+    ep["rules"] = ep["rules"].map(lambda s: ";".join(sorted(x for x in s if x)))
     ep["target_grades"] = [";".join(f"{t}/{g}" for t, g in _targets_of(target_map, n, s))
                            for n, s in zip(ep["alarm_name"], ep["name_status"])]
     return ep.drop(columns=["sev"])[cols].sort_values(["ip_addr", "cid", "lid", "start"]).reset_index(drop=True)
@@ -111,7 +129,7 @@ def build_episodes(port_alarms, target_map, d_end, merge_min=FLICKER_MERGE_MIN, 
 def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
     """F4: 짧지 않은 에피소드를 (ip, cid, lid, 타겟 유형, 등급)별로 겹치거나 60분 이내면 한 타겟 이벤트로. t0 = 가장 이른 시작."""
     cols = ["ip_addr", "cid", "lid", "target_type", "grade", "t0", "end", "ongoing", "n_episodes", "alarm_names", "system_type",
-            "model", "cid_raw", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
+            "model", "cid_raw", "rules", "n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"]
     rows = []
     for r in episodes[~episodes["is_short"]].itertuples():
         for tg in filter(None, r.target_grades.split(";")):
@@ -119,7 +137,7 @@ def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
             if t in types:
                 rows.append({"ip_addr": r.ip_addr, "cid": r.cid, "lid": r.lid, "target_type": t, "grade": g, "start": r.start,
                              "end": r.end, "ongoing": r.ongoing, "alarm_name": r.alarm_name, "system_type": r.system_type,
-                             "model": r.model, "cid_raw": r.cid_raw, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR, "n_MINOR": r.n_MINOR,
+                             "model": r.model, "cid_raw": r.cid_raw, "rules": r.rules, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR, "n_MINOR": r.n_MINOR,
                              "n_other": r.n_other})
     if not rows:
         return pd.DataFrame(columns=cols)
@@ -134,6 +152,7 @@ def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
                 cur["ongoing"] = cur["ongoing"] or bool(r.ongoing)
                 cur["n_episodes"] += 1
                 cur["names"].add(r.alarm_name)
+                cur["rules"] = ";".join(sorted(set(filter(None, cur["rules"].split(";"))) | set(filter(None, r.rules.split(";")))))
                 for k in ("n_CRITICAL", "n_MAJOR", "n_MINOR", "n_other"):
                     cur[k] += getattr(r, k)
                 continue
@@ -141,7 +160,7 @@ def build_target_events(episodes, merge_min=EVENT_MERGE_MIN, types=JUDGE_TYPES):
                 out.append(cur)
             cur = {"ip_addr": r.ip_addr, "cid": r.cid, "lid": r.lid, "target_type": r.target_type, "grade": r.grade,
                    "t0": r.start, "end": r.end, "ongoing": bool(r.ongoing), "n_episodes": 1, "names": {r.alarm_name},
-                   "system_type": r.system_type, "model": r.model, "cid_raw": r.cid_raw, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR,
+                   "system_type": r.system_type, "model": r.model, "cid_raw": r.cid_raw, "rules": r.rules, "n_CRITICAL": r.n_CRITICAL, "n_MAJOR": r.n_MAJOR,
                    "n_MINOR": r.n_MINOR, "n_other": r.n_other}
         out.append(cur)
     ev = pd.DataFrame(out)
@@ -279,24 +298,7 @@ SERVICE_MIN_N, SERVICE_MIN_RATIO = 30, 0.5
 SERVICE_PRE_MIN_SLOTS = 12          # '직전 6시간 정상 수집' = [t−6h, t) 의 15분 슬롯 24개 중 12개 이상 (C3 성능 공백 기준과 같은 선)
 
 
-def measure_service_main(alarms, eth, target_map):
-    """service_main 행 중 1차 단절 이름 알람에 대해 lead 측정과 같은 방식: 보정 키(cid_j, lid)의 포트가 직전 6시간 정상 수집이던 알람에서
-    알람 직후 1시간 성능 행이 0개인 비율. n ≥ 30 이고 비율 ≥ 50% 이면 포함(include=True), 아니면 보조. 개발 구간 알람만 넘겨야 한다."""
-    from validation.realdata.report import PerfIndex
-    sm = alarms[alarms["row_rule"] == "service_main"]
-    rows = []
-    perf = PerfIndex(eth) if len(eth) else None
-    for r in sm.itertuples():
-        cut1 = any(t == "트래픽단절" and g == "1차" for t, g in zip(r.target_types.split(";"), r.grades.split(";")))
-        if not cut1 or perf is None or pd.isna(r.cid_j) or r.cid_j <= 0:
-            continue
-        key = (r.ip_addr, int(r.cid_j), int(r.lid))
-        if not perf.has(key):
-            continue
-        t = r.occur_date
-        if perf.count(key, t - pd.Timedelta(hours=6), t) < SERVICE_PRE_MIN_SLOTS:
-            continue
-        rows.append({"alarm_name": r.alarm_name, "post_zero": perf.count_closed(key, t + pd.Timedelta(seconds=1), t + pd.Timedelta(hours=1)) == 0})
+def _measure_rows(rows):
     n = len(rows)
     ratio = (sum(x["post_zero"] for x in rows) / n) if n else float("nan")
     by = {}
@@ -307,4 +309,38 @@ def measure_service_main(alarms, eth, target_map):
     include = bool(n >= SERVICE_MIN_N and ratio == ratio and ratio >= SERVICE_MIN_RATIO)
     return {"rule": f"n >= {SERVICE_MIN_N} and ratio >= {SERVICE_MIN_RATIO}", "n": n, "ratio": ratio, "include": include,
             "by_name": {k: {"n": v[0], "post_zero_ratio": v[1] / v[0]} for k, v in by.items()},
-            "service_main_rows": int(len(sm)), "decision": "포함(판정 정답, 포트 알람과 같은 키)" if include else "보조(참고 열, 판정 제외)"}
+            "decision": "포함(판정 정답, 포트 알람과 같은 키)" if include else "보조(참고 열, 판정 제외)"}
+
+
+def measure_service_main(alarms, eth, target_map):
+    """service 행(7s service_main, 9s service_port)의 1차 단절 이름 알람에 대해 lead 측정과 같은 방식(보정 키 포트가 직전 6시간 정상 수집이던 알람에서
+    알람 직후 1시간 성능 행이 0개인 비율)으로 그룹별 측정·판단한다 (설계 8.7, 사전 고정). 그룹: service_main / service_port_nonP / service_port_P((P) 접미 따로).
+    n ≥ 30 이고 비율 ≥ 50% 이면 그 그룹 포함, 아니면 보조. 개발 구간 알람만 넘겨야 한다. 최상위 n·ratio·include 는 service_main 그룹(이전 호환),
+    9s 전체와 접미 유형별(PW·tp_W·tp_P·other) 측정은 참고(`service_port_all`·`by_suffix`)."""
+    from validation.realdata.report import PerfIndex
+    perf = PerfIndex(eth) if len(eth) else None
+    sv = alarms[alarms["row_rule"].isin(["service_main", "service_port"])]
+    grp = service_group(sv) if len(sv) else pd.Series([], dtype=object)
+    by_group = {g: [] for g in SERVICE_GROUPS}
+    by_suffix = {}
+    for r, g in zip(sv.itertuples(), grp):
+        cut1 = any(t == "트래픽단절" and gr == "1차" for t, gr in zip(r.target_types.split(";"), r.grades.split(";")))
+        if not cut1 or perf is None or pd.isna(r.cid_j) or r.cid_j <= 0:
+            continue
+        key = (r.ip_addr, int(r.cid_j), int(r.lid))
+        if not perf.has(key):
+            continue
+        t = r.occur_date
+        if perf.count(key, t - pd.Timedelta(hours=6), t) < SERVICE_PRE_MIN_SLOTS:
+            continue
+        row = {"alarm_name": r.alarm_name, "post_zero": perf.count_closed(key, t + pd.Timedelta(seconds=1), t + pd.Timedelta(hours=1)) == 0}
+        by_group[g].append(row)
+        if r.row_rule == "service_port":
+            by_suffix.setdefault(r.suffix_type, []).append(row)
+    groups = {g: _measure_rows(rows) for g, rows in by_group.items()}
+    allp = by_group["service_port_nonP"] + by_group["service_port_P"]
+    out = {**groups["service_main"], "service_main_rows": int((sv["row_rule"] == "service_main").sum()),
+           "service_port_rows": int((sv["row_rule"] == "service_port").sum()), "groups": groups,
+           "service_port_all": _measure_rows(allp), "by_suffix": {k: _measure_rows(v) for k, v in by_suffix.items()}}
+    out["include_map"] = {g: bool(v["include"]) for g, v in groups.items()}
+    return out

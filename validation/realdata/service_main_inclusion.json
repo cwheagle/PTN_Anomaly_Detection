@@ -4,11 +4,52 @@
  "ratio": NaN,
  "include": false,
  "by_name": {},
- "service_main_rows": 0,
  "decision": "보조(참고 열, 판정 제외)",
+ "service_main_rows": 0,
+ "service_port_rows": 0,
+ "groups": {
+  "service_main": {
+   "rule": "n >= 30 and ratio >= 0.5",
+   "n": 0,
+   "ratio": NaN,
+   "include": false,
+   "by_name": {},
+   "decision": "보조(참고 열, 판정 제외)"
+  },
+  "service_port_nonP": {
+   "rule": "n >= 30 and ratio >= 0.5",
+   "n": 0,
+   "ratio": NaN,
+   "include": false,
+   "by_name": {},
+   "decision": "보조(참고 열, 판정 제외)"
+  },
+  "service_port_P": {
+   "rule": "n >= 30 and ratio >= 0.5",
+   "n": 0,
+   "ratio": NaN,
+   "include": false,
+   "by_name": {},
+   "decision": "보조(참고 열, 판정 제외)"
+  }
+ },
+ "service_port_all": {
+  "rule": "n >= 30 and ratio >= 0.5",
+  "n": 0,
+  "ratio": NaN,
+  "include": false,
+  "by_name": {},
+  "decision": "보조(참고 열, 판정 제외)"
+ },
+ "by_suffix": {},
+ "include_map": {
+  "service_main": false,
+  "service_port_nonP": false,
+  "service_port_P": false
+ },
  "range": [
   "2026-07-10 00:00:00",
   "2026-08-07 00:00:00"
  ],
- "measured_at": "2026-10-16 15:31:27.422653"
+ "measured_at": "2026-10-16 15:51:39.643198"
 }
