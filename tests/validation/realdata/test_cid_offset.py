@@ -97,7 +97,7 @@ def test_offset_table_is_part_of_config_hash_and_changing_it_blocks_judge(run, t
     assert lock["config_parts"]["alarm_cid_offsets"]["default_k"] == 1 and lock["config_parts"]["alarm_cid_offsets"]["criteria"] == [30, 0.8, 0.2, 0.8, 0.9]
     off = tmp_path / "off.csv"
     off.write_text("system_type,k,n_alarms,j4_at_k,j4_at_1,basis\n31,2,50,0.9,0.1,exception\n", encoding="utf-8")
-    c2 = cmds.Context(str(run["rd"]), run["runs"], names_path=run["names"], offset_csv=str(off))
+    c2 = cmds.Context(str(run["rd"]), run["runs"], names_path=run["names"], offset_csv=str(off), service_json=str(tmp_path / "svc.json"))
     with pytest.raises(pr.PeriodError, match="설정 해시"):
         cmds.cmd_report(c2, "judge", "judge", detector=FakeDetector())
     with pytest.raises(pr.PeriodError, match="잠금 뒤에는 오프셋 표"):
@@ -106,7 +106,7 @@ def test_offset_table_is_part_of_config_hash_and_changing_it_blocks_judge(run, t
 
 def test_write_offsets_before_lock_updates_context_keys(run, tmp_path):
     off = tmp_path / "off.csv"
-    c = cmds.Context(str(run["rd"]), run["runs"], names_path=run["names"], offset_csv=str(off))
+    c = cmds.Context(str(run["rd"]), run["runs"], names_path=run["names"], offset_csv=str(off), service_json=str(tmp_path / "svc.json"))
     res = cmds.cmd_join_check(c, "dev", write_offsets=True)
     assert res["offset_table_written"] and os.path.exists(off) and list(pd.read_csv(off).columns) == pj.OFFSET_COLUMNS
     assert c.offsets == {} and c.alarms["cid"].iloc[0] == c.alarms["cid_raw"].iloc[0] - 1                              # 포트 알람 < 30 → 표 비어 있음, 기본 k=1 보정

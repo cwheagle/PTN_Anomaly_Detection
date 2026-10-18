@@ -1,55 +1,136 @@
 {
  "rule": "n >= 30 and ratio >= 0.5",
- "n": 0,
- "ratio": NaN,
- "include": false,
- "by_name": {},
- "decision": "보조(참고 열, 판정 제외)",
- "service_main_rows": 0,
- "service_port_rows": 0,
+ "n": 203,
+ "ratio": 0.6354679802955665,
+ "include": true,
+ "by_name": {
+  "PW-LOC": {
+   "n": 169,
+   "post_zero_ratio": 0.6331360946745562
+  },
+  "LSP-LOC": {
+   "n": 34,
+   "post_zero_ratio": 0.6470588235294118
+  }
+ },
+ "decision": "포함(판정 정답, 포트 알람과 같은 키)",
+ "service_main_rows": 303,
+ "service_port_rows": 799,
  "groups": {
   "service_main": {
    "rule": "n >= 30 and ratio >= 0.5",
-   "n": 0,
-   "ratio": NaN,
-   "include": false,
-   "by_name": {},
-   "decision": "보조(참고 열, 판정 제외)"
+   "n": 203,
+   "ratio": 0.6354679802955665,
+   "include": true,
+   "by_name": {
+    "PW-LOC": {
+     "n": 169,
+     "post_zero_ratio": 0.6331360946745562
+    },
+    "LSP-LOC": {
+     "n": 34,
+     "post_zero_ratio": 0.6470588235294118
+    }
+   },
+   "decision": "포함(판정 정답, 포트 알람과 같은 키)"
   },
   "service_port_nonP": {
    "rule": "n >= 30 and ratio >= 0.5",
-   "n": 0,
-   "ratio": NaN,
-   "include": false,
-   "by_name": {},
-   "decision": "보조(참고 열, 판정 제외)"
+   "n": 247,
+   "ratio": 0.6437246963562753,
+   "include": true,
+   "by_name": {
+    "PW-LOC": {
+     "n": 229,
+     "post_zero_ratio": 0.6724890829694323
+    },
+    "LSP-LOC": {
+     "n": 18,
+     "post_zero_ratio": 0.2777777777777778
+    }
+   },
+   "decision": "포함(판정 정답, 포트 알람과 같은 키)"
   },
   "service_port_P": {
    "rule": "n >= 30 and ratio >= 0.5",
-   "n": 0,
-   "ratio": NaN,
-   "include": false,
-   "by_name": {},
-   "decision": "보조(참고 열, 판정 제외)"
+   "n": 95,
+   "ratio": 0.8526315789473684,
+   "include": true,
+   "by_name": {
+    "LSP-LOC": {
+     "n": 95,
+     "post_zero_ratio": 0.8526315789473684
+    }
+   },
+   "decision": "포함(판정 정답, 포트 알람과 같은 키)"
   }
  },
  "service_port_all": {
   "rule": "n >= 30 and ratio >= 0.5",
-  "n": 0,
-  "ratio": NaN,
-  "include": false,
-  "by_name": {},
-  "decision": "보조(참고 열, 판정 제외)"
+  "n": 342,
+  "ratio": 0.7017543859649122,
+  "include": true,
+  "by_name": {
+   "PW-LOC": {
+    "n": 229,
+    "post_zero_ratio": 0.6724890829694323
+   },
+   "LSP-LOC": {
+    "n": 113,
+    "post_zero_ratio": 0.7610619469026548
+   }
+  },
+  "decision": "포함(판정 정답, 포트 알람과 같은 키)"
  },
- "by_suffix": {},
+ "by_suffix": {
+  "PW": {
+   "rule": "n >= 30 and ratio >= 0.5",
+   "n": 229,
+   "ratio": 0.6724890829694323,
+   "include": true,
+   "by_name": {
+    "PW-LOC": {
+     "n": 229,
+     "post_zero_ratio": 0.6724890829694323
+    }
+   },
+   "decision": "포함(판정 정답, 포트 알람과 같은 키)"
+  },
+  "tp_W": {
+   "rule": "n >= 30 and ratio >= 0.5",
+   "n": 18,
+   "ratio": 0.2777777777777778,
+   "include": false,
+   "by_name": {
+    "LSP-LOC": {
+     "n": 18,
+     "post_zero_ratio": 0.2777777777777778
+    }
+   },
+   "decision": "보조(참고 열, 판정 제외)"
+  },
+  "tp_P": {
+   "rule": "n >= 30 and ratio >= 0.5",
+   "n": 95,
+   "ratio": 0.8526315789473684,
+   "include": true,
+   "by_name": {
+    "LSP-LOC": {
+     "n": 95,
+     "post_zero_ratio": 0.8526315789473684
+    }
+   },
+   "decision": "포함(판정 정답, 포트 알람과 같은 키)"
+  }
+ },
  "include_map": {
-  "service_main": false,
-  "service_port_nonP": false,
-  "service_port_P": false
+  "service_main": true,
+  "service_port_nonP": true,
+  "service_port_P": true
  },
  "range": [
   "2026-07-10 00:00:00",
-  "2026-08-07 00:00:00"
+  "2026-08-22 00:00:00"
  ],
- "measured_at": "2026-10-16 15:51:39.643198"
+ "measured_at": "2026-10-19 08:42:30.490210"
 }

@@ -80,6 +80,14 @@ def test_training_windows_are_fixed_by_data_days(snap):
         rt.training_window(snap, "other")
 
 
+def test_explore_window_rejected_when_it_passes_judge_start(snap):
+    snap.periods = {**snap.periods, "J0": snap.data_days[10]}          # J0 가 21번째 데이터일 이전이면 X > J0
+    with pytest.raises(rt.TrainFailure, match="J0"):
+        rt.training_window(snap, "explore")
+    snap.periods = {**snap.periods, "J0": snap.data_days[20] + pd.Timedelta(days=1)}   # X == J0 는 허용
+    assert rt.training_window(snap, "explore")[1] == snap.periods["J0"]
+
+
 # ---- 학습 (실제 Trainer, 축소 에폭) ---------------------------------------------------------------------------
 def test_train_judge_model_records_everything_and_leaves_operational_models_untouched(snap, small_cfg):
     from src.config import PATHS

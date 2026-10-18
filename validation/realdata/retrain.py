@@ -99,6 +99,8 @@ def training_window(ctx, kind):
         return p["S"], p["J0"], "judge"
     if kind == "explore":
         x = ctx.data_days[EXPLORE_TRAIN_DATA_DAYS - 1] + pd.Timedelta(days=1)
+        if x > pd.Timestamp(p["J0"]):                                  # 탐색 학습이 판정 구간(J0~)으로 넘어가면 거부
+            raise TrainFailure(f"탐색 학습 종료일 {x} > 판정 시작 J0 {p['J0']}: 거부")
         return p["S"], x, "explore"
     raise ValueError(f"kind 는 judge | explore: {kind}")
 
