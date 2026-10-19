@@ -55,3 +55,27 @@ def tiny_env(tiny_model_dir, tmp_path, monkeypatch):
     for ft in TRACKS:
         monkeypatch.setitem(PATHS, ft, {"model": str(dest / f"{ft}_ae.pth"), "scaler": str(dest / f"{ft}_scaler.joblib")})
     return dest
+
+
+_TRACKED_CONFIGS = ("validation/realdata/service_main_inclusion.json", "validation/realdata/alarm_cid_offset.csv")
+
+
+def _config_shas():
+    import hashlib
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = {}
+    for rel in _TRACKED_CONFIGS:
+        with open(os.path.join(root, rel), "rb") as f:
+            out[rel] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _tracked_config_files_untouched():
+    """pytest 가 설정 해시에 들어가는 추적 파일을 덮어쓰지 않았는지 세션 끝에서 확인 (테스트는 tmp 경로를 써야 함)."""
+    before = _config_shas()
+    yield
+    after = _config_shas()
+    changed = [k for k in before if before[k] != after[k]]
+    assert not changed, f"테스트가 추적 설정 파일을 변경함: {changed}"

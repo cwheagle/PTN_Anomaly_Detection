@@ -31,3 +31,34 @@ python validation/cli/evaluate_model.py --models-dir validation/runs/models_nois
 python validation/cli/compare_reports.py                      # 리포트 비교표
 python validation/cli/seed_db.py --days 3                     # E2E 시연용 데이터를 DB에 주입 (SIM_DB_NAME 으로 대상 지정)
 ```
+
+## real_data_check (P1-2 실데이터 검증 도구, U1·U2: `plan`, `extract`)
+설계서 `docs/design/p1_2_real_data_check.md`. 실DB 를 **읽기 전용**으로 조회해 로컬 스냅샷(`validation/runs/p1_2/<run_id>/`, git 제외)을 만든다. `src/config.py`·`.env` 는 읽지 않고 환경변수/CLI 인자로 접속한다.
+
+```bash
+export DB_HOST=... DB_NAME=... RDC_DB_USER=ptn_ro RDC_DB_PASS=...      # 비밀번호는 환경변수로만
+python validation/cli/real_data_check.py plan    --start 2026-10-05 --end 2026-10-12   # 행 추출 없음: 테이블·예상 행·경계·필터 분포·시간대·결과 테이블 충돌
+python validation/cli/real_data_check.py extract --start 2026-07-10 --end 2026-10-13 [--ports ports.csv] [--max-rows 2000000]
+```
+- **권한 검사는 fail closed**: `SHOW GRANTS` 에 SELECT/USAGE 외 권한(root 의 `ALL PRIVILEGES`, `WITH GRANT OPTION` 포함)이 있거나 판단 불가면 거부한다. 테스트망에서만 `--allow-write-account` 를 명령줄에 명시해 진행할 수 있다(환경변수로는 켜지지 않음, 매니페스트에 `privilege_check: override` 기록). 읽기 전용 세션(`SET SESSION TRANSACTION READ ONLY`)과 SELECT/SHOW 문장 가드는 플래그와 무관하게 유지된다.
+- 접속 환경변수: `DB_HOST`·`DB_PORT`·`DB_NAME`, 계정은 `RDC_DB_USER`/`RDC_DB_PASS` 가 없으면 **`DB_USER`/`DB_PASS` 로 폴백**한다(운영 설정 환경변수를 그대로 쓰는 셸이면 의도치 않게 그 계정이 쓰일 수 있으니 확인).
+- 문장 가드는 SELECT/SHOW 만 통과시키지만 `SELECT ... INTO OUTFILE/DUMPFILE` 은 막지 않는다. 이는 서버 권한(FILE)으로 막아야 하며, 그래서 읽기 전용 계정이 권장 경로다. 증분 추출은 구현하지 않는다(스냅샷은 추출 시점 상태로 고정).
+- **읽기 전용 계정 만들기(권장, 관리자 1회, MySQL 5.7)**:
+  ```sql
+  CREATE USER 'ptn_ro'@'<분석PC_IP>' IDENTIFIED BY '<충분히 긴 비밀번호>';   -- '%' 호스트 금지
+  GRANT SELECT ON `<EMS_DB>`.* TO 'ptn_ro'@'<분석PC_IP>';
+  SHOW GRANTS FOR 'ptn_ro'@'<분석PC_IP>';   -- GRANT USAGE ON *.* / GRANT SELECT ON `<EMS_DB>`.*
+  -- 삭제: DROP USER 'ptn_ro'@'<분석PC_IP>';
+  ```
+- `--schema sim`: 시뮬레이터 DB(`cowptn_test`) 용. 필터 컬럼(`time_type` 등)·알람 테이블이 없으면 생략하고 매니페스트에 남긴다(`real` 은 없으면 중단).
+- 시각이 테이블 시각 ±1.5시간 밖인 행(쓰레기 `occur_date`)은 분석에서 빼고 `quarantine/` 에 보관한다(설계서 4.3a). 종료 코드: 0 완료, 2 인자 오류, 3 권한 거부, 4 중단/불완전.
+
+### real_data_check 판정 실행 주의 (U6~U7, 설계 9.7.6)
+- **표식 phase**: `report --purpose judge` 는 해시 대조·모델/스케일러/정책 로드·출력 폴더 확인을 **표식 전에** 끝낸다(이 단계 실패는 그냥 다시 실행). 이후 표식 `locks/judge_*.run.json` 이 `claimed` → `computing`(판정 데이터가 처음 모델에 들어가기 직전) → `completed`(출력 파일 sha256 기록)로 진행한다.
+- `claimed` 에서 난 예외(Ctrl+C 포함)는 표식이 `…aborted_<n>.json` 으로 이름이 바뀌고 자동 재실행이 허용된다.
+- `computing` 에서 실패하면 자동 되돌림이 없다. `periods retry-judge --reason "<사유>" --reviewed-by <reviewer>` 로 **1회만** 재시도할 수 있고(잠금의 설정·모델·정책 해시가 그대로여야 하며, 실패 전후 코드 커밋·부분 출력 목록이 `…failed_1.json` 에 기록됨), 두 번째 실패면 이 잠금의 판정은 소진된다. `completed` 뒤에는 재실행하지 않는다.
+- `--reviewed-by` 는 비어 있지 않은 문자열인지만 검사한다(자기 확인이 가능한 한계): 수정 diff 가 판정 규칙·기준값·분류 규칙을 건드리지 않았는지는 도구가 아니라 reviewer 의 diff 검토가 보장한다. 도구가 강제하는 것은 잠금의 설정·모델·정책 해시 일치와 실패 전후 커밋·부분 출력 목록의 기록이다.
+- 최종 판정 보고(`report_judge_*.json`)의 `judge_history` 에 `aborted_<n>` 횟수·오류와 retry-judge 사유·검토자·실패 오류·전후 커밋이 들어간다.
+- 분석 장부·잠금은 기본 `validation/runs/p1_2/` 에 기록된다. `--runs-dir` 로 다른 폴더를 쓰면 장부가 갈라져 봉인이 약해지므로 도구가 경고한다.
+- 판정에서는 `--policy` 를 쓸 수 없고, 레지스트리 모델의 `trained_at`·정책·가중치(`model/scaler/meta` sha256)가 잠금 때와 같아야 한다. 테스트에서 `detector` 를 직접 주입하면 이 해시 검사는 생략된다(CLI 는 항상 레지스트리 경로).
+- 모든 분석은 `runs/p1_2/analysis_ledger.jsonl` 에 추가 기록되고, 판정 구간과 겹치는 기록이 있으면 `periods lock` 이 거부된다. 데이터일 < 28 이면 `--purpose explore` 만 허용된다.
