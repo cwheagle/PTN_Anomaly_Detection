@@ -133,7 +133,7 @@ def test_judge_rejects_changed_model_files_after_lock(run, monkeypatch, field):
     monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: dict(base))
     c = ctx_of(run)
     cmds.cmd_join_check(c, "dev")
-    cmds.cmd_lock(c)                                             # 잠금 시점의 해시 기록
+    cmds.cmd_lock(c, model_infos={"traffic": dict(base)})                                             # 잠금 시점의 해시 기록
     assert pr.load_lock(run["runs"], c.periods)["models"]["traffic"]["model_sha"] == "m1"
     monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: {**base, field: "changed"})          # 같은 버전 문자열인데 파일이 바뀜
     with pytest.raises(pr.PeriodError, match=field):

@@ -30,6 +30,10 @@ PERF_GAP_NOTE = ("단절 정답 알람은 개발 구간에서 '알람 직후 성
                  "(9.4·9.5 의 perf_gap, J3 의 '행 없음')는 부분적으로 같은 현상을 본다.")
 CIRCULAR_NOTE = ("CRC증가: EMS 임계와 규칙 임계가 같은 카운터일 수 있음 — ETH-ERR 의 발생 조건을 모르는 동안 C3 해석 보류 "
                  "(target_definition.md 5.3).")
+REV9_NOTE = ("개발 구간 사후 조정: 설계 개정 9 에서 J4 분모를 규칙 9·9s 로 바꾸는 등 판정 기준 일부를 개발 구간 결과(모델 9·21 J4 0.773/0.775 failed)를 본 뒤 수정했다. "
+             "판정 구간은 열지 않았고 J4 기준값 0.8 은 바꾸지 않았다.")
+EXPLORE_NOTE = ("설계 9.7.5a R5: 개발 기간 탐색 모델(explore_seed0, 학습 [S, X)·평가 [X, J0))의 결과는 도구 점검용이며 판정 모델·정책·설정 선택에 쓰지 않았다. "
+                "탐색 결과는 header.explore_reference 에 표기 전용으로 함께 적는다 (설정 해시에 들어가지 않음).")
 EXPOSURE_NOTE = ("판정 기간은 과거 데이터라 완전히 처음 보는 데이터가 아니다: 2026-10-16 lead 의 실DB 집계로 07-10~10-12 의 원 알람 월별 건수와 "
                  "상위 (system_type, alarm_type) 조합이 이미 알려졌고 사용자가 EMS 화면으로 그 기간 사건을 기억할 수 있다. 판정 이벤트·AI·베이스라인 "
                  "결과는 노출되지 않았다 (설계 9.7.2).")
@@ -304,7 +308,7 @@ def build_report(ctx_events, ctx_episodes, ctx_alarms_info, replay_result, eth, 
     hold = None if join_status == "verified" else f"join_status = {join_status} (6.3)"
     rep = {"header": {**header, "purpose": purpose, "join_status": join_status, "range": [start, end], "key_shift_diagnostic": shift,
                       "slots": replay_result["slots"], "baselines_use_optical": False,
-                      "fixed_notes": [KEY_CORRECTION_NOTE, PERF_GAP_NOTE, CIRCULAR_NOTE] + ([EXPOSURE_NOTE] if purpose == "judge" else [])},
+                      "fixed_notes": [KEY_CORRECTION_NOTE, PERF_GAP_NOTE, CIRCULAR_NOTE] + [REV9_NOTE] + ([EXPOSURE_NOTE, EXPLORE_NOTE] if purpose == "judge" else [])},
            "c1_raw": c1_raw(frames), "overlap": overlap(frames)}
     rep["c3"] = {}
     for tt in ("합계", "CRC증가", "트래픽단절"):

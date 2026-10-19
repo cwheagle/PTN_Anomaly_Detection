@@ -101,7 +101,7 @@ def build_parser():
     sp_.add_argument("--reason", help="retry-judge: 실패 사유")
     sp_.add_argument("--reviewed-by", help="retry-judge: 수정 diff 가 판정 규칙·기준값·분류 규칙을 건드리지 않았음을 확인한 reviewer")
     sp_.add_argument("--version", help="판정에 쓸 트래픽 모델 버전 (기본: 활성 버전)")
-    sp_.add_argument("--models-dir", help="lock: 재학습한 판정 모델 폴더 (validation/runs/p1_2/models/<run_id>)")
+    sp_.add_argument("--models-dir", help="lock: 재학습한 판정 모델 폴더 (필수, validation/runs/p1_2/models/<run_id>)")
 
     for name, hlp in (("replay", "AI·고정 임계치·롤링 규칙 오프라인 재생 (스냅샷 기반)"), ("report", "C1 원값·C3·C4b·탐지 지연·C6·겹침 보고")):
         sx = sub.add_parser(name, help=hlp)

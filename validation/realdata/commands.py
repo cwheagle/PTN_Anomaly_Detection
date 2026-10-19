@@ -255,6 +255,19 @@ def _file_sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest() if path and os.path.exists(path) else None
 
 
+def code_constants():
+    """판정 출력에 영향을 주는 코드 상수 (잠금 해시에 포함: 잠금 뒤 상수가 바뀌면 판정 거부). 값은 모듈 상수 참조 — 리터럴 복사 금지."""
+    from validation.realdata import replay as rp
+    return {"report": {"STEP": str(rpt.STEP), "C3_WINDOW": str(rpt.C3_WINDOW), "C3_MIN_EVENTS": rpt.C3_MIN_EVENTS, "C3_PERF_LOOKBACK": str(rpt.C3_PERF_LOOKBACK),
+                       "C3_PERF_MIN_RATIO": rpt.C3_PERF_MIN_RATIO, "DELAY_WINDOW": str(rpt.DELAY_WINDOW), "DELAY_PERF_WINDOW": str(rpt.DELAY_PERF_WINDOW),
+                       "DELAY_LIST_BELOW": rpt.DELAY_LIST_BELOW, "C6_MIN_NON_EVENT_DAYS": rpt.C6_MIN_NON_EVENT_DAYS, "C6_MIN_MEDIAN": rpt.C6_MIN_MEDIAN,
+                       "C6_BAND": list(rpt.C6_BAND), "C6_MAX_OUT_DAYS": rpt.C6_MAX_OUT_DAYS, "LEAD_BUCKETS": [list(b) for b in rpt.LEAD_BUCKETS]},
+            "replay": {"WARMUP_DAYS": rp.WARMUP_DAYS, "ROLLING_MIN_PERIODS": rp.ROLLING_MIN_PERIODS, "METHODS": list(rp.METHODS)},
+            "port_join": {"J1_MIN_RATIO": pj.J1_MIN_RATIO, "J3_MIN_MATCH": pj.J3_MIN_MATCH, "J3_MIN_GAP": pj.J3_MIN_GAP, "J3_MIN_EPISODES": pj.J3_MIN_EPISODES,
+                          "J3_MIN_MINUTES": pj.J3_MIN_MINUTES, "J3_MAX_HOURS": pj.J3_MAX_HOURS, "J3_SEED": pj.J3_SEED, "J4M_MAX_MISMATCH": pj.J4M_MAX_MISMATCH,
+                          "J4_RULES": list(pj.J4_RULES)}}
+
+
 def config_parts(ctx, join_status):
     """잠금 해시에 들어가는 설정 (매핑 CSV·작업 대용 목록·F1~F8·성능 공백 기준·격리 기준·조인 판정 결과·베이스라인 기본값)."""
     from validation.evaluation import baselines as bl
@@ -267,12 +280,30 @@ def config_parts(ctx, join_status):
                               "criteria": [pj.OFFSET_MIN_ALARMS, pj.OFFSET_MIN_J4, pj.OFFSET_MIN_GAIN, pj.J4_MIN, pj.J2_MIN]},
         "rules": {"F1": ae.FLICKER_MERGE_MIN, "F2": ae.MIN_EPISODE_MIN, "F4": ae.EVENT_MERGE_MIN, "F6": ae.WORK_WINDOW_MIN,
                   "F8": ae.HW_WINDOW_MIN, "judge": [list(ae.JUDGE_TYPES), ae.JUDGE_GRADE]},
-        "perf_gap": {"c3_lookback_h": 6, "c3_min_ratio": rpt.C3_PERF_MIN_RATIO, "delay_window_h": 1, "c3_min_events": rpt.C3_MIN_EVENTS},
+        "perf_gap": {"c3_lookback_h": rpt.C3_PERF_LOOKBACK / pd.Timedelta(hours=1), "c3_min_ratio": rpt.C3_PERF_MIN_RATIO,
+                     "delay_window_h": rpt.DELAY_PERF_WINDOW / pd.Timedelta(hours=1), "c3_min_events": rpt.C3_MIN_EVENTS},
+        "code_constants": code_constants(),
         "quarantine_margin": str(tb.QUARANTINE_MARGIN), "join_status": join_status,
         "baselines": {"fixed": {k: v.default for k, v in inspect.signature(bl.fixed_threshold).parameters.items() if v.default is not inspect.Parameter.empty},
                       "rolling": {k: v.default for k, v in inspect.signature(bl.rolling_rule).parameters.items() if v.default is not inspect.Parameter.empty}},
         "periods": {k: str(ctx.periods.get(k)) for k in ("S", "J0", "D")}, "alternative": ctx.periods.get("alternative"),
     }
+
+
+def _tool_version():
+    from validation.realdata.extract import tool_version
+    return tool_version()
+
+
+def _warn_tool_version(lock):
+    """잠금 때와 도구 커밋이 다르면 경고 (거부 아님: 해시 대상 설정·모델은 별도로 검사). 반환: 경고 문자열 또는 None."""
+    cur, was = _tool_version(), lock.get("tool_version")
+    if was is None or cur == was:
+        return None
+    import sys as _sys
+    msg = f"도구 커밋이 잠금 때와 다릅니다 (잠금 {was} → 현재 {cur}) — 판정 보고에 기록됩니다. 판정 규칙 변경이 없는지 확인하세요"
+    print(f"[경고] {msg}", file=_sys.stderr)
+    return msg
 
 
 def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_dir=None):
@@ -293,6 +324,8 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_
         raise pr.PeriodError(f"개발 기간 join-check 결과가 없습니다: {jpath} — 먼저 join-check 를 실행하세요 (9.7.3-3)")
     with open(jpath, encoding="utf-8") as f:
         join = json.load(f)
+    if not models_dir and model_infos is None:             # 운영 활성 모델이 판정 모델이 되는 경로 차단 (9.7.5a R6)
+        raise pr.PeriodError("periods lock 에는 --models-dir (재학습한 판정 모델 폴더)가 필요합니다 — 운영 활성 모델은 판정 모델로 잠글 수 없습니다 (9.7.5a)")
     if models_dir:                                         # 재학습한 판정 모델 폴더 (9.7.5a R6)
         from validation.realdata import retrain as rt
         info = rt.model_info_from_dir(models_dir)
@@ -319,7 +352,7 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_
                "policy_hash": pr.stable_hash(pol), "config_hash": pr.stable_hash(parts), "config_parts": parts,
                "join_status": join["join_status"], "ledger_missing": ledger_missing, "dev_event_rate_r": dev["r_per_data_day"], "r_needed_for_20": need,
                "c3_hold_expected": bool(dev["r_per_data_day"] < need), "exposure_note": rpt.EXPOSURE_NOTE,
-               "locked_at": str(pd.Timestamp.now())}
+               "locked_at": str(pd.Timestamp.now()), "tool_version": _tool_version()}
     path = pr.create_lock(ctx.runs_dir, ctx.periods, payload)
     return {"lock_path": path, **{k: payload[k] for k in ("J0", "D", "judge_data_days", "join_status", "dev_event_rate_r", "c3_hold_expected", "config_hash")}}
 
@@ -425,6 +458,7 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
     lock = pr.load_lock(ctx.runs_dir, ctx.periods)
     if lock is None:
         raise pr.PeriodError("잠금 파일이 없습니다 — periods lock 후에만 판정 실행 가능")
+    _warn_tool_version(lock)
     parts = config_parts(ctx, lock["join_status"])
     if pr.stable_hash(parts) != lock["config_hash"]:
         raise pr.PeriodError("현재 설정 해시가 잠금 때와 다릅니다 (매핑 CSV·작업 대용 목록·규칙 등이 바뀜) — 판정 거부 (9.7.6)")
@@ -460,6 +494,47 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
             if diff:
                 raise pr.PeriodError(f"판정 모델 {ft} {m['version']} 가 잠금 때와 다릅니다 ({', '.join(diff)}) — 모델/정책 동결 위반, 판정 거부 (P6)")
     return lock
+
+
+def service_inclusion_header(ctx):
+    """service 조건부 포함 측정(8.7)을 service_main_inclusion.json 에서 읽어 보고 헤더에 적는다: include_map, 그룹별 n/ratio, 그룹은 포함이지만 접미 유형 단독은 기준 미달인 경우 한정 문구."""
+    path = ctx.service_json
+    if not path or not os.path.exists(path):
+        return {"available": False, "include_map": dict(ctx.service_include), "limits": []}
+    d = json.load(open(path, encoding="utf-8"))
+    groups = {g: {"n": v.get("n"), "ratio": v.get("ratio"), "include": v.get("include")} for g, v in (d.get("groups") or {}).items()}
+    by_suffix = {k: {"n": v.get("n"), "ratio": v.get("ratio"), "include": v.get("include"), "alarm_names": sorted((v.get("by_name") or {}).keys())}
+                 for k, v in (d.get("by_suffix") or {}).items()}
+    limits = []
+    for suf, v in by_suffix.items():
+        grp = "service_port_P" if suf == "tp_P" else "service_port_nonP"                 # 6.1 규칙 9s: (P) 접미만 따로 측정, 나머지는 nonP 그룹
+        if ctx.service_include.get(grp) and v["include"] is False:
+            members = ", ".join(f"{k}(n={x['n']}, {x['ratio']:.1%})" for k, x in by_suffix.items() if (k == "tp_P") == (grp == "service_port_P"))
+            limits.append(f"{grp} 그룹은 [{members}] 를 묶어 include=true 로 판정에 포함됨. 그러나 접미 유형 {suf}({', '.join(v['alarm_names'])}) 는 단독으로 n={v['n']}, 비율 {v['ratio']:.1%} 로 기준"
+                          f"(n ≥ {ae.SERVICE_MIN_N}, ≥ {ae.SERVICE_MIN_RATIO:.0%}) 미달 — 그룹 단위 판단이라 판정 정답에 포함되며, 이 유형의 결과는 한정해서 읽는다")
+    return {"available": True, "file_sha": _file_sha(path), "range": d.get("range"), "include_map": dict(ctx.service_include), "groups": groups, "by_suffix": by_suffix,
+            "limits": limits}
+
+
+def explore_reference(ctx):
+    """R5: 탐색 모델(explore_seed0)의 개발 기간 결과를 판정 보고에 표기 전용으로 함께 적는다. 파일이 없으면 없다고 적는다. 설정 해시·판정 계산에는 쓰지 않는다."""
+    run = os.path.join(ctx.runs_dir, "models", "explore_seed0", "train_run.json")
+    out = {"used_for_selection": False, "note": rpt.EXPLORE_NOTE}
+    if not os.path.exists(run):
+        return {**out, "available": False}
+    tr = json.load(open(run, encoding="utf-8"))
+    ref = {**out, "available": True, "train_run": {"path": run, "sha256": _file_sha(run), "threshold": tr.get("threshold"), "final_val_loss": tr.get("final_val_loss"),
+                                                    "training_window": tr.get("training_window")}}
+    end = (tr.get("training_window") or {}).get("end")
+    if end:
+        rpath = os.path.join(ctx.out_dir, f"report_dev_{pd.Timestamp(end):%Y-%m-%d}_{pd.Timestamp(ctx.periods['J0']):%Y-%m-%d}.json")
+        if os.path.exists(rpath):
+            r = json.load(open(rpath, encoding="utf-8"))
+            ref["dev_report"] = {"path": rpath, "sha256": _file_sha(rpath), "range": (r.get("header") or {}).get("range"),
+                                 "c1_raw": {m: {"incidents": v.get("incidents"), "port_days": v.get("port_days"), "incidents_per_port_day": v.get("incidents_per_port_day")}
+                                            for m, v in (r.get("c1_raw") or {}).items()},
+                                 "c3_total": {k: (r.get("c3") or {}).get("합계", {}).get(k) for k in ("hold", "events_total", "included", "hold_reasons")}}
+    return ref
 
 
 def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, key_shift=0, models_dir=None):
@@ -499,13 +574,16 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
     mm = res.get("model_meta") or {}
     tw = mm.get("training_window") or {}
     in_sample = bool(tw.get("end") and pd.Timestamp(start) < pd.Timestamp(tw["end"]))
-    header = {"model_versions": res["versions"], "models_dir": mm.get("models_dir"), "model_role": mm.get("role"), "model_trained_at": mm.get("trained_at"),
+    header = {"service_inclusion": service_inclusion_header(ctx), "tool_version": _tool_version(), "tool_version_at_lock": (res.get("lock") or {}).get("tool_version"),
+              "model_versions": res["versions"], "models_dir": mm.get("models_dir"), "model_role": mm.get("role"), "model_trained_at": mm.get("trained_at"),
               "training_window": tw or None,
               "exploration": bool(purpose != "judge" and (in_sample or mm.get("role") == "explore")),
               "in_sample": in_sample, "privilege_check": ctx.manifest.get("privilege_check"),
               "snapshot_complete": ctx.manifest.get("complete"), "periods": {k: str(ctx.periods.get(k)) for k in ("S", "J0", "D")}}
     # 설계 9.5(개정 4): 절단 경계 E = 분석 기간의 끝(개발=J0, 판정=D, START..END 이면 END). 개발 실행에 D 를 넘기면 J0 직전 이벤트가 미탐으로 잘못 센다.
     # 태깅·J0 이후 정보 노출 축소(9.7.2): 분석 끝 이전에 시작한 에피소드만, 끝은 분석 끝에서 자른 값을 쓴다.
+    if purpose == "judge":
+        header["explore_reference"] = explore_reference(ctx)
     ep_view = _clip_episodes(ctx.episodes[ctx.episodes["start"] < end], end)
     rep = rpt.build_report(events, ep_view, info, res, ctx.eth, end, ctx.data_days, join_status, purpose,
                            header, key_shift, net_days)

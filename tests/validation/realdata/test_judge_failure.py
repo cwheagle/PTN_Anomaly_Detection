@@ -47,7 +47,7 @@ def test_model_load_failure_happens_before_marker_and_ledger(run, monkeypatch):
     monkeypatch.setattr(cmds, "model_info", lambda ft, v=None: dict(base))
     c = ctx_of(run)
     cmds.cmd_join_check(c, "dev")
-    cmds.cmd_lock(c)
+    cmds.cmd_lock(c, model_infos={"traffic": dict(base)})
     n_ledger = len(pr.read_ledger(run["runs"]))
 
     def bad_build(versions=None, policy=None, models_dir=None):
