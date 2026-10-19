@@ -306,6 +306,9 @@ def _warn_tool_version(lock):
     return msg
 
 
+_ALLOW_MODEL_INFOS_FOR_TESTS = False          # 테스트(conftest)만 True: cmd_lock(model_infos=...) 로 --models-dir 검사를 우회하는 경로
+
+
 def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_dir=None):
     """판정 기간 잠금 (9.7.3-4). 조건: 기간 계산 가능, 개발 기간 join-check 결과 존재, 판정 모델 학습 구간 검사 통과(9.7.5)."""
     if not ctx.periods.get("ok"):
@@ -324,10 +327,14 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_
         raise pr.PeriodError(f"개발 기간 join-check 결과가 없습니다: {jpath} — 먼저 join-check 를 실행하세요 (9.7.3-3)")
     with open(jpath, encoding="utf-8") as f:
         join = json.load(f)
+    if model_infos is not None and not _ALLOW_MODEL_INFOS_FOR_TESTS:
+        raise pr.PeriodError("model_infos 는 테스트 전용입니다 — 판정 모델은 --models-dir (재학습 폴더)로만 잠글 수 있습니다 (9.7.5a)")
     if not models_dir and model_infos is None:             # 운영 활성 모델이 판정 모델이 되는 경로 차단 (9.7.5a R6)
         raise pr.PeriodError("periods lock 에는 --models-dir (재학습한 판정 모델 폴더)가 필요합니다 — 운영 활성 모델은 판정 모델로 잠글 수 없습니다 (9.7.5a)")
     if models_dir:                                         # 재학습한 판정 모델 폴더 (9.7.5a R6)
         from validation.realdata import retrain as rt
+        if not os.path.exists(os.path.join(models_dir, "train_run.json")):
+            raise pr.PeriodError(f"train_run.json 이 없는 폴더입니다 (운영 models/ 등은 판정 모델이 될 수 없음, 9.7.5a): {models_dir}")
         info = rt.model_info_from_dir(models_dir)
         if info.get("role") != "judge" or info.get("train_status") != "completed":
             raise pr.PeriodError(f"판정 모델 폴더가 아닙니다 (role={info.get('role')}, status={info.get('train_status')}): {models_dir}")
@@ -352,7 +359,8 @@ def cmd_lock(ctx, version=None, join_status_path=None, model_infos=None, models_
                "policy_hash": pr.stable_hash(pol), "config_hash": pr.stable_hash(parts), "config_parts": parts,
                "join_status": join["join_status"], "ledger_missing": ledger_missing, "dev_event_rate_r": dev["r_per_data_day"], "r_needed_for_20": need,
                "c3_hold_expected": bool(dev["r_per_data_day"] < need), "exposure_note": rpt.EXPOSURE_NOTE,
-               "locked_at": str(pd.Timestamp.now()), "tool_version": _tool_version()}
+               "locked_at": str(pd.Timestamp.now()), "tool_version": _tool_version(),
+               "report_notes": rpt.locked_report_notes(), "explore_refs": explore_refs(ctx)}      # explore_refs 는 설정 해시(config_parts) 밖
     path = pr.create_lock(ctx.runs_dir, ctx.periods, payload)
     return {"lock_path": path, **{k: payload[k] for k in ("J0", "D", "judge_data_days", "join_status", "dev_event_rate_r", "c3_hold_expected", "config_hash")}}
 
@@ -459,6 +467,8 @@ def _verify_judge_preconditions(ctx, range_spec, start, end, versions, detector=
     if lock is None:
         raise pr.PeriodError("잠금 파일이 없습니다 — periods lock 후에만 판정 실행 가능")
     _warn_tool_version(lock)
+    if lock.get("report_notes") != rpt.locked_report_notes():
+        raise pr.PeriodError("판정 보고 고정 문구가 잠금 때와 다릅니다 — 판정 거부 (9.7.7)")
     parts = config_parts(ctx, lock["join_status"])
     if pr.stable_hash(parts) != lock["config_hash"]:
         raise pr.PeriodError("현재 설정 해시가 잠금 때와 다릅니다 (매핑 CSV·작업 대용 목록·규칙 등이 바뀜) — 판정 거부 (9.7.6)")
@@ -516,25 +526,41 @@ def service_inclusion_header(ctx):
             "limits": limits}
 
 
-def explore_reference(ctx):
-    """R5: 탐색 모델(explore_seed0)의 개발 기간 결과를 판정 보고에 표기 전용으로 함께 적는다. 파일이 없으면 없다고 적는다. 설정 해시·판정 계산에는 쓰지 않는다."""
+def explore_refs(ctx):
+    """R5 (9.7.7-3): 잠금 시 탐색 산출물(explore_seed0 의 train_run.json·개발 평가 보고)의 경로와 SHA-256. 출처 기록일 뿐 설정 해시에 넣지 않으며,
+    판정 실행은 이 파일들을 열지 않고 잠금에 기록된 문자열만 출력한다. 탐색 산출물이 없으면 None(= 탐색 미실행)."""
     run = os.path.join(ctx.runs_dir, "models", "explore_seed0", "train_run.json")
-    out = {"used_for_selection": False, "note": rpt.EXPLORE_NOTE}
     if not os.path.exists(run):
-        return {**out, "available": False}
+        return None
+    refs = [{"path": run, "sha256": _file_sha(run)}]
     tr = json.load(open(run, encoding="utf-8"))
-    ref = {**out, "available": True, "train_run": {"path": run, "sha256": _file_sha(run), "threshold": tr.get("threshold"), "final_val_loss": tr.get("final_val_loss"),
-                                                    "training_window": tr.get("training_window")}}
     end = (tr.get("training_window") or {}).get("end")
     if end:
-        rpath = os.path.join(ctx.out_dir, f"report_dev_{pd.Timestamp(end):%Y-%m-%d}_{pd.Timestamp(ctx.periods['J0']):%Y-%m-%d}.json")
-        if os.path.exists(rpath):
-            r = json.load(open(rpath, encoding="utf-8"))
-            ref["dev_report"] = {"path": rpath, "sha256": _file_sha(rpath), "range": (r.get("header") or {}).get("range"),
-                                 "c1_raw": {m: {"incidents": v.get("incidents"), "port_days": v.get("port_days"), "incidents_per_port_day": v.get("incidents_per_port_day")}
-                                            for m, v in (r.get("c1_raw") or {}).items()},
-                                 "c3_total": {k: (r.get("c3") or {}).get("합계", {}).get(k) for k in ("hold", "events_total", "included", "hold_reasons")}}
-    return ref
+        tag = f"{pd.Timestamp(end):%Y-%m-%d}_{pd.Timestamp(ctx.periods['J0']):%Y-%m-%d}"
+        for name in (f"report_dev_{tag}.json", f"replay_dev_{tag}.json"):
+            path = os.path.join(ctx.out_dir, name)
+            if os.path.exists(path):
+                refs.append({"path": path, "sha256": _file_sha(path)})
+    return refs
+
+
+def lsp_loc_event_counts(events, alarms, start, end):
+    """9.7.7-2: 판정 이벤트 중 LSP-LOC 가 들어간 것의 수(값 표시만, 판정 규칙 아님). 전체와 service_port_nonP 그룹(=(P) 접미가 아닌 9s 행) 알람이 겹치는 이벤트."""
+    ev = events[(events["t0"] >= start) & (events["t0"] < end) & events["is_judge"] & events["alarm_names"].fillna("").str.contains("LSP-LOC")]
+    out = {"lsp_loc_judge_events": int(len(ev)), "lsp_loc_service_port_nonP_judge_events": 0}
+    if not len(ev) or not len(alarms):
+        return out
+    nonp = alarms[(alarms["alarm_name"] == "LSP-LOC") & (alarms["row_rule"] == "service_port") & (alarms["suffix_type"] != "tp_P")]
+    if not len(nonp):
+        return out
+    grp = {k: g["occur_date"].to_numpy() for k, g in nonp.groupby(["ip_addr", "cid", "lid"])}
+    n = 0
+    for r in ev.itertuples():
+        t = grp.get((r.ip_addr, r.cid, r.lid))
+        if t is not None and ((t >= np.datetime64(r.t0)) & (t <= np.datetime64(r.end))).any():
+            n += 1
+    out["lsp_loc_service_port_nonP_judge_events"] = n
+    return out
 
 
 def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detector=None, key_shift=0, models_dir=None):
@@ -582,11 +608,14 @@ def cmd_report(ctx, range_spec, purpose="dev", versions=None, policy=None, detec
               "snapshot_complete": ctx.manifest.get("complete"), "periods": {k: str(ctx.periods.get(k)) for k in ("S", "J0", "D")}}
     # 설계 9.5(개정 4): 절단 경계 E = 분석 기간의 끝(개발=J0, 판정=D, START..END 이면 END). 개발 실행에 D 를 넘기면 J0 직전 이벤트가 미탐으로 잘못 센다.
     # 태깅·J0 이후 정보 노출 축소(9.7.2): 분석 끝 이전에 시작한 에피소드만, 끝은 분석 끝에서 자른 값을 쓴다.
-    if purpose == "judge":
-        header["explore_reference"] = explore_reference(ctx)
+    if purpose == "judge":                                                            # 잠금에 기록된 문자열만 출력 (탐색 파일은 열지 않음, 9.7.7-3)
+        header["explore_refs"] = res["lock"].get("explore_refs")
+        header["lsp_loc"] = lsp_loc_event_counts(events, a, start, end)
     ep_view = _clip_episodes(ctx.episodes[ctx.episodes["start"] < end], end)
     rep = rpt.build_report(events, ep_view, info, res, ctx.eth, end, ctx.data_days, join_status, purpose,
                            header, key_shift, net_days)
+    if purpose == "judge":
+        rep["header"]["fixed_notes"].append(rpt.EXPLORE_NOTE if res["lock"].get("explore_refs") else rpt.EXPLORE_NOT_RUN_NOTE)
     rep["join_in_range"] = {**jr, "offset_unverified": unver, "join_status_used": join_status}
     if purpose == "judge":                                                                 # 설계 9.7.6-3·4: 되돌림 횟수·오류, retry-judge 사유를 최종 판정 보고에 적는다
         rep["judge_history"] = pr.judge_history(ctx.runs_dir, ctx.periods)
