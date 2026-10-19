@@ -210,7 +210,7 @@
 
 ## 47. 타겟 평가 설계 전에 입력에 해당 알람이 있는지 분포부터 확인한다 (Check Input Distribution Before Designing the Evaluation)
 - **교훈:** P1-2 는 타겟을 '에러(CRC) 점진 증가'와 '트래픽 단절' 두 가지로 평가하도록 설계했지만, 테스트망 입력에는 CRC 계열 알람(ETH-ERR·CLI-FCS-SD 등)이 판정 구간을 포함한 전 기간에 0건이었다. 그래서 CRC 증가 타겟은 평가 불가가 되었고 C3·탐지 지연은 트래픽단절만 계산되었다. 0건의 원인(미발생인지 알람 이름표 매핑 누락인지)은 확인하지 못했다.
-  - *(출처 구분)* **실행 관찰(2026-10-19 judge 산출물, git 제외)**: 판정 이벤트 131건 전부 트래픽단절, CRC증가 0건. **코드로 검증되는 사실**: 알람명 → 타겟 유형 매핑은 `validation/realdata/alarm_names.py` 의 `DEFAULT_TARGET_MAP` 이 정의. 0건 원인은 **미확인**.
+  - *(출처 구분)* **실행 관찰(2026-10-19 judge 산출물, git 제외)**: 판정 이벤트 131건 전부 트래픽단절, CRC증가 0건. **코드로 검증되는 사실**: 알람명 → 타겟 유형 매핑 내용은 `alarm_target_map.csv`(target_map_v2)이며 `validation/realdata/alarm_names.py:18` 의 `DEFAULT_TARGET_MAP` 은 그 CSV 의 경로 상수. 0건 원인은 **미확인**.
 - **원칙:** 평가 기준·타겟을 고정하기 전에 입력의 타겟별 건수를 먼저 센다. 0건이면 그 타겟은 '평가 불가'로 미리 표기하고, 원인(미발생 대 매핑 누락)은 판정 구간을 열기 전에 확인한다.
 
 ## 48. 테스트가 추적 설정 파일을 덮어쓰면 설정 해시가 흔들린다 — 격리와 세션 검사로 막는다 (Tests Must Not Rewrite Tracked Config)
